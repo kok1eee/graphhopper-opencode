@@ -51,8 +51,8 @@ graphhopper-opencode/
 | `graphhopper_goal` | goal の start/pause/resume/complete/clear |
 | `graphhopper_status` | 現在 goal + フェーズ + router + verifier 表示 |
 | `graphhopper_phase` | フェーズ遷移（designing → implementing → polish → done） |
-| `graphhopper_router_check` | diffサイズを機械測定し advisor/polish に分岐（loop-driver.sh相当） |
-| `graphhopper_verifier_set` | polish の verifier fan-out 結果（clean/drift）を記録 |
+| `graphhopper_router_check` | diffサイズを機械測定し advisor(verifier×1)/polish(verifier×3) に分岐（loop-driver.sh相当） |
+| `graphhopper_verifier_set` | verifier結果（clean/drift）を記録。lensが空だとエラーになる（self-graded完了防止の機械ゲート） |
 | `graphhopper_discover_start` / `_tick` / `_clear` | loop-until-dry 探索（round cap/dedupeをtool側で強制） |
 
 ## 提供する subagent
@@ -73,8 +73,12 @@ router gate（diffサイズ）とstuck escalation（詰まった回数）は独�
 
 | 軸 | トリガー | 呼ばれるagent | 目的 |
 |---|---|---|---|
-| router gate | `graphhopper_router_check` がdiff行数を機械測定 | `graphhopper-verifier` ×3 fan-out | done-gate前のdrift検証 |
+| router gate | `graphhopper_router_check` がdiff行数を機械測定 | `graphhopper-verifier` ×1(advisor,general charter)/×3(polish fan-out) | done-gate前のdrift検証 |
 | stuck escalation | `graphhopper_attempt` の連続失敗が`stuck_threshold`（既定3）到達 | `graphhopper-oracle` ×1 | implementing中の手詰まり打開 |
+
+router gate側は**advisorでも第三者チェックそのものは省略できない**（`graphhopper_verifier_set`が
+lens空を拒否するため、diffサイズに関わらず最低1回のverifier呼び出しが機械的に必須。self-graded
+完了を防ぐ）。fan-out数（1 or 3）だけがdiffサイズで変わる。
 
 いずれも「無条件で毎回opusを呼ぶ」のではなく、コード側で機械測定・機械カウントした
 タイミングでだけ上位モデルのコストを払う設計。

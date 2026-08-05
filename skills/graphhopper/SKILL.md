@@ -12,7 +12,7 @@ graphhopper本体（Claude Code版）の3相グラフをopencodeに移植した�
 ## フェーズ
 
 ```
-designing → implementing → (router_check) → polish [advisor/verifier fan-out] → done
+designing → implementing → (router_check) → polish [verifier ×1(advisor) / ×3(polish fan-out)] → done
                 ↑______________________________________|
                     drift target=implementing の巻き戻し
 ```
@@ -39,10 +39,14 @@ designing → implementing → (router_check) → polish [advisor/verifier fan-o
 
 ### polish
 
-`graphhopper_router_check` の `route` に従う:
+`graphhopper_router_check` の `route` に従う。**いずれのrouteでも `graphhopper-verifier` への
+第三者チェックは省略できない**（`graphhopper_verifier_set` はlensが空だとエラーを返す機械ゲートがある。
+自己レビューだけでのclean記録は不可能）:
 
-- **route=advisor**（小diff）: 自分でdiffをレビューし、問題なければ
-  `graphhopper_verifier_set(level: "clean", reason: ...)` で記録
+- **route=advisor**（小diff）: `task(subagent_type: "graphhopper-verifier")` を**1回だけ**、
+  `general`charterで呼ぶ。「実装がdesign.mdの意図から外れていないか・テストが実際のユーザーパスを
+  検証しているか・変更がgoalに収束しているか、3観点をまとめてレビューせよ」と渡す。
+  結果を `graphhopper_verifier_set(level: ..., reason: ..., lens: ["general"])` で記録
 - **route=polish**（大diff・閾値超）: adversarial verifier fan-out を行う
   1. `task(subagent_type: "graphhopper-verifier")` を3回呼ぶ。それぞれ以下のcharterをプロンプトに含める:
      - requirement: 「実装がdesign.mdの意図から外れていないか（実装漏れ・解釈ズレ・スコープ逸脱）を検証せよ」
@@ -62,6 +66,7 @@ designing → implementing → (router_check) → polish [advisor/verifier fan-o
 
 - **designing中に無理にEdit/Writeしようとしてエラーになったら**: 設計が先という合図。design.md を先に書いてから implementing へ遷移する
 - **route=polishなのに「念のため」でverifier fan-outを省略しない**: router_checkの判定はコード側の機械測定。無条件発火だったcouncilの再発防止はここで担保されている
+- **route=advisorだからverifier呼び出し自体を省略しない**: 「小diffだから自分で見れば十分」は禁止。`graphhopper_verifier_set`はlensが空だと機械的にエラーを返す（self-graded完了防止のゲート）ので、必ず`task(graphhopper-verifier, charter: 'general')`を1回呼んでから記録する
 - **verifier fan-outへの指示を「重大な問題だけ報告」にしない**: 全件報告→confidence/severityで後段フィルタが正しい順序（保守的な指示は再現率を落とす）
 - **`graphhopper_attempt`を省略しない**: 呼ばなければfail_streakが0のまま止まり、詰まっていても oracle への相談が起動しない。実装試行のたびに毎回呼ぶ
 - **escalate: trueが出たのに自力でもう一度だけ試そうとしない**: 閾値はコード側の機械カウント。無視して回すと同じ失敗を繰り返すだけになりがちなので、必ずoracleに相談してから再試行する

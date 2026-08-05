@@ -270,7 +270,7 @@ export const Graphhopper: Plugin = async ({ client, $, directory }) => {
        * ============================================================ */
       graphhopper_router_check: tool({
         description:
-          "diffサイズを機械測定してrouteを決める。route=advisor（小diff・自己レビューで足りる）/ route=polish（大diff・verifier fan-outが必要）。implementing完了時、polishフェーズに入る前に呼ぶ",
+          "diffサイズを機械測定してrouteを決める。route=advisor（小diff・graphhopper-verifierを1回だけ呼ぶ）/ route=polish（大diff・3charterでverifier fan-out）。implementing完了時、polishフェーズに入る前に呼ぶ。self-graded完了防止のため、advisorでも第三者チェック（verifier呼び出し）は省略できない",
         args: {},
         async execute() {
           const active = state.getActive(root);
@@ -288,14 +288,14 @@ export const Graphhopper: Plugin = async ({ client, $, directory }) => {
             `route: ${route}`,
             route === "polish"
               ? "次: task(subagent_type: 'graphhopper-verifier') をrequirement/behavior/progressの3charterで呼び、graphhopper_verifier_setで記録する"
-              : "次: 自分でdiffをレビューし、問題なければ graphhopper_verifier_set(level: 'clean') で記録して done へ",
+              : "次: task(subagent_type: 'graphhopper-verifier') を1回、'general'charter（3観点を統合したレビュー）で呼び、graphhopper_verifier_set(lens: ['general'])で記録する（自己レビューだけでの完了は不可）",
           ].join("\n");
         },
       }),
 
       graphhopper_verifier_set: tool({
         description:
-          "polishフェーズのverifier fan-out結果（clean/drift）を記録する。drift かつ target=implementing なら implementing に巻き戻し可能。target=design/requirementsは人間のhand-back待ち",
+          "polish/advisorのverifier結果（clean/drift）を記録する。drift かつ target=implementing なら implementing に巻き戻し可能。target=design/requirementsは人間のhand-back待ち。self-graded完了防止のため、lensが1つも無い（=task(graphhopper-verifier)を一度も呼んでいない）場合はエラーになる",
         args: {
           level: tool.schema.enum(["clean", "drift"]),
           reason: tool.schema
@@ -306,18 +306,29 @@ export const Graphhopper: Plugin = async ({ client, $, directory }) => {
             .optional()
             .describe("drift時の巻き戻し先。clean時は不要"),
           lens: tool.schema
-            .array(tool.schema.enum(["requirement", "behavior", "progress"]))
-            .optional()
-            .describe("driftを採用したレンズ（cleanなら空配列で良い）"),
+            .array(
+              tool.schema.enum([
+                "requirement",
+                "behavior",
+                "progress",
+                "general",
+              ]),
+            )
+            .describe(
+              "実際にtask(graphhopper-verifier)を呼んで得たレンズ。route=advisorなら['general']1つで良いが、必ず1つ以上必要（第三者チェック無しのself-graded完了を防ぐため空配列は拒否される）",
+            ),
         },
         async execute(args) {
           if (args.level === "drift" && !args.target)
             return "error: drift には target が必要です";
+          if (!args.lens || args.lens.length === 0) {
+            return "error: lens が空です。graphhopper_verifier_set は task(subagent_type: 'graphhopper-verifier') を実際に呼んだ後にしか記録できません（self-graded完了を防ぐための機械的ゲート）。route=advisorでも最低1回、'general'charterで呼んでください。";
+          }
           const result = state.setVerifierVerdict(root, {
             level: args.level,
             reason: args.reason,
             target: args.target ?? null,
-            lens: args.lens ?? [],
+            lens: args.lens,
           });
           if (result.last_verifier?.level === "clean") {
             return "verifier verdict: clean\ngraphhopper_phase(phase: 'done') で完了に進める。";

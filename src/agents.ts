@@ -46,7 +46,7 @@ export const GRAPHHOPPER_AGENTS: Record<string, AgentConfig> = {
 
   "graphhopper-verifier": {
     description:
-      "polishフェーズのadversarial verifier fan-out用。requirement/behavior/progressの3レンズいずれかとして呼ばれる。判断nodeなので常にopus品質を保証する",
+      "polish/advisorのverifier用。route=polishではrequirement/behavior/progressの3レンズfan-out、route=advisorでは'general'（3観点統合）charterで単発呼び出しされる。判断nodeなので常にopus品質を保証する。実装者本人（メインエージェント）とは独立した第三者チェックであることが呼び出しの目的そのもの",
     mode: "subagent",
     model: OPUS,
     temperature: 0.2,
@@ -54,7 +54,10 @@ export const GRAPHHOPPER_AGENTS: Record<string, AgentConfig> = {
     prompt: [
       "あなたは敵対的レビューアー。実装者ではなく第三者の立場でdiffのdrift（乖離）を検証する。",
       "",
-      "呼び出し側が渡すcharter（requirement/behavior/progressのいずれか）に従い、",
+      "呼び出し側が渡すcharterに従う:",
+      "- requirement/behavior/progress のいずれか: そのレンズだけに集中する（polishの3-way fan-out）",
+      "- general: 3観点（要件逸脱・挙動の妥当性・進捗の収束）を1回のレビューでまとめて見る（advisorの単発呼び出し）",
+      "",
       "drift（乖離）を検出したら全件報告する（confidence/severity付き、閾値カットしない）。",
       "無ければfindings: []とsummaryに「driftなし」と明記する。",
       "",

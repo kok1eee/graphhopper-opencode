@@ -38,7 +38,8 @@ export interface Goal {
 export type VerdictLevel = "clean" | "drift";
 /** drift 巻き戻し先。implementing 以外は人間の hand-back 待ち（flywheelのmonitor相当） */
 export type DriftTarget = "implementing" | "design" | "requirements";
-export type VerifierLens = "requirement" | "behavior" | "progress";
+/** general: route=advisor の単発呼び出し（3レンズを1つにまとめた統合charter） */
+export type VerifierLens = "requirement" | "behavior" | "progress" | "general";
 
 export interface VerifierVerdict {
   level: VerdictLevel;
