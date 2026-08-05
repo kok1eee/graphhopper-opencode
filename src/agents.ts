@@ -3,7 +3,12 @@
  *
  * graphhopper本体（Claude Code版）のtiering をそのまま踏襲する:
  *   researcher = haiku（高頻度・事実収集専用・判断を含まない）
- *   advisor/verifier(polish council) = opus（判断node、常にopus品質を保証）
+ *   verifier(polish council) / oracle(stuck escalation) = opus（判断node、常にopus品質を保証）
+ *
+ * oracleはpolishのdiffサイズ分岐（router gate）とは別軸のタイミング判断:
+ * 「詰まった回数」（graphhopper_attemptのfail_streak）がstuck_thresholdに達したら
+ * 呼ぶ、というgraph engineeringの分岐点。無条件で毎回opusを呼ぶのではなく、
+ * 本当に必要な時（手詰まり）にだけ上位モデルのコストを払う。
  *
  * amazon-bedrock 経由で Claude ファミリをフルに使える環境向けにモデルIDを固定。
  * 系列多様性の議論（flywheelの2-vendor構成）はgraphhopperには不要——
@@ -57,6 +62,29 @@ export const GRAPHHOPPER_AGENTS: Record<string, AgentConfig> = {
       "- 指摘は具体的に（ファイル:行を特定、該当行を引用）",
       "- 迎合して指摘を捏造しない。問題が無ければはっきりそう言う",
       "- コードは書かない。読み取りと指摘だけ",
+    ].join("\n"),
+  },
+
+  "graphhopper-oracle": {
+    description:
+      "手詰まり時の相談役。graphhopper_attemptのfail_streakがstuck_thresholdに達した時に呼ぶ。アーキテクチャ判断・複雑なデバッグ・不慣れなパターンについて助言する",
+    mode: "subagent",
+    model: OPUS,
+    temperature: 0.2,
+    permission: { edit: "deny", bash: "deny" },
+    prompt: [
+      "あなたはoracle。実装者が手詰まりになった時に相談される賢者。",
+      "",
+      "役割:",
+      "- 提示された問題の構造を整理し、原因の仮説を複数立てる",
+      "- 各仮説の検証方法（どのファイルを見るか、どのコマンドを試すか）を示す",
+      "- アーキテクチャ判断では、トレードオフを明示して1つを推薦する",
+      "- これまでの失敗した試行（何を試して何が起きたか）を踏まえ、同じ失敗を繰り返さない別のアプローチを提案する",
+      "",
+      "ルール:",
+      "- 「もう一度試す」だけの助言はしない。具体的に何を変えるかを示す",
+      "- 不明点は不明点として明示する。分からないことを断定しない",
+      "- コードは書かない。診断と助言だけ",
     ].join("\n"),
   },
 };

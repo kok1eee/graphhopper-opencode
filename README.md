@@ -61,10 +61,23 @@ graphhopper-opencode/
 |---|---|---|
 | `graphhopper-researcher` | 事実収集・調査専用。高頻度なので最安モデル | `amazon-bedrock/anthropic.claude-haiku-4-5-20251001-v1:0` |
 | `graphhopper-verifier` | polishのadversarial verifier fan-out。判断node | `amazon-bedrock/anthropic.claude-opus-5` |
+| `graphhopper-oracle` | implementingで詰まった時（`graphhopper_attempt`のfail_streakがstuck_threshold到達）の相談役 | `amazon-bedrock/anthropic.claude-opus-5` |
 
 graphhopper本体のtiering（researcher=haiku, main=sonnet, advisor/verifier=opus）をそのまま踏襲。
 vendorは増やさない（judgment分散はレンズの違いで確保し、council再発防止の原則を守る）。
 `.graphhopper/config.json` の `agents.<name>` で上書き可能。
+
+### 2つの上位モデル起動軸
+
+router gate（diffサイズ）とstuck escalation（詰まった回数）は独立した分岐点:
+
+| 軸 | トリガー | 呼ばれるagent | 目的 |
+|---|---|---|---|
+| router gate | `graphhopper_router_check` がdiff行数を機械測定 | `graphhopper-verifier` ×3 fan-out | done-gate前のdrift検証 |
+| stuck escalation | `graphhopper_attempt` の連続失敗が`stuck_threshold`（既定3）到達 | `graphhopper-oracle` ×1 | implementing中の手詰まり打開 |
+
+いずれも「無条件で毎回opusを呼ぶ」のではなく、コード側で機械測定・機械カウントした
+タイミングでだけ上位モデルのコストを払う設計。
 
 ## state の場所
 

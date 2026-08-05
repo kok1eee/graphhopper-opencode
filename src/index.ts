@@ -42,7 +42,7 @@ const PHASE_ACTION: Record<state.Phase, string> = {
   designing:
     "goalを理解し、設計判断・実装タスク列を .graphhopper/plans/<goal-id>.md に書く。source編集はここではブロックされる。書けたら graphhopper_phase(phase: 'implementing') へ",
   implementing:
-    "design.md のタスクを1つずつ実装する。詰まったら task(subagent_type: 'graphhopper-researcher') で調査。全タスク実施したら graphhopper_router_check を呼ぶ",
+    "design.md のタスクを1つずつ実装する。実装試行のたびに graphhopper_attempt(ok, note) を呼んで結果を記録する。escalate=true が返ったら task(subagent_type: 'graphhopper-oracle') に相談してから再試行。全タスク実施したら graphhopper_router_check を呼ぶ",
   polish:
     "graphhopper_router_check の route に従う。route=advisor なら自己レビューで十分、route=polish なら task(subagent_type: 'graphhopper-verifier') を requirement/behavior/progress の3charterで呼び、結果を graphhopper_verifier_set で記録。level=clean で graphhopper_phase(phase: 'done') へ。level=drift かつ target=implementing なら implementing に戻る",
   done: "完了済み。graphhopper_goal(action: 'complete') を確認",
@@ -58,6 +58,7 @@ function continuationText(goal: state.Goal, s: state.LoopState): string {
     s.last_verifier
       ? `last_verifier: ${s.last_verifier.level} (${s.last_verifier.reason})`
       : null,
+    s.fail_streak > 0 ? `fail_streak: ${s.fail_streak}` : null,
     `次のアクション: ${PHASE_ACTION[s.phase]}`,
     "フェーズのexit条件を満たしたら graphhopper_phase で遷移する。",
     "ブロックしたら回らずに理由を述べて停止。完了したら graphhopper_goal(complete)。無駄な空転は禁止。",
@@ -203,6 +204,7 @@ export const Graphhopper: Plugin = async ({ client, $, directory }) => {
             a.state.last_verifier
               ? `last_verifier: level=${a.state.last_verifier.level} target=${a.state.last_verifier.target ?? "-"} lens=${a.state.last_verifier.lens.join(",") || "-"} reason=${a.state.last_verifier.reason}`
               : "last_verifier: (none)",
+            `fail_streak: ${a.state.fail_streak}`,
             a.state.notes ? `notes: ${a.state.notes}` : null,
             `updated: ${a.state.updated_at}`,
           ]
@@ -225,6 +227,41 @@ export const Graphhopper: Plugin = async ({ client, $, directory }) => {
           const a = state.setPhase(root, args.phase, args.notes);
           if (!a) return "error: no active goal or invalid phase";
           return `phase -> ${a.state.phase}\n次: ${PHASE_ACTION[a.state.phase]}`;
+        },
+      }),
+
+      /* ============================================================ *
+       * stuck escalation: diffサイズ（router gate）とは別軸のタイミング判断。
+       * 「詰まった回数」を機械カウントし、閾値超で上位モデル(oracle)を促す
+       * ============================================================ */
+      graphhopper_attempt: tool({
+        description:
+          "implementingでの実装試行の成否を記録する。連続失敗がstuck_threshold（既定3）に達したら escalate=true を返し、graphhopper-oracleへの相談を促す。okな試行やphase遷移でfail_streakはリセットされる",
+        args: {
+          ok: tool.schema
+            .boolean()
+            .describe(
+              "この試行は成功したか（テストが通った・目的の変更が完了した等）",
+            ),
+          note: tool.schema
+            .string()
+            .describe(
+              "何を試して何が起きたか（失敗時はoracleに渡る文脈になる）",
+            ),
+        },
+        async execute(args) {
+          const active = state.getActive(root);
+          if (!active) return "error: no active goal";
+          const r = state.recordAttempt(root, args.ok, args.note);
+          if (args.ok) return "attempt recorded: ok (fail_streak reset to 0)";
+          if (r.escalate) {
+            return [
+              `attempt recorded: fail (fail_streak=${r.fail_streak})`,
+              "escalate: true",
+              "次: task(subagent_type: 'graphhopper-oracle') に相談せよ。これまでの失敗試行（何を試して何が起きたか）を渡すこと。",
+            ].join("\n");
+          }
+          return `attempt recorded: fail (fail_streak=${r.fail_streak})\nescalate: false`;
         },
       }),
 

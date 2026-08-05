@@ -29,6 +29,12 @@ designing → implementing → (router_check) → polish [advisor/verifier fan-o
 
 - design.md のタスクを1つずつ実装する
 - 詰まったら `task(subagent_type: "graphhopper-researcher")` で並列調査
+- **実装試行のたびに `graphhopper_attempt(ok, note)` を呼ぶ**（成否をコード側で機械カウントする）
+  - `ok: false` が続き `fail_streak` が `stuck_threshold`（既定3）に達すると `escalate: true` が返る
+  - `escalate: true` が返ったら `task(subagent_type: "graphhopper-oracle")` に相談する。これまでの
+    失敗試行（何を試して何が起きたか）を渡し、助言を受けて別のアプローチで再試行する
+  - **これはrouter gate（diffサイズ）とは別軸のタイミング判断**——無条件で毎回opusを呼ぶのではなく、
+    本当に詰まった時だけ上位モデルのコストを払う graph engineering の分岐点
 - 全タスク実施したら `graphhopper_router_check` を呼ぶ（diffサイズを機械測定してrouteを決める）
 
 ### polish
@@ -57,3 +63,5 @@ designing → implementing → (router_check) → polish [advisor/verifier fan-o
 - **designing中に無理にEdit/Writeしようとしてエラーになったら**: 設計が先という合図。design.md を先に書いてから implementing へ遷移する
 - **route=polishなのに「念のため」でverifier fan-outを省略しない**: router_checkの判定はコード側の機械測定。無条件発火だったcouncilの再発防止はここで担保されている
 - **verifier fan-outへの指示を「重大な問題だけ報告」にしない**: 全件報告→confidence/severityで後段フィルタが正しい順序（保守的な指示は再現率を落とす）
+- **`graphhopper_attempt`を省略しない**: 呼ばなければfail_streakが0のまま止まり、詰まっていても oracle への相談が起動しない。実装試行のたびに毎回呼ぶ
+- **escalate: trueが出たのに自力でもう一度だけ試そうとしない**: 閾値はコード側の機械カウント。無視して回すと同じ失敗を繰り返すだけになりがちなので、必ずoracleに相談してから再試行する

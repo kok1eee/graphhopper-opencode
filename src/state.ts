@@ -68,6 +68,12 @@ export interface LoopState {
   router: RouterState;
   /** polish フェーズの verifier fan-out 結果。null = 未実行 */
   last_verifier: VerifierVerdict | null;
+  /**
+   * implementing での連続失敗数（graphhopper_attempt が機械カウント）。
+   * stuck_threshold に達したら graphhopper-oracle への相談を促す。
+   * ok な attempt か phase 遷移でリセットされる。
+   */
+  fail_streak: number;
   updated_at: string;
 }
 
@@ -83,12 +89,15 @@ export interface GraphhopperConfig {
   design_gate_allow: string[];
   /** subagent 名で model を上書きする（例: { "graphhopper-verifier": "amazon-bedrock/anthropic.claude-opus-5" }） */
   agents: { [name: string]: string };
+  /** implementing の連続失敗数がこれに達したら graphhopper-oracle への相談を促す */
+  stuck_threshold: number;
 }
 
 export const DEFAULT_CONFIG: GraphhopperConfig = {
   router_threshold_lines: 400,
   design_gate_allow: [".graphhopper/plans/"],
   agents: {},
+  stuck_threshold: 3,
 };
 
 function dir(root: string): string {
@@ -134,7 +143,14 @@ export type HistoryEvent =
       target: DriftTarget | null;
       lens: VerifierLens[];
     }
-  | { type: "design_gate_block"; goal: string; tool: string; path: string };
+  | { type: "design_gate_block"; goal: string; tool: string; path: string }
+  | {
+      type: "attempt";
+      goal: string;
+      ok: boolean;
+      fail_streak: number;
+      note: string;
+    };
 
 /** append-only の履歴ログ。LLMの自己申告ではなくplugin機械記録の監査証跡 */
 export function recordEvent(root: string, event: HistoryEvent): void {
@@ -172,6 +188,7 @@ export function readConfig(root: string): GraphhopperConfig {
     design_gate_allow:
       raw.design_gate_allow ?? DEFAULT_CONFIG.design_gate_allow,
     agents: { ...(DEFAULT_CONFIG.agents ?? {}), ...(raw.agents ?? {}) },
+    stuck_threshold: raw.stuck_threshold ?? DEFAULT_CONFIG.stuck_threshold,
   };
 }
 
@@ -192,6 +209,7 @@ function emptyState(): LoopState {
       checked_at: null,
     },
     last_verifier: null,
+    fail_streak: 0,
     updated_at: new Date().toISOString(),
   };
 }
@@ -310,7 +328,8 @@ export function setPhase(
   if (!PHASES.includes(phase)) return null;
   const before = getActive(root);
   const r = mutateActive(root, () => ({
-    state: { phase, ...(notes !== undefined ? { notes } : {}) },
+    // phaseが変わるたびfail_streakをリセット（implementingに戻ってきた時も0から数え直す）
+    state: { phase, fail_streak: 0, ...(notes !== undefined ? { notes } : {}) },
   }));
   if (r && before && before.state.phase !== phase) {
     recordEvent(root, {
@@ -445,6 +464,40 @@ export function setVerifierVerdict(
     });
   }
   return next;
+}
+
+/* ================================================================== *
+ * stuck escalation: implementing での連続失敗を機械カウントし、
+ * stuck_threshold に達したら graphhopper-oracle への相談を促す。
+ * diffサイズ（router gate）とは別軸のタイミング判断——
+ * 「詰まった回数」で上位モデルを呼ぶ graph engineering のもう1つの分岐点。
+ * ================================================================== */
+
+export interface AttemptResult {
+  fail_streak: number;
+  escalate: boolean;
+}
+
+export function recordAttempt(
+  root: string,
+  ok: boolean,
+  note: string,
+): AttemptResult {
+  const state = readState(root);
+  const fail_streak = ok ? 0 : state.fail_streak + 1;
+  writeState(root, { ...state, fail_streak, notes: note || state.notes });
+  const cfg = readConfig(root);
+  const escalate = !ok && fail_streak >= cfg.stuck_threshold;
+  if (state.goal_id) {
+    recordEvent(root, {
+      type: "attempt",
+      goal: state.goal_id,
+      ok,
+      fail_streak,
+      note,
+    });
+  }
+  return { fail_streak, escalate };
 }
 
 /* ================================================================== *
