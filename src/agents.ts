@@ -2,35 +2,38 @@
  * graphhopper の専用 subagent 定義（config hook で注入）
  *
  * graphhopper本体（Claude Code版）のtiering をそのまま踏襲する:
- *   researcher = haiku（高頻度・事実収集専用・判断を含まない）
- *   verifier(polish council) / oracle(stuck escalation) = opus（判断node、常にopus品質を保証）
+ *   researcher = 最下層コスト・高速（高頻度・事実収集専用・判断を含まない）
+ *   verifier(polish council) / oracle(stuck escalation) = 上位品質（判断node、常に最高品質を保証）
  *
  * oracleはpolishのdiffサイズ分岐（router gate）とは別軸のタイミング判断:
  * 「詰まった回数」（graphhopper_attemptのfail_streak）がstuck_thresholdに達したら
- * 呼ぶ、というgraph engineeringの分岐点。無条件で毎回opusを呼ぶのではなく、
+ * 呼ぶ、というgraph engineeringの分岐点。無条件で毎回上位モデルを呼ぶのではなく、
  * 本当に必要な時（手詰まり）にだけ上位モデルのコストを払う。
  *
- * amazon-bedrock 経由で Claude ファミリをフルに使える環境向けにモデルIDを固定。
+ * 2026-08-06: モデル指定を公開リポジトリから除去し、プロジェクト単位の
+ * `.graphhopper/config.json` の `agents` で上書きする方針に変更。
+ * 既定（model 未指定）は opencode のセッションメインモデルを継承する。
+ * 以前は amazon-bedrock（Claude ファミリ）を既定にしていたが、bedrock の
+ * AWS_BEARER_TOKEN_BEDROCK が壊れて認証が通らず verifier 等が空応答を返すため、
+ * 公開リポジトリにモデル選択を持たせない運用にした。tier 思想（researcher=最下層
+ * / verifier・oracle=上位品質）はそのまま、具体モデルは各プロジェクトで選ぶ。
  * 系列多様性の議論（flywheelの2-vendor構成）はgraphhopperには不要——
- * 判断は「メイン(sonnet) + advisor/verifier(opus)」の2層で足りるという
- * graphhopper自体の設計原則（council再発防止）に合わせ、vendorを増やさない。
+ * 判断は「メイン + verifier」の2層で足りるというgraphhopper自体の設計原則
+ * （council再発防止）に合わせ、vendorを増やさない。
  *
  * 全て読み取り専用（edit/bash deny）。実装はメインループ側だけが行う。
  * ユーザーが opencode.json(c) に同名 agent を定義している場合はそちらを優先する。
+ * プロジェクト単位のモデル上書きは .graphhopper/config.json の agents で指定する。
  */
 import { readConfig } from "./state";
 import type { Config } from "@opencode-ai/plugin";
 import type { AgentConfig } from "@opencode-ai/sdk";
 
-const HAIKU = "amazon-bedrock/anthropic.claude-haiku-4-5-20251001-v1:0";
-const OPUS = "amazon-bedrock/anthropic.claude-opus-5";
-
 export const GRAPHHOPPER_AGENTS: Record<string, AgentConfig> = {
   "graphhopper-researcher": {
     description:
-      "コードベース探索と外部調査の統合エージェント。ファイル検索・構造把握・公式ドキュメント調査。高頻度に呼ばれるためコストティア最下層（haiku）固定",
+      "コードベース探索と外部調査の統合エージェント。ファイル検索・構造把握・公式ドキュメント調査。高頻度に呼ばれるためコストティア最下層で使う（モデルは .graphhopper/config.json の agents で設定）",
     mode: "subagent",
-    model: HAIKU,
     temperature: 0.1,
     permission: { edit: "deny", bash: "deny" },
     prompt: [
@@ -46,9 +49,8 @@ export const GRAPHHOPPER_AGENTS: Record<string, AgentConfig> = {
 
   "graphhopper-verifier": {
     description:
-      "polish/advisorのverifier用。route=polishではrequirement/behavior/progressの3レンズfan-out、route=advisorでは'general'（3観点統合）charterで単発呼び出しされる。判断nodeなので常にopus品質を保証する。実装者本人（メインエージェント）とは独立した第三者チェックであることが呼び出しの目的そのもの",
+      "polish/advisorのverifier用。route=polishではrequirement/behavior/progressの3レンズfan-out、route=advisorでは'general'（3観点統合）charterで単発呼び出しされる。判断nodeなので上位品質モデルで使う（モデルは .graphhopper/config.json の agents で設定）。実装者本人（メインエージェント）とは独立した第三者チェックであることが呼び出しの目的そのもの",
     mode: "subagent",
-    model: OPUS,
     temperature: 0.2,
     permission: { edit: "deny", bash: "deny" },
     prompt: [
@@ -70,9 +72,8 @@ export const GRAPHHOPPER_AGENTS: Record<string, AgentConfig> = {
 
   "graphhopper-oracle": {
     description:
-      "手詰まり時の相談役。graphhopper_attemptのfail_streakがstuck_thresholdに達した時に呼ぶ。アーキテクチャ判断・複雑なデバッグ・不慣れなパターンについて助言する",
+      "手詰まり時の相談役。graphhopper_attemptのfail_streakがstuck_thresholdに達した時に呼ぶ。アーキテクチャ判断・複雑なデバッグ・不慣れなパターンについて助言する（モデルは .graphhopper/config.json の agents で設定）",
     mode: "subagent",
-    model: OPUS,
     temperature: 0.2,
     permission: { edit: "deny", bash: "deny" },
     prompt: [
