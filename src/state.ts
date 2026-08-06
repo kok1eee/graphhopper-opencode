@@ -75,6 +75,13 @@ export interface LoopState {
    * ok な attempt か phase 遷移でリセットされる。
    */
   fail_streak: number;
+  /**
+   * implementing の合否を機械判定するコマンド（graphhopper本体のeval_cmd相当）。
+   * 設定されていれば session.idle 発火時に毎回実行し、exit codeで自動的に
+   * pass（polishへ遷移）/fail（fail_streakを機械カウント）を判定する。
+   * 未設定なら graphhopper_attempt の自己申告にフォールバックする。
+   */
+  eval_cmd: string | null;
   updated_at: string;
 }
 
@@ -151,7 +158,9 @@ export type HistoryEvent =
       ok: boolean;
       fail_streak: number;
       note: string;
-    };
+    }
+  | { type: "eval_set"; goal: string; cmd: string }
+  | { type: "eval_run"; goal: string; ok: boolean; fail_streak: number };
 
 /** append-only の履歴ログ。LLMの自己申告ではなくplugin機械記録の監査証跡 */
 export function recordEvent(root: string, event: HistoryEvent): void {
@@ -211,6 +220,7 @@ function emptyState(): LoopState {
     },
     last_verifier: null,
     fail_streak: 0,
+    eval_cmd: null,
     updated_at: new Date().toISOString(),
   };
 }
@@ -477,6 +487,37 @@ export function setVerifierVerdict(
 export interface AttemptResult {
   fail_streak: number;
   escalate: boolean;
+}
+
+export function setEvalCmd(root: string, cmd: string): LoopState {
+  const state = readState(root);
+  const next: LoopState = { ...state, eval_cmd: cmd || null };
+  writeState(root, next);
+  if (state.goal_id)
+    recordEvent(root, { type: "eval_set", goal: state.goal_id, cmd });
+  return next;
+}
+
+export interface EvalResult {
+  ok: boolean;
+  output: string;
+}
+
+/** eval_cmd をシェルで実際に実行し、exit codeで機械的に合否判定する（自己申告に依存しない） */
+export async function runEval(
+  shell: Shell,
+  root: string,
+  cmd: string,
+): Promise<EvalResult> {
+  try {
+    const r = await shell`sh -c ${cmd}`.cwd(root).nothrow().quiet();
+    const output = [r.stdout.toString(), r.stderr.toString()]
+      .filter(Boolean)
+      .join("\n");
+    return { ok: r.exitCode === 0, output };
+  } catch (e) {
+    return { ok: false, output: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 export function recordAttempt(

@@ -42,7 +42,7 @@ const PHASE_ACTION: Record<state.Phase, string> = {
   designing:
     "goalを理解し、設計判断・実装タスク列を .graphhopper/plans/<goal-id>.md に書く。source編集はここではブロックされる。書けたら graphhopper_phase(phase: 'implementing') へ",
   implementing:
-    "design.md のタスクを1つずつ実装する。実装試行のたびに graphhopper_attempt(ok, note) を呼んで結果を記録する。escalate=true が返ったら task(subagent_type: 'graphhopper-oracle') に相談してから再試行。全タスク実施したら graphhopper_router_check を呼ぶ",
+    "design.md のタスクを実装する。まず graphhopper_set_eval(cmd) で合否を機械判定できるコマンド（テスト/lint/typecheck）を1度設定せよ。設定後はターン終了ごとに自動実行され、passならpolishへ自動遷移、failならfail_streakが機械カウントされ、escalateが返ったら task(subagent_type: 'graphhopper-oracle') に相談する。eval_cmdが無い（機械判定できない）場合のみ graphhopper_attempt(ok, note) の自己申告にフォールバックする",
   polish:
     "graphhopper_router_check の route に従う。route=advisor なら自己レビューで十分、route=polish なら task(subagent_type: 'graphhopper-verifier') を requirement/behavior/progress の3charterで呼び、結果を graphhopper_verifier_set で記録。level=clean で graphhopper_phase(phase: 'done') へ。level=drift かつ target=implementing なら implementing に戻る",
   done: "完了済み。graphhopper_goal(action: 'complete') を確認",
@@ -52,6 +52,7 @@ function continuationText(goal: state.Goal, s: state.LoopState): string {
   return [
     `[graphhopper] Goal: "${goal.title}" | phase: ${s.phase}`,
     s.notes ? `notes: ${s.notes}` : null,
+    s.eval_cmd ? `eval_cmd: ${s.eval_cmd}` : null,
     s.router.route
       ? `router: route=${s.router.route} diff_lines=${s.router.diff_lines}`
       : null,
@@ -231,12 +232,36 @@ export const Graphhopper: Plugin = async ({ client, $, directory }) => {
       }),
 
       /* ============================================================ *
+       * eval_cmd（graphhopper本体のeval_cmd相当）: implementingの合否を
+       * 自己申告ではなくコマンド実行のexit codeで機械判定する。
+       * ============================================================ */
+      graphhopper_set_eval: tool({
+        description:
+          "implementingの合否を機械判定するコマンド（テスト/lint/typecheck等）を設定する。設定後はsession.idle（ターン終了）ごとに自動実行され、pass=polishへ自動遷移・fail=fail_streak機械カウントになる。graphhopper_attemptの自己申告より優先される",
+        args: {
+          cmd: tool.schema
+            .string()
+            .describe(
+              "実行するシェルコマンド（例: 'npx tsc --noEmit && npm test'）。空文字で解除",
+            ),
+        },
+        async execute(args) {
+          const active = state.getActive(root);
+          if (!active) return "error: no active goal";
+          state.setEvalCmd(root, args.cmd);
+          return args.cmd
+            ? `eval_cmd set: ${args.cmd}\n次のターン終了時から自動実行される。`
+            : "eval_cmd cleared. graphhopper_attemptの自己申告にフォールバックする。";
+        },
+      }),
+
+      /* ============================================================ *
        * stuck escalation: diffサイズ（router gate）とは別軸のタイミング判断。
        * 「詰まった回数」を機械カウントし、閾値超で上位モデル(oracle)を促す
        * ============================================================ */
       graphhopper_attempt: tool({
         description:
-          "implementingでの実装試行の成否を記録する。連続失敗がstuck_threshold（既定3）に達したら escalate=true を返し、graphhopper-oracleへの相談を促す。okな試行やphase遷移でfail_streakはリセットされる",
+          "implementingでの実装試行の成否を記録する（graphhopper_set_evalでeval_cmdを設定していない場合の自己申告フォールバック。eval_cmd設定済みなら自動実行されるのでこのツールは不要）。連続失敗がstuck_threshold（既定3）に達したら escalate=true を返し、graphhopper-oracleへの相談を促す。okな試行やphase遷移でfail_streakはリセットされる",
         args: {
           ok: tool.schema
             .boolean()
@@ -425,11 +450,62 @@ export const Graphhopper: Plugin = async ({ client, $, directory }) => {
         if (event.type !== "session.idle") return;
 
         const sessionID = event.properties.sessionID;
-        const active = state.getActive(root);
+        let active = state.getActive(root);
         if (!active) return;
         if (active.goal.status !== "active") return;
         if (active.state.phase === "done") return;
         if (active.state.session_id !== sessionID) return;
+
+        let evalNote: string | null = null;
+
+        /* eval_cmd（Metric）: implementing中でeval_cmd設定済みなら自己申告に依存せず
+         * ターンごとに機械実行する。graphhopper本体のloop-driver.shが毎Stop hookで
+         * eval_cmdを実行する挙動と同じ */
+        if (active.state.phase === "implementing" && active.state.eval_cmd) {
+          const cmd = active.state.eval_cmd;
+          const result = await state.runEval($, root, cmd);
+          const tail = result.output.split("\n").slice(-20).join("\n");
+          // state.notesにはtail済みの短い文字列だけを残す（全文を永続化しない）
+          const r = state.recordAttempt(
+            root,
+            result.ok,
+            result.ok ? "" : `eval failed: ${cmd}`,
+          );
+          if (active.goal.id)
+            state.recordEvent(root, {
+              type: "eval_run",
+              goal: active.goal.id,
+              ok: result.ok,
+              fail_streak: r.fail_streak,
+            });
+          if (result.ok) {
+            // eval green だけでは進めない: baselineから実際に差分があることも必須
+            // （evalを即設定した1手目で無編集のまま vacuous passするのを防ぐ）
+            const baseline =
+              active.state.router.baseline_rev ??
+              (await state.captureBaselineRev($, root));
+            const diffLines = await state.measureDiffLines($, root, baseline);
+            if (diffLines > 0) {
+              state.setPhase(root, "polish");
+              evalNote = `eval_cmd passed (diff ${diffLines} lines since baseline): ${cmd}`;
+            } else {
+              state.recordRouterCheck(root, baseline, 0, "advisor");
+              evalNote = `eval_cmd passed but diff_lines=0 since baseline — まだ何も実装していない。polishへは進めない。実装を進めよ: ${cmd}`;
+            }
+          } else {
+            evalNote = [
+              `eval_cmd FAILED (fail_streak=${r.fail_streak}): ${cmd}`,
+              tail,
+              r.escalate
+                ? "escalate: task(subagent_type: 'graphhopper-oracle') に相談せよ。"
+                : "",
+            ]
+              .filter(Boolean)
+              .join("\n");
+          }
+          active = state.getActive(root);
+          if (!active) return;
+        }
 
         await client.session.promptAsync({
           path: { id: sessionID },
@@ -437,7 +513,9 @@ export const Graphhopper: Plugin = async ({ client, $, directory }) => {
             parts: [
               {
                 type: "text",
-                text: continuationText(active.goal, active.state),
+                text: [evalNote, continuationText(active.goal, active.state)]
+                  .filter(Boolean)
+                  .join("\n\n"),
               },
             ],
           },

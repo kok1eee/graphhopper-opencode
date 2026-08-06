@@ -18,6 +18,7 @@ Claude Codeのshell hook（PreToolUse/Stop）に相当する仕組みが無い�
 |---|---|---|
 | `PreToolUse`（design-gate.sh の物理ブロック） | `tool.execute.before` | `src/index.ts` の design gate |
 | `Stop`（loop-driver.sh の router gate） | `event: session.idle` | `src/index.ts` の continuation |
+| `eval_cmd`（`bin/graphhopper set-eval`、Stop hookで機械実行） | `graphhopper_set_eval` + `session.idle` で機械実行 | `src/state.ts` の `runEval` / `src/index.ts` の `session.idle` |
 | `Workflow`（agent()+parallel()のインラインJS） | 無し | fan-outは skill が `task()` を手動で複数回呼ぶ + `graphhopper_discover_tick` 等のTS toolでround cap/dedupeを強制 |
 
 **flywheel-opencodeとの違い**: flywheel-opencodeは`tool.execute.before`を一切使っていない
@@ -53,6 +54,7 @@ graphhopper-opencode/
 | `graphhopper_phase` | フェーズ遷移（designing → implementing → polish → done） |
 | `graphhopper_router_check` | diffサイズを機械測定し advisor(verifier×1)/polish(verifier×3) に分岐（loop-driver.sh相当） |
 | `graphhopper_verifier_set` | verifier結果（clean/drift）を記録。lensが空だとエラーになる（self-graded完了防止の機械ゲート） |
+| `graphhopper_set_eval` | implementingの合否判定コマンド（本体のeval_cmd相当）を設定。設定後はターン終了ごと自動実行され、pass=polish自動遷移／fail=fail_streak機械カウント |
 | `graphhopper_discover_start` / `_tick` / `_clear` | loop-until-dry 探索（round cap/dedupeをtool側で強制） |
 
 ## 提供する subagent
