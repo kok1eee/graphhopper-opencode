@@ -107,7 +107,8 @@ export const GRAPHHOPPER_AGENTS: Record<string, AgentConfig> = {
 
   "graphhopper-verifier": {
     description:
-      "polish/advisorのverifier用。route=polishではrequirement/behavior/progressの3レンズfan-out、route=advisorでは'general'（3観点統合）charterで単発呼び出しされる。判断nodeなので上位品質モデルで使う（モデルは .graphhopper/config.json の agents で設定）。実装者本人（メインエージェント）とは独立した第三者チェックであることが呼び出しの目的そのもの",    mode: "subagent",
+      "polish/advisorのverifier用。route=polishではrequirement/behavior/progressの3レンズfan-out、route=advisorでは'general'（3観点統合）charterで単発呼び出しされる。判断nodeなので上位品質モデルで使う（モデルは .graphhopper/config.json の agents で設定）。実装者本人（メインエージェント）とは独立した第三者チェックであることが呼び出しの目的そのもの",
+    mode: "subagent",
     temperature: 0.2,
     permission: { edit: "deny", bash: "deny" },
     prompt: [

@@ -57,27 +57,32 @@ graphhopper-opencode/
 | `graphhopper_set_eval` | implementingの合否判定コマンド（本体のeval_cmd相当）を設定。設定後はターン終了ごと自動実行され、pass=polish自動遷移／fail=fail_streak機械カウント |
 | `graphhopper_discover_start` / `_tick` / `_clear` | loop-until-dry 探索（round cap/dedupeをtool側で強制） |
 | `graphhopper_handoff` | 現在の goal 状態を要約して別の opencode セッションへ引き継ぎ送信。送信後は送信側が goal から解放（pause + unbind）。`session_id` 未指定なら候補セッションを列挙（送信しない）。受け手は `graphhopper_resume` で引き継ぐ |
-| `graphhopper_handoff` | 現在の goal 状態を要約して別の opencode セッションへ引き継ぎ送信。送信後は送信側が goal から解放（pause + unbind）。`session_id` 未指定なら候補セッションを列挙（送信しない）。受け手は `graphhopper_resume` で引き継ぐ |
 
 ## 提供する subagent
 
-| subagent | 用途 | model |
+| subagent | 用途 | tier |
 |---|---|---|
-| `graphhopper-researcher` | 事実収集・調査専用。高頻度なので最安モデル | `amazon-bedrock/anthropic.claude-haiku-4-5-20251001-v1:0` |
-| `graphhopper-verifier` | polishのadversarial verifier fan-out。判断node | `amazon-bedrock/anthropic.claude-opus-5` |
-| `graphhopper-oracle` | implementingで詰まった時（`graphhopper_attempt`のfail_streakがstuck_threshold到達）の相談役 | `amazon-bedrock/anthropic.claude-opus-5` |
+| `graphhopper-researcher` | 事実収集・調査専用。高頻度なので最安モデル | 最下層コスト |
+| `graphhopper-critic` | designingのdesign.mdを敵対レビュー（要件漏れ・設計の穴・スコープ逸脱） | 上位品質・別ベンダー推奨 |
+| `graphhopper-simplify` | polish(大diff)のsimplify提案。3レンズ（再利用・品質・効率） | 中位 |
+| `graphhopper-verifier` | polishのadversarial verifier fan-out。判断node | 上位品質 |
+| `graphhopper-oracle` | implementingで詰まった時（`graphhopper_attempt`のfail_streakがstuck_threshold到達）の相談役 | 上位品質 |
 
 graphhopper本体のtiering（researcher=haiku, main=sonnet, advisor/verifier=opus）をそのまま踏襲。
-vendorは増やさない（judgment分散はレンズの違いで確保し、council再発防止の原則を守る）。
-`.graphhopper/config.json` の `agents.<name>` で上書き可能。
+vendorは増やさない（judgment分散はレンズの違いで確保し、council再発防止の原則を守る。ただしcriticは
+実装前の計画検証という役割上、設計段階の系列多様性を得るために別ベンダー推奨）。
+具体モデルは公開リポジトリにハードコードせず、`.graphhopper/config.json` の `agents.<name>` で
+プロジェクト単位に指定する（未指定時はセッションのメインモデルを継承）。
 
 `.graphhopper/config.example.json` が設定の雛形（モデル上書き・router閾値・design gate パス等）。
 実際に使うにはコピーする:
 ```bash
 cp .graphhopper/config.example.json .graphhopper/config.json
 ```
-`config.json` は `.gitignore` 対象（`.graphhopper/` 全体）なので、ローカル固有の設定・認証情報を
-入れても公開されない。
+`config.json` は `.gitignore` 対象なので、ローカル固有の設定・認証情報を入れても公開されない
+（`.gitignore` は `.graphhopper/*` を無視した上で `config.example.json` だけを明示的に例外化する
+allowlist方式。`.graphhopper/` 配下に新規ファイルを追加する場合、config.example.json 以外は
+自動的に無視される）。
 
 ### 2つの上位モデル起動軸
 
