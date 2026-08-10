@@ -32,7 +32,7 @@ const SYSTEM_GUIDE = `## graphhopper（designing/implementing/polishループ）
 
 この環境には graphhopper プラグインが常駐している。複数ファイルにまたがる変更・設計判断を含む実装を依頼されたら、手を付ける前に graphhopper_goal(action: "start", title: ...) でループを開始せよ。
 
-designing フェーズでは source ファイルの edit/write は物理的にブロックされる（許可されるのは .graphhopper/plans/ 配下の design ドキュメントのみ）。まず design ドキュメントを書き、implementing フェーズに遷移してから実装せよ。
+designing フェーズでは source ファイルの edit/write は物理的にブロックされる（許可されるのは .graphhopper/plans/ 配下の design ドキュメントのみ）。まず design ドキュメントを書き、graphhopper-critic で1回敵対レビューしてから implementing フェーズに遷移して実装せよ。
 
 使わない場面: 単一ファイルの小修正・質問への回答・一回きりのコマンド実行程度の単純作業。その場合は直接やれ。
 
@@ -40,11 +40,11 @@ active な goal が既にあるなら graphhopper_status で状態を確認し�
 
 const PHASE_ACTION: Record<state.Phase, string> = {
   designing:
-    "goalを理解し、設計判断・実装タスク列を .graphhopper/plans/<goal-id>.md に書く。source編集はここではブロックされる。書けたら graphhopper_phase(phase: 'implementing') へ",
+    "goalを理解し、設計判断・実装タスク列を .graphhopper/plans/<goal-id>.md に書く。source編集はここではブロックされる。書けたら task(subagent_type: 'graphhopper-critic') で設計を1回敵対レビューし、指摘を design.md に反映してから graphhopper_phase(phase: 'implementing') へ",
   implementing:
     "design.md のタスクを実装する。まず graphhopper_set_eval(cmd) で合否を機械判定できるコマンド（テスト/lint/typecheck）を1度設定せよ。設定後はターン終了ごとに自動実行され、passならpolishへ自動遷移、failならfail_streakが機械カウントされ、escalateが返ったら task(subagent_type: 'graphhopper-oracle') に相談する。eval_cmdが無い（機械判定できない）場合のみ graphhopper_attempt(ok, note) の自己申告にフォールバックする",
   polish:
-    "graphhopper_router_check の route に従う。route=advisor なら自己レビューで十分、route=polish なら task(subagent_type: 'graphhopper-verifier') を requirement/behavior/progress の3charterで呼び、結果を graphhopper_verifier_set で記録。level=clean で graphhopper_phase(phase: 'done') へ。level=drift かつ target=implementing なら implementing に戻る",
+    "graphhopper_router_check の route に従う。route=polish（大diff）ならまず simplify を実行する: メインが router.baseline_rev から diff を /tmp/gh-simplify-diff.txt に退避し、task(subagent_type: 'graphhopper-simplify') を1回呼んで提案を集める（3レンズ統合）。適用はメインが行う: 各 finding を Read で裏付け、critical は挙動不変・局所的なものだけ自動適用、high は人間確認、medium/note は報告のみ。適用後は eval_cmd を再実行して機械確認。route=advisor（小diff）なら simplify はスキップ。その後 verifier: route=polish なら requirement/behavior/progress の3charterで、route=advisor なら general charter で task(subagent_type: 'graphhopper-verifier') を呼び、結果を graphhopper_verifier_set で記録。level=clean で graphhopper_phase(phase: 'done') へ。level=drift かつ target=implementing なら implementing に戻る。advisor でも第三者チェック（verifier）は省略不可",
   done: "完了済み。graphhopper_goal(action: 'complete') を確認",
 };
 
@@ -479,13 +479,24 @@ export const Graphhopper: Plugin = async ({ client, $, directory }) => {
               fail_streak: r.fail_streak,
             });
           if (result.ok) {
-            // eval green だけでは進めない: baselineから実際に差分があることも必須
-            // （evalを即設定した1手目で無編集のまま vacuous passするのを防ぐ）
             const baseline =
               active.state.router.baseline_rev ??
               (await state.captureBaselineRev($, root));
             const diffLines = await state.measureDiffLines($, root, baseline);
-            if (diffLines > 0) {
+            if (baseline === null) {
+              // baseline 取得失敗（jj/git エラー）: diff 0 として advisor route で polish へ進む。
+              // simplify の入力 diff は空になるが整理対象が無いのでスキップ扱いになる
+              // （実装未着手の diff=0 とは区別して滞留させない）
+              state.recordRouterCheck(root, baseline, 0, "advisor");
+              state.setPhase(root, "polish");
+              evalNote = `eval_cmd passed but baseline not captured — polishへ進む（simplifyはスキップ、verifierで検証）: ${cmd}`;
+            } else if (diffLines > 0) {
+              // route を機械決定して baseline_rev + route を記録してから polish へ
+              // （simplify が router.baseline_rev を参照するため null のままにしない）
+              const cfg = state.readConfig(root);
+              const route: state.RouterRoute =
+                diffLines > cfg.router_threshold_lines ? "polish" : "advisor";
+              state.recordRouterCheck(root, baseline, diffLines, route);
               state.setPhase(root, "polish");
               evalNote = `eval_cmd passed (diff ${diffLines} lines since baseline): ${cmd}`;
             } else {

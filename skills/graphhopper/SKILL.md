@@ -7,14 +7,17 @@ description: "designing→implementing→polishのgoal駆動ループ。複数�
 
 graphhopper本体（Claude Code版）の3相グラフをopencodeに移植したもの。
 判断は「メイン + graphhopper-verifier(opus)」の2層で足りるという原則（council再発防止）を
-そのまま踏襲する。専用の designer/critic subagent は作らない。
+そのまま踏襲する。専用の designer は作らない。ただし設計段階の質チェックとして
+安価な `graphhopper-critic`（Luna 等）を designing で1回呼ぶ常設nodeを持つ
+（verifier が実装後の drift 検出、critic が実装前の計画検証という役割分担）。
 
 ## フェーズ
 
 ```
-designing → implementing → (router_check) → polish [verifier ×1(advisor) / ×3(polish fan-out)] → done
-                ↑______________________________________|
-                    drift target=implementing の巻き戻し
+designing → implementing → router_check → polish ─┬─ route=polish:  simplify → verifier ×3
+                                                   └─ route=advisor: (simplify skip) → verifier ×1
+                 ↑______________________________________|
+                     drift target=implementing の巻き戻し
 ```
 
 ### designing
@@ -23,7 +26,9 @@ designing → implementing → (router_check) → polish [verifier ×1(advisor) 
 - `.graphhopper/plans/<goal-id>.md` に要件理解・設計判断・実装タスク列を書く
 - **このフェーズではsource編集（Edit/Write）が `tool.execute.before` hookで物理ブロックされる**
   （許可パスは `.graphhopper/plans/` 配下のみ、`.graphhopper/config.json` の `design_gate_allow` で変更可）
-- 書けたら `graphhopper_phase(phase: "implementing")`
+- 書けたら `task(subagent_type: "graphhopper-critic")` で**設計を1回敵対レビュー**する
+  （要件漏れ・設計の穴・スコープ逸脱を検出。安価モデル = 常設nodeなので毎goal必ず呼ぶ）
+- critic の指摘を design.md に反映してから `graphhopper_phase(phase: "implementing")`
 
 ### implementing
 
@@ -38,6 +43,28 @@ designing → implementing → (router_check) → polish [verifier ×1(advisor) 
 - 全タスク実施したら `graphhopper_router_check` を呼ぶ（diffサイズを機械測定してrouteを決める）
 
 ### polish
+
+`graphhopper_router_check` の `route` に従う。**simplify は route=polish（大diff）のときだけ
+実行**する条件分岐 node（graph engineering）。simplify = 実装は奇麗か / verifier = 要件と合っているか。
+
+#### simplify（route=polish のみ・単体 agent）
+
+- **route=polish（diff > threshold）のときだけ**実行。route=advisor（小diff）はスキップ
+- メインが `router.baseline_rev` から diff を取得（`jj diff --from <baseline>` または `git diff <baseline>`）
+  → `/tmp/gh-simplify-diff.txt` に退避して**path で渡す**（inline 展開は main context を汚すので禁止）
+- `task(subagent_type: "graphhopper-simplify")` を**1回**呼ぶ（3レンズ統合の単体 agent）
+- **agent は提案者**: findings を `[severity] file:line — 指摘 (suggestion: ...)` で返すだけ。
+  **適用はメインが行う**（agent は edit/bash deny）
+- **適用ルール**（メイン側）:
+  - 各 finding を該当ファイルで Read して裏付け（Iron Law）
+  - critical: 挙動不変・局所的なものだけ自動適用（typo / rename / 冗長中間変数削除）。
+    interface 変更・signature 変更・新規依存追加は high 扱いで人間に提示
+  - high: 人間に確認してから修正
+  - medium / note: 報告のみ（恒久記録はしない。graphhopper の goal は verifier clean で完結）
+- 適用後は `eval_cmd` を**再実行**して機械確認してから verifier に進む（simplify 後の未検証コードで done を出さない）
+- route は simplify 前の記録値に固定。simplify 後に diff を再測定して route を変えない
+
+#### verifier（drift 検出）
 
 `graphhopper_router_check` の `route` に従う。**いずれのrouteでも `graphhopper-verifier` への
 第三者チェックは省略できない**（`graphhopper_verifier_set` はlensが空だとエラーを返す機械ゲートがある。
@@ -65,7 +92,12 @@ designing → implementing → (router_check) → polish [verifier ×1(advisor) 
 ## Gotchas
 
 - **designing中に無理にEdit/Writeしようとしてエラーになったら**: 設計が先という合図。design.md を先に書いてから implementing へ遷移する
+- **critic を呼ばずに implementing に飛ばない**: `graphhopper-critic` は毎goal必ず1回呼ぶ（安価な常設node）。飛ばすと設計段階の要件漏れ・スコープ逸脱が implementing まで持ち越される。critic の指摘は design.md に反映してから遷移する
 - **route=polishなのに「念のため」でverifier fan-outを省略しない**: router_checkの判定はコード側の機械測定。無条件発火だったcouncilの再発防止はここで担保されている
+- **simplify の diff を inline で subagent に渡さない**: main context を汚す。`/tmp/gh-simplify-diff.txt` に退避して path で渡す（agent は bash deny なので自分で diff は取れない）
+- **route=advisor なのに simplify を実行しない**: simplify は route=polish（大diff）のときだけの条件分岐 node。advisor（小diff）ではスキップが正しい。逆に polish で飛ばすのも禁止
+- **simplify で critical を自動適用して設計を変えない**: interface / signature / 公開 API の振る舞いを変える提案は high 扱いで人間に提示。勝手に直すと design レベルの変更になる
+- **simplify 適用後に eval_cmd を再実行しないで verifier に進まない**: critical 適用でコードが再変更されている。機械確認してから verifier を呼ぶ
 - **route=advisorだからverifier呼び出し自体を省略しない**: 「小diffだから自分で見れば十分」は禁止。`graphhopper_verifier_set`はlensが空だと機械的にエラーを返す（self-graded完了防止のゲート）ので、必ず`task(graphhopper-verifier, charter: 'general')`を1回呼んでから記録する
 - **verifier fan-outへの指示を「重大な問題だけ報告」にしない**: 全件報告→confidence/severityで後段フィルタが正しい順序（保守的な指示は再現率を落とす）
 - **`graphhopper_attempt`を省略しない**: 呼ばなければfail_streakが0のまま止まり、詰まっていても oracle への相談が起動しない。実装試行のたびに毎回呼ぶ

@@ -3,7 +3,7 @@
  *
  * graphhopper本体（Claude Code版）のtiering をそのまま踏襲する:
  *   researcher = 最下層コスト・高速（高頻度・事実収集専用・判断を含まない）
- *   verifier(polish council) / oracle(stuck escalation) = 上位品質（判断node、常に最高品質を保証）
+ *   verifier(polish) / oracle(stuck escalation) = 上位品質（判断node、常に最高品質を保証）
  *
  * oracleはpolishのdiffサイズ分岐（router gate）とは別軸のタイミング判断:
  * 「詰まった回数」（graphhopper_attemptのfail_streak）がstuck_thresholdに達したら
@@ -17,9 +17,12 @@
  * AWS_BEARER_TOKEN_BEDROCK が壊れて認証が通らず verifier 等が空応答を返すため、
  * 公開リポジトリにモデル選択を持たせない運用にした。tier 思想（researcher=最下層
  * / verifier・oracle=上位品質）はそのまま、具体モデルは各プロジェクトで選ぶ。
- * 系列多様性の議論（flywheelの2-vendor構成）はgraphhopperには不要——
+ * 系列多様性の議論（flywheelの2-vendor構成）はgraphhopperの**判断node**には不要——
  * 判断は「メイン + verifier」の2層で足りるというgraphhopper自体の設計原則
- * （council再発防止）に合わせ、vendorを増やさない。
+ * （council再発防止）に合わせ、判断系でvendorを増やさない。
+ * ただし設計段階の質チェックnode `graphhopper-critic` は実装前の計画検証で、
+ * メインとは別ベンダー（例: Luna）を使うことで系列多様性を設計段階で得る
+ * （verifier=実装後のdrift検出 / critic=実装前の計画検証 の役割分担）。
  *
  * 全て読み取り専用（edit/bash deny）。実装はメインループ側だけが行う。
  * ユーザーが opencode.json(c) に同名 agent を定義している場合はそちらを優先する。
@@ -47,10 +50,64 @@ export const GRAPHHOPPER_AGENTS: Record<string, AgentConfig> = {
     ].join("\n"),
   },
 
+  "graphhopper-critic": {
+    description:
+      "designingフェーズのdesign.mdを敵対レビューする。要件漏れ・設計の穴・スコープ逸脱を検出する安価な常設チェックnode（モデルは .graphhopper/config.json の agents で設定）。verifierとは対照的に実装前の計画のみを対象とし、メインとは別ベンダーで系列多様性を設計段階で得る",
+    mode: "subagent",
+    temperature: 0.2,
+    permission: { edit: "deny", bash: "deny" },
+    prompt: [
+      "あなたはcritic。実装前に、設計ドキュメントの質を敵対的に検証する。",
+      "",
+      "対象: .graphhopper/plans/<goal-id>.md（designドキュメント）",
+      "検証する3観点:",
+      "- 要件漏れ: goalから要件理解・設計判断・実装タスク列に欠落はないか",
+      "- 設計の穴: トレードオフが明示されているか、タスク列で実行可能か",
+      "- スコープ逸脱: goalと無関係な作業・過剰設計・ゴールドプレーティングがないか",
+      "",
+      "drift（乖離）を検出したら全件報告する（confidence/severity付き、閾値カットしない）。",
+      "無ければ「driftなし」と明記する。",
+      "",
+      "ルール:",
+      "- 指摘は具体的に（該当セクション・該当行を引用）",
+      "- 迎合して指摘を捏造しない。問題が無ければはっきりそう言う",
+      "- コードは書かない。読み取りと指摘だけ",
+    ].join("\n"),
+  },
+
+  "graphhopper-simplify": {
+    description:
+      "polishのsimplify用。route=polish（大diff）のときだけ呼ぶ単体agent。3レンズ（再利用・品質・効率）を1回のパスで見てコード整理の提案を出す。適用はメインが行う（モデルは .graphhopper/config.json の agents で設定）",
+    mode: "subagent",
+    temperature: 0.2,
+    permission: { edit: "deny", bash: "deny" },
+    prompt: [
+      "あなたはsimplifyの提案者。変更diffを3つのレンズ（再利用・品質・効率）で1回のパスで見て、整理の提案を出す。",
+      "",
+      "入力（pathで渡される。必要箇所をReadで取りに行くこと）:",
+      "- 変更diff: /tmp/gh-simplify-diff.txt",
+      "- 必要なら既存ファイル",
+      "",
+      "3つのレンズ:",
+      "- 再利用: 重複ロジック・コピペ・既存utilの取り込み漏れ・冗長パターン",
+      "- 品質: 命名・構造（関数長/ネスト/責務）・慣習準拠・コメント品質・error握り潰し",
+      "- 効率: 計算量・I/O浪費・同期ブロック・キャッシュ漏れ・hot pathのアロケーション",
+      "",
+      "出力: findings を以下の形式で返す（候補なしは「findingsなし」と明記）:",
+      "  [severity] file:line — 指摘 (suggestion: 修正案)",
+      "  severity = critical / high / medium / note",
+      "",
+      "ルール:",
+      "- 指摘は具体的に（file:lineを特定）",
+      "- 推測で指摘しない。実コードをReadで裏付けを取る",
+      "- 効率は「確実に遅い/無駄」と分かるものだけ。計測できない推測はhighにしない",
+      "- あなたは提案だけを返す。適用はメインが行う。コードは書かない",
+    ].join("\n"),
+  },
+
   "graphhopper-verifier": {
     description:
-      "polish/advisorのverifier用。route=polishではrequirement/behavior/progressの3レンズfan-out、route=advisorでは'general'（3観点統合）charterで単発呼び出しされる。判断nodeなので上位品質モデルで使う（モデルは .graphhopper/config.json の agents で設定）。実装者本人（メインエージェント）とは独立した第三者チェックであることが呼び出しの目的そのもの",
-    mode: "subagent",
+      "polish/advisorのverifier用。route=polishではrequirement/behavior/progressの3レンズfan-out、route=advisorでは'general'（3観点統合）charterで単発呼び出しされる。判断nodeなので上位品質モデルで使う（モデルは .graphhopper/config.json の agents で設定）。実装者本人（メインエージェント）とは独立した第三者チェックであることが呼び出しの目的そのもの",    mode: "subagent",
     temperature: 0.2,
     permission: { edit: "deny", bash: "deny" },
     prompt: [
