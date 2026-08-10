@@ -60,13 +60,17 @@ graphhopper-opencode/
 
 ## 提供する subagent
 
-| subagent | 用途 | tier |
-|---|---|---|
-| `graphhopper-researcher` | 事実収集・調査専用。高頻度なので最安モデル | 最下層コスト |
-| `graphhopper-critic` | designingのdesign.mdを敵対レビュー（要件漏れ・設計の穴・スコープ逸脱） | 上位品質・別ベンダー推奨 |
-| `graphhopper-simplify` | polish(大diff)のsimplify提案。3レンズ（再利用・品質・効率） | 中位 |
-| `graphhopper-verifier` | polishのadversarial verifier fan-out。判断node | 上位品質 |
-| `graphhopper-oracle` | implementingで詰まった時（`graphhopper_attempt`のfail_streakがstuck_threshold到達）の相談役 | 上位品質 |
+| subagent | phase | 対象artifact | 用途 | tier |
+|---|---|---|---|---|
+| `graphhopper-researcher` | 任意 | コードベース/外部doc | 事実収集・調査専用。高頻度なので最安モデル | 最下層コスト |
+| `graphhopper-critic` | designing（実装前・pre-hoc） | design.md（計画） | 敵対レビュー（要件漏れ・設計の穴・スコープ逸脱） | 上位品質・別ベンダー推奨 |
+| `graphhopper-oracle` | implementing（詰まった時。`graphhopper_attempt`のfail_streakがstuck_threshold到達） | 失敗試行の文脈 | 手詰まり打開の相談役 | 上位品質 |
+| `graphhopper-simplify` | polish（実装後・post-hoc。大diffのみ） | コードdiff | simplify提案（3レンズ: 再利用・品質・効率） | 中位 |
+| `graphhopper-verifier` | polish（実装後・post-hoc） | コードdiff | adversarial verifier fan-out。判断node | 上位品質 |
+
+`graphhopper-critic`（pre-hoc）と`graphhopper-verifier`（post-hoc）はどちらも「敵対的レビュー」だが、
+対象artifactが違う（計画テキスト vs 実装diff）。phaseは単一のstate変数でdesigning完了後にしか
+implementingへ進めないため、両者が同時に走ることはなく、役割の重なりによる曖昧さは無い。
 
 graphhopper本体のtiering（researcher=haiku, main=sonnet, advisor/verifier=opus）をそのまま踏襲。
 vendorは増やさない（judgment分散はレンズの違いで確保し、council再発防止の原則を守る。ただしcriticは
@@ -88,10 +92,13 @@ allowlist方式。`.graphhopper/` 配下に新規ファイルを追加する場�
 
 router gate（diffサイズ）とstuck escalation（詰まった回数）は独立した分岐点:
 
-| 軸 | トリガー | 呼ばれるagent | 目的 |
-|---|---|---|---|
-| router gate | `graphhopper_router_check` がdiff行数を機械測定 | `graphhopper-verifier` ×1(advisor,general charter)/×3(polish fan-out) | done-gate前のdrift検証 |
-| stuck escalation | `graphhopper_attempt` の連続失敗が`stuck_threshold`（既定3）到達 | `graphhopper-oracle` ×1 | implementing中の手詰まり打開 |
+| 軸 | トリガー | 発生phase | 呼ばれるagent | 目的 |
+|---|---|---|---|---|
+| router gate | `graphhopper_router_check` がdiff行数を機械測定 | polish | `graphhopper-verifier` ×1(advisor,general charter)/×3(polish fan-out) | done-gate前のdrift検証 |
+| stuck escalation | `graphhopper_attempt` の連続失敗が`stuck_threshold`（既定3）到達 | implementing | `graphhopper-oracle` ×1 | implementing中の手詰まり打開 |
+
+phaseは単一のstate変数なので、この2軸は排他的に発生する（implementing中はstuck escalationのみ、
+polish中はrouter gateのみが起こり得る）。合流点の優先順位を定義する必要は無い。
 
 router gate側は**advisorでも第三者チェックそのものは省略できない**（`graphhopper_verifier_set`が
 lens空を拒否するため、diffサイズに関わらず最低1回のverifier呼び出しが機械的に必須。self-graded
