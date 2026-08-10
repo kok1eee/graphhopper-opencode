@@ -26,6 +26,7 @@
  */
 import { tool, type Plugin } from "@opencode-ai/plugin";
 import { injectAgents } from "./agents";
+import { PONYTAIL_RULES } from "./ponytail-rules";
 import * as state from "./state";
 
 const SYSTEM_GUIDE = `## graphhopper（designing/implementing/polishループ）の存在
@@ -84,8 +85,24 @@ export const Graphhopper: Plugin = async ({ client, $, directory }) => {
       injectAgents(input, root);
     },
 
-    "experimental.chat.system.transform": async (_input, output) => {
+    "experimental.chat.system.transform": async (input, output) => {
       output.system.push(SYSTEM_GUIDE);
+
+      // ponytail ルールは implementing 中のみ・メインセッションのみに注入する。
+      // 全ターン常時注入（ponytail のグローバルプラグイン挙動）は graphhopper の
+      // 「必要な時だけ最小注入」思想と衝突するため、フェーズ + sessionID でゲートする。
+      // 注記: graphhopper_phase(implementing) を呼ぶターン自体はプロンプト組み立て済みで
+      // 注入されない。注入は次ターンから（session.idle → continuation → 新ターン）。
+      const active = state.getActive(root);
+      if (
+        active &&
+        active.goal.status === "active" &&
+        active.state.phase === "implementing" &&
+        input.sessionID &&
+        input.sessionID === active.state.session_id
+      ) {
+        output.system.push(PONYTAIL_RULES);
+      }
     },
 
     /* ================================================================ *

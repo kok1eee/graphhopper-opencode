@@ -56,6 +56,7 @@ graphhopper-opencode/
 | `graphhopper_verifier_set` | verifier結果（clean/drift）を記録。lensが空だとエラーになる（self-graded完了防止の機械ゲート） |
 | `graphhopper_set_eval` | implementingの合否判定コマンド（本体のeval_cmd相当）を設定。設定後はターン終了ごと自動実行され、pass=polish自動遷移／fail=fail_streak機械カウント |
 | `graphhopper_discover_start` / `_tick` / `_clear` | loop-until-dry 探索（round cap/dedupeをtool側で強制） |
+| `graphhopper_handoff` | 現在の goal 状態を要約して別の opencode セッションへ引き継ぎ送信。送信後は送信側が goal から解放（pause + unbind）。`session_id` 未指定なら候補セッションを列挙（送信しない）。受け手は `graphhopper_resume` で引き継ぐ |
 
 ## 提供する subagent
 
@@ -84,6 +85,21 @@ lens空を拒否するため、diffサイズに関わらず最低1回のverifier
 
 いずれも「無条件で毎回opusを呼ぶ」のではなく、コード側で機械測定・機械カウントした
 タイミングでだけ上位モデルのコストを払う設計。
+
+## ponytail 統合（implementing フェーズ限定）
+
+[ponytail](https://github.com/DietrichGebert/ponytail)（怠惰なシニアデベロッパー / YAGNI）のルールを
+**implementing フェーズ中のみ・メインセッションのみ**に注入する。
+
+- グローバルの ponytail プラグイン（全ターン常時注入 ~1,400 トークン）は使わず、
+  graphhopper の `experimental.chat.system.transform` フック内で `.graphhopper/state.json` の
+  `phase === "implementing"` かつ `session_id === 当該セッション` のときだけ注入する。
+- ルール本文は `src/ponytail-rules.ts` に vendored（ディスティル版 ~900–1,200 トークン（CJK 混在・実測）、
+  `@dietrichgebert/ponytail@4.9.0` の SKILL.md 由来、MIT）。
+- designing 中は「書くな」圧をかけない。polish は `graphhopper-simplify` が担当。
+- 注意: `graphhopper_phase(implementing)` を呼ぶターン自体には注入されず、次ターンから有効。
+  逆も同様で、`graphhopper_phase(polish)` を呼ぶターンは phase がまだ implementing のため注入されたまま
+  （prompt-time ゲートの構造的必然。影響は遷移ターンの1回のみ）。
 
 ## state の場所
 
