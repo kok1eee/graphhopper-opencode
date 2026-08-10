@@ -456,6 +456,131 @@ export const Graphhopper: Plugin = async ({ client, $, directory }) => {
           return "cleared";
         },
       }),
+
+      /* ============================================================ *
+       * handoff: 別セッションへ goal 状態を引き継ぎ送信する
+       * ============================================================ */
+      graphhopper_handoff: tool({
+        description:
+          "現在の active goal の状態を要約して、別の opencode セッションへ引き継ぎとして送信する（Claude Code の cross-session messaging / SendMessage 相当）。送信後は送信側が goal から解放される（pause + unbind）。session_id 未指定なら候補セッションを列挙する（送信しない）。受け手は内容を読んで graphhopper_resume で引き継ぐ運用",
+        args: {
+          session_id: tool.schema
+            .string()
+            .optional()
+            .describe(
+              "送信先セッションID。送信時は必須。省略時は候補一覧のみ返す",
+            ),
+          note: tool.schema
+            .string()
+            .optional()
+            .describe("送信メッセージに追記する任意の補足"),
+        },
+        async execute(args, ctx) {
+          const active = state.getActive(root);
+          if (!active) return "error: no active goal";
+
+          if (!args.session_id) {
+            // 候補列挙のみ（送信しない）
+            const sessions = await client.session.list({
+              query: { directory: root },
+            });
+            const candidates = (sessions.data ?? [])
+              .filter(
+                (s) =>
+                  s.id !== ctx.sessionID &&
+                  s.directory === root &&
+                  !s.parentID,
+              )
+              .sort(
+                (a, b) =>
+                  (b.time?.updated ?? 0) - (a.time?.updated ?? 0),
+              );
+            if (candidates.length === 0) {
+              return "error: 候補セッションなし（同じディレクトリのメインセッションで自分以外が無い）";
+            }
+            return [
+              "handoff 候補セッション（同じディレクトリ・メインセッション・自分以外、updated 降順）:",
+              "※ 一覧には exit 済み（TUI を閉じた）セッションも含まれる。受け手が「開いている」ものへ送ること。",
+              "",
+              ...candidates.map(
+                (s) =>
+                  `- ${s.id} | ${s.title || "(untitled)"} | updated: ${
+                    s.time?.updated
+                      ? new Date(s.time.updated).toISOString()
+                      : "?"
+                  }`,
+              ),
+              "",
+              "送信するには graphhopper_handoff(session_id: '<ID>') を呼べ。送信後はこのセッションの goal が解放される（pause + unbind）。",
+            ].join("\n");
+          }
+
+          // 送信時
+          if (args.session_id === ctx.sessionID) {
+            return "error: 自分自身への handoff は禁止（ループ防止）";
+          }
+          let target;
+          try {
+            target = await client.session.get({
+              path: { id: args.session_id },
+            });
+          } catch (e) {
+            return `error: session get failed: ${
+              e instanceof Error ? e.message : String(e)
+            }`;
+          }
+          if (!target.data) {
+            return `error: session ${args.session_id} not found`;
+          }
+          if (target.data.parentID) {
+            return `error: session ${args.session_id} は subagent なので handoff 先にできない`;
+          }
+
+          const s = active.state;
+          const text = [
+            "## graphhopper handoff",
+            "",
+            `受け取った goal を引き継いで続行せよ。`,
+            `これは1回限りの handoff であり、さらに他セッションへ転送しないこと。`,
+            `続行には graphhopper_resume で goal を再バインドしてから実施せよ。`,
+            "",
+            `- goal: "${active.goal.title}" (${active.goal.id}) [${active.goal.status}]`,
+            `- phase: ${s.phase}`,
+            `- notes: ${s.notes || "(none)"}`,
+            `- fail_streak: ${s.fail_streak}`,
+            `- eval_cmd: ${s.eval_cmd || "(none)"}`,
+            s.router.route
+              ? `- router: route=${s.router.route} diff_lines=${s.router.diff_lines}`
+              : null,
+            s.last_verifier
+              ? `- last_verifier: ${s.last_verifier.level} (${s.last_verifier.reason})`
+              : null,
+            `- design doc: .graphhopper/plans/${active.goal.id}.md`,
+            `- 送信元 session: ${ctx.sessionID} | state updated: ${s.updated_at}`,
+            `- 次のアクション: ${PHASE_ACTION[s.phase]}`,
+            args.note ? `- 補足: ${args.note}` : null,
+            "",
+            `引き継いだら「handoff received: ${active.goal.id}」と返信せよ。`,
+          ]
+            .filter(Boolean)
+            .join("\n");
+
+          await client.session.promptAsync({
+            path: { id: args.session_id },
+            body: {
+              parts: [{ type: "text", text }],
+            },
+          });
+
+          // 送信成功後、送信側を goal から解放する（二重駆動レース防止）
+          state.pauseGoal(root);
+          state.unbindSession(root, ctx.sessionID);
+          return [
+            `handoff sent to ${args.session_id}: "${active.goal.title}" (${active.goal.id})`,
+            "送信側の goal は解放された（pause + unbind）。受け手が graphhopper_resume で引き継ぐ。",
+          ].join("\n");
+        },
+      }),
     },
 
     event: async ({ event }) => {

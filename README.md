@@ -57,6 +57,7 @@ graphhopper-opencode/
 | `graphhopper_set_eval` | implementingの合否判定コマンド（本体のeval_cmd相当）を設定。設定後はターン終了ごと自動実行され、pass=polish自動遷移／fail=fail_streak機械カウント |
 | `graphhopper_discover_start` / `_tick` / `_clear` | loop-until-dry 探索（round cap/dedupeをtool側で強制） |
 | `graphhopper_handoff` | 現在の goal 状態を要約して別の opencode セッションへ引き継ぎ送信。送信後は送信側が goal から解放（pause + unbind）。`session_id` 未指定なら候補セッションを列挙（送信しない）。受け手は `graphhopper_resume` で引き継ぐ |
+| `graphhopper_handoff` | 現在の goal 状態を要約して別の opencode セッションへ引き継ぎ送信。送信後は送信側が goal から解放（pause + unbind）。`session_id` 未指定なら候補セッションを列挙（送信しない）。受け手は `graphhopper_resume` で引き継ぐ |
 
 ## 提供する subagent
 
@@ -100,6 +101,17 @@ lens空を拒否するため、diffサイズに関わらず最低1回のverifier
 - 注意: `graphhopper_phase(implementing)` を呼ぶターン自体には注入されず、次ターンから有効。
   逆も同様で、`graphhopper_phase(polish)` を呼ぶターンは phase がまだ implementing のため注入されたまま
   （prompt-time ゲートの構造的必然。影響は遷移ターンの1回のみ）。
+
+## handoff（別セッションへの引き継ぎ）
+
+`graphhopper_handoff` は現在の goal 状態を別の opencode セッションへ `promptAsync` で送る
+（Claude Code の cross-session messaging 相当）。送信後は送信側が goal から解放される（pause + unbind）。
+
+**注意**: opencode には Claude Code の `crossSessionInbound: hold/refuse` に相当する**受信制御がない**。
+実測では、`promptAsync` で注入された指示は受け手エージェントが**許可なしでツール実行まで自動処理**する。
+そのため handoff は**信頼できるセッション同士でのみ**使い、`session_id` は明示指定すること。
+勝手に自動送信はしない設計（明示呼び出しのみ）。受け手は「handoff received」応答で受領を示し、
+`graphhopper_resume` で引き継ぐ。
 
 ## state の場所
 
