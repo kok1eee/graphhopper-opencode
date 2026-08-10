@@ -1,3 +1,4 @@
 node_modules/
-.graphhopper/
+.graphhopper/*
+!.graphhopper/config.example.json
 *.tsbuildinfo

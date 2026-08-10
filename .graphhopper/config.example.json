@@ -1,0 +1,12 @@
+{
+  "router_threshold_lines": 400,
+  "design_gate_allow": [".graphhopper/plans/"],
+  "agents": {
+    "graphhopper-researcher": "opencode/deepseek-v4-flash",
+    "graphhopper-verifier": "anthropic/claude-opus-5",
+    "graphhopper-critic": "anthropic/claude-sonnet-5",
+    "graphhopper-simplify": "anthropic/claude-sonnet-5",
+    "graphhopper-oracle": "anthropic/claude-opus-5"
+  },
+  "stuck_threshold": 3
+}

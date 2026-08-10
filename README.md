@@ -71,6 +71,14 @@ graphhopper本体のtiering（researcher=haiku, main=sonnet, advisor/verifier=op
 vendorは増やさない（judgment分散はレンズの違いで確保し、council再発防止の原則を守る）。
 `.graphhopper/config.json` の `agents.<name>` で上書き可能。
 
+`.graphhopper/config.example.json` が設定の雛形（モデル上書き・router閾値・design gate パス等）。
+実際に使うにはコピーする:
+```bash
+cp .graphhopper/config.example.json .graphhopper/config.json
+```
+`config.json` は `.gitignore` 対象（`.graphhopper/` 全体）なので、ローカル固有の設定・認証情報を
+入れても公開されない。
+
 ### 2つの上位モデル起動軸
 
 router gate（diffサイズ）とstuck escalation（詰まった回数）は独立した分岐点:
