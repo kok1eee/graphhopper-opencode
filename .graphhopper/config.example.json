@@ -8,5 +8,6 @@
     "graphhopper-simplify": "anthropic/claude-sonnet-5",
     "graphhopper-oracle": "anthropic/claude-opus-5"
   },
-  "stuck_threshold": 3
+  "stuck_threshold": 3,
+  "handoff_nudge_chars": 500000
 }

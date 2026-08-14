@@ -16,10 +16,13 @@
  *   - graphhopper_phase         : フェーズ遷移（designing → implementing → polish → done）
  *   - graphhopper_router_check  : diff サイズを機械測定し advisor/polish に分岐（loop-driver.sh相当）
  *   - graphhopper_verifier_set  : polish の verifier fan-out 結果（clean/drift）を記録
+ *   - graphhopper_critic_set    : designing終了前のdesign.md質レビュー結果を記録（opt-in、ハードゲート無し）
+ *   - graphhopper_handoff       : goal状態を別セッションへ引き継ぎ送信（promptAsync）
  * - hook:
  *   - tool.execute.before : designing フェーズで edit/write を許可パス（plans/ 配下）以外に通さない
  * - event:
- *   - session.idle    : active goal があれば継続プロンプトを注入（ループの心臓）
+ *   - session.idle    : active goal があれば継続プロンプトを注入（ループの心臓）。
+ *                        会話サイズが handoff_nudge_chars を超えたら一度だけ handoff を促す
  *   - session.deleted : セッション紐付けを解除
  *
  * state は `.graphhopper/` に保存される（state.ts 参照）。
@@ -41,7 +44,7 @@ active な goal が既にあるなら graphhopper_status で状態を確認し�
 
 const PHASE_ACTION: Record<state.Phase, string> = {
   designing:
-    "goalを理解し、設計判断・実装タスク列を .graphhopper/plans/<goal-id>.md に書く。source編集はここではブロックされる。書けたら task(subagent_type: 'graphhopper-critic') で設計を1回敵対レビューし、指摘を design.md に反映してから graphhopper_phase(phase: 'implementing') へ",
+    "goalを理解し、設計判断・実装タスク列を .graphhopper/plans/<goal-id>.md に書く。source編集はここではブロックされる。書けたら task(subagent_type: 'graphhopper-critic') で設計を1回敵対レビューし、指摘を design.md に反映してから graphhopper_phase(phase: 'implementing') へ（任意で graphhopper_critic_set に結果を記録できる。opt-inでphase遷移の前提条件ではない）。design.md はこのフェーズを抜けた後は不変になる（verifierのdrift検出アンカーのため）——決定の経緯・棄却した代替案・進捗はここで固めず、実装中は .graphhopper/plans/<goal-id>.log.md に追記すること",
   implementing:
     "design.md のタスクを実装する。まず graphhopper_set_eval(cmd) で合否を機械判定できるコマンド（テスト/lint/typecheck）を1度設定せよ。設定後はターン終了ごとに自動実行され、passならpolishへ自動遷移、failならfail_streakが機械カウントされ、escalateが返ったら task(subagent_type: 'graphhopper-oracle') に相談する。eval_cmdが無い（機械判定できない）場合のみ graphhopper_attempt(ok, note) の自己申告にフォールバックする",
   polish:
@@ -134,6 +137,24 @@ export const Graphhopper: Plugin = async ({ client, $, directory }) => {
             `Write the design doc first, then graphhopper_phase(phase: "implementing") before editing source.`,
         );
       }
+
+      /* design doc不変化: designing終了後はdesign doc自体への書き込みも常にブロックする
+       * （verifierのdrift検出アンカーを守るため。graphhopper本体との対応関係を参照） */
+      if (
+        state.isDesignDocLocked(active.state.phase, active.goal.id, filePath)
+      ) {
+        state.recordEvent(root, {
+          type: "design_doc_locked_block",
+          goal: active.goal.id,
+          tool: toolName,
+          path: filePath,
+        });
+        throw new Error(
+          `Refused: ${toolName} to ${filePath} is blocked because the design doc is immutable once the "designing" phase ends ` +
+            `(it anchors verifier drift detection — rewriting it to match the implementation would let drift be erased by editing the doc instead of fixing the code). ` +
+            `Record decisions/rejected alternatives/progress in .graphhopper/plans/${active.goal.id}.log.md instead (no gate on that path).`,
+        );
+      }
     },
 
     tool: {
@@ -207,7 +228,7 @@ export const Graphhopper: Plugin = async ({ client, $, directory }) => {
 
       graphhopper_status: tool({
         description:
-          "graphhopper の現在状態（goal・フェーズ・router・verifier）を表示する",
+          "graphhopper の現在状態（goal・フェーズ・router・verifier・critic_review）を表示する",
         args: {},
         async execute() {
           const a = state.getActive(root);
@@ -222,8 +243,14 @@ export const Graphhopper: Plugin = async ({ client, $, directory }) => {
             a.state.last_verifier
               ? `last_verifier: level=${a.state.last_verifier.level} target=${a.state.last_verifier.target ?? "-"} lens=${a.state.last_verifier.lens.join(",") || "-"} reason=${a.state.last_verifier.reason}`
               : "last_verifier: (none)",
+            a.state.critic_review
+              ? `critic_review: level=${a.state.critic_review.level} reason=${a.state.critic_review.reason}`
+              : "critic_review: (none, opt-in)",
             `fail_streak: ${a.state.fail_streak}`,
             a.state.notes ? `notes: ${a.state.notes}` : null,
+            state.planLogExists(root, a.goal.id)
+              ? `log: .graphhopper/plans/${a.goal.id}.log.md`
+              : null,
             `updated: ${a.state.updated_at}`,
           ]
             .filter(Boolean)
@@ -387,6 +414,33 @@ export const Graphhopper: Plugin = async ({ client, $, directory }) => {
       }),
 
       /* ============================================================ *
+       * design.md質レビュー（graphhopper-critic）の記録。opt-in・ハードゲート無し。
+       * verifier_setのようなlens空拒否（self-graded防止）は付けない——design時点では
+       * 客観的な閾値が存在せず、ゲート化すると「薄く書いて回避する」自己判断エロージョンを
+       * 再生産するだけのため。呼ぶかどうかはメインエージェントの裁量（graphhopper本体の
+       * design-set / ROADMAP.md の判断を参照）。
+       * ============================================================ */
+      graphhopper_critic_set: tool({
+        description:
+          "designing終了前のdesign.md質レビュー結果（clean/drift）を記録する（opt-in、graphhopper_phaseの前提条件にはしない）。graphhopper-criticを呼んだかどうかに関わらず記録できる——self-graded防止は行わない",
+        args: {
+          level: tool.schema.enum(["clean", "drift"]),
+          reason: tool.schema
+            .string()
+            .describe(
+              "critic reviewの結果の根拠、またはcriticを呼ばなかった判断理由を1〜3文で",
+            ),
+        },
+        async execute(args) {
+          const result = state.setCriticVerdict(root, {
+            level: args.level,
+            reason: args.reason,
+          });
+          return `critic review recorded: ${args.level}. phase: ${result.phase}`;
+        },
+      }),
+
+      /* ============================================================ *
        * discover（loop-until-dry）: phase graphの外にあるオンデマンド探索。
        * round cap / dedupeはtool側（state.tickDiscover）が機械的に強制する。
        * ============================================================ */
@@ -487,14 +541,9 @@ export const Graphhopper: Plugin = async ({ client, $, directory }) => {
             const candidates = (sessions.data ?? [])
               .filter(
                 (s) =>
-                  s.id !== ctx.sessionID &&
-                  s.directory === root &&
-                  !s.parentID,
+                  s.id !== ctx.sessionID && s.directory === root && !s.parentID,
               )
-              .sort(
-                (a, b) =>
-                  (b.time?.updated ?? 0) - (a.time?.updated ?? 0),
-              );
+              .sort((a, b) => (b.time?.updated ?? 0) - (a.time?.updated ?? 0));
             if (candidates.length === 0) {
               return "error: 候補セッションなし（同じディレクトリのメインセッションで自分以外が無い）";
             }
@@ -555,7 +604,13 @@ export const Graphhopper: Plugin = async ({ client, $, directory }) => {
             s.last_verifier
               ? `- last_verifier: ${s.last_verifier.level} (${s.last_verifier.reason})`
               : null,
-            `- design doc: .graphhopper/plans/${active.goal.id}.md`,
+            s.critic_review
+              ? `- critic_review: ${s.critic_review.level} (${s.critic_review.reason})`
+              : "- critic_review: (none, opt-in)",
+            `- design doc: .graphhopper/plans/${active.goal.id}.md（designing終了後は不変）`,
+            state.planLogExists(root, active.goal.id)
+              ? `- log: .graphhopper/plans/${active.goal.id}.log.md（決定の経緯・棄却した代替案・進捗）`
+              : null,
             `- 送信元 session: ${ctx.sessionID} | state updated: ${s.updated_at}`,
             `- 次のアクション: ${PHASE_ACTION[s.phase]}`,
             args.note ? `- 補足: ${args.note}` : null,
@@ -660,13 +715,40 @@ export const Graphhopper: Plugin = async ({ client, $, directory }) => {
           if (!active) return;
         }
 
+        /* handoff一度きり通知: 会話サイズ（session.messagesのJSON文字数、transcriptサイズの
+         * 代理指標）が閾値を超えたら知らせる。対応必須ではないため、doneには持ち込まない
+         * （dedupで無限ループ化を防ぐ。graphhopper本体 hooks/loop-driver.sh 参照） */
+        let handoffNote: string | null = null;
+        if (!active.state.handoff_nudged) {
+          try {
+            const cfg = state.readConfig(root);
+            const msgs = await client.session.messages({
+              path: { id: sessionID },
+            });
+            const sizeChars = JSON.stringify(msgs.data ?? []).length;
+            if (sizeChars >= cfg.handoff_nudge_chars) {
+              state.setHandoffNudged(root, sizeChars);
+              handoffNote = `graphhopper: 会話が大きくなっています（推定サイズ${sizeChars}文字・閾値${cfg.handoff_nudge_chars}文字）。対応必須ではありません。必要なら graphhopper_handoff で別セッションへ引き継げます（このgoalでは1回だけの通知）。`;
+            }
+          } catch {
+            // サイズ取得失敗はnudgeをスキップするだけでループを止めない
+          }
+        }
+
+        active = state.getActive(root);
+        if (!active) return;
+
         await client.session.promptAsync({
           path: { id: sessionID },
           body: {
             parts: [
               {
                 type: "text",
-                text: [evalNote, continuationText(active.goal, active.state)]
+                text: [
+                  evalNote,
+                  handoffNote,
+                  continuationText(active.goal, active.state),
+                ]
                   .filter(Boolean)
                   .join("\n\n"),
               },

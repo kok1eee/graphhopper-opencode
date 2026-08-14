@@ -49,6 +49,15 @@ export interface VerifierVerdict {
   at: string;
 }
 
+/** designing終了前のdesign.md質レビュー（graphhopper-critic、opt-in・ハードゲート無し）の記録。
+ * phase遷移の前提条件にはしない——design時点では客観的な閾値が無く、ゲート化すると
+ * 「薄く書いてゲートを避ける」自己判断エロージョンを再生産するだけのため。 */
+export interface CriticVerdict {
+  level: VerdictLevel;
+  reason: string;
+  at: string;
+}
+
 export type RouterRoute = "advisor" | "polish";
 
 export interface RouterState {
@@ -69,6 +78,10 @@ export interface LoopState {
   router: RouterState;
   /** polish フェーズの verifier fan-out 結果。null = 未実行 */
   last_verifier: VerifierVerdict | null;
+  /** designing終了前のcritic review結果。null = 未実行（opt-in、setPhaseの前提条件にはしない） */
+  critic_review: CriticVerdict | null;
+  /** handoffの一度きり通知（会話サイズ閾値超）を出したか。goalにつき1回だけ通知するためのdedup */
+  handoff_nudged: boolean;
   /**
    * implementing での連続失敗数（graphhopper_attempt が機械カウント）。
    * stuck_threshold に達したら graphhopper-oracle への相談を促す。
@@ -99,12 +112,17 @@ export interface GraphhopperConfig {
   agents: { [name: string]: string };
   /** implementing の連続失敗数がこれに達したら graphhopper-oracle への相談を促す */
   stuck_threshold: number;
+  /** handoff一度きり通知の閾値（session.messagesのJSON文字数、transcriptサイズの代理指標）。
+   * Claude Code版の GH_HANDOFF_THRESHOLD_KB（既定500KB）相当。opencodeにはtranscript_pathが
+   * 無いため client.session.messages() のJSONシリアライズ長で近似する */
+  handoff_nudge_chars: number;
 }
 
 export const DEFAULT_CONFIG: GraphhopperConfig = {
   router_threshold_lines: 400,
   design_gate_allow: [".graphhopper/plans/"],
   agents: {},
+  handoff_nudge_chars: 500_000,
   stuck_threshold: 3,
 };
 
@@ -132,6 +150,16 @@ export function planPath(root: string, goalId: string): string {
   return join(dir(root), "plans", `${goalId}.md`);
 }
 
+/** 決定の経緯・棄却した代替案・進捗を追記するログ（design docとは別物、追記専用・ハードゲート無し）。
+ * design_gate_allow の prefix (`.graphhopper/plans/`) に含まれるため、designing中も常時書き込み可能。 */
+export function planLogPath(root: string, goalId: string): string {
+  return join(dir(root), "plans", `${goalId}.log.md`);
+}
+
+export function planLogExists(root: string, goalId: string): boolean {
+  return existsSync(planLogPath(root, goalId));
+}
+
 export type HistoryEvent =
   | { type: "goal_start"; goal: string; title: string }
   | { type: "goal_pause"; goal: string }
@@ -153,6 +181,17 @@ export type HistoryEvent =
     }
   | { type: "design_gate_block"; goal: string; tool: string; path: string }
   | {
+      type: "design_doc_locked_block";
+      goal: string;
+      tool: string;
+      path: string;
+    }
+  | {
+      type: "critic_review_set";
+      goal: string;
+      level: VerdictLevel;
+    }
+  | {
       type: "attempt";
       goal: string;
       ok: boolean;
@@ -160,7 +199,8 @@ export type HistoryEvent =
       note: string;
     }
   | { type: "eval_set"; goal: string; cmd: string }
-  | { type: "eval_run"; goal: string; ok: boolean; fail_streak: number };
+  | { type: "eval_run"; goal: string; ok: boolean; fail_streak: number }
+  | { type: "handoff_nudged"; goal: string; size_chars: number };
 
 /** append-only の履歴ログ。LLMの自己申告ではなくplugin機械記録の監査証跡 */
 export function recordEvent(root: string, event: HistoryEvent): void {
@@ -199,6 +239,8 @@ export function readConfig(root: string): GraphhopperConfig {
       raw.design_gate_allow ?? DEFAULT_CONFIG.design_gate_allow,
     agents: { ...(DEFAULT_CONFIG.agents ?? {}), ...(raw.agents ?? {}) },
     stuck_threshold: raw.stuck_threshold ?? DEFAULT_CONFIG.stuck_threshold,
+    handoff_nudge_chars:
+      raw.handoff_nudge_chars ?? DEFAULT_CONFIG.handoff_nudge_chars,
   };
 }
 
@@ -219,6 +261,8 @@ function emptyState(): LoopState {
       checked_at: null,
     },
     last_verifier: null,
+    critic_review: null,
+    handoff_nudged: false,
     fail_streak: 0,
     eval_cmd: null,
     updated_at: new Date().toISOString(),
@@ -477,6 +521,45 @@ export function setVerifierVerdict(
   return next;
 }
 
+/** design.md質レビュー（graphhopper-critic）の結果を記録する。opt-inでありphase遷移の
+ * 前提条件にはしない（verifier_setのlens空拒否のようなself-graded防止機構は付けない）。 */
+export function setCriticVerdict(
+  root: string,
+  verdict: Omit<CriticVerdict, "at">,
+): LoopState {
+  const state = readState(root);
+  const next: LoopState = {
+    ...state,
+    critic_review: { ...verdict, at: new Date().toISOString() },
+  };
+  writeState(root, next);
+  if (state.goal_id) {
+    recordEvent(root, {
+      type: "critic_review_set",
+      goal: state.goal_id,
+      level: verdict.level,
+    });
+  }
+  return next;
+}
+
+/** handoffの一度きり通知を送ったことを記録する（goalにつき1回だけ通知するためのdedup）。
+ * 会話が大きいこと自体はeval失敗やverdict未記録のような「直すべき異常」ではないため、
+ * 一度知らせたら二度と鳴らさない（graphhopper本体 hooks/loop-driver.sh のdedupと同じ思想）。 */
+export function setHandoffNudged(root: string, sizeChars: number): LoopState {
+  const state = readState(root);
+  const next: LoopState = { ...state, handoff_nudged: true };
+  writeState(root, next);
+  if (state.goal_id) {
+    recordEvent(root, {
+      type: "handoff_nudged",
+      goal: state.goal_id,
+      size_chars: sizeChars,
+    });
+  }
+  return next;
+}
+
 /* ================================================================== *
  * stuck escalation: implementing での連続失敗を機械カウントし、
  * stuck_threshold に達したら graphhopper-oracle への相談を促す。
@@ -554,6 +637,20 @@ export function isDesignGateBlocked(
 ): boolean {
   if (phase !== "designing") return false;
   return !cfg.design_gate_allow.some((prefix) => filePath.includes(prefix));
+}
+
+/** design doc不変化ゲート: designing終了後は該当goalのdesign docへの書き込みを常にブロックする
+ * （graphhopper本体 hooks/design-gate.sh の事後編集ブロックと同じ思想）。verifierのdrift検出
+ * アンカーとして読むため、実装に合わせて書き直せると「driftをdesign doc側の書き換えで消せる」
+ * Goodhart's Lawの穴になる。決定の経緯・進捗は planLogPath（追記専用・ハードゲート無し）へ。
+ * design_gate_allow とは独立（designing中はこの関数は常にfalseを返す）。 */
+export function isDesignDocLocked(
+  phase: Phase,
+  goalId: string,
+  filePath: string,
+): boolean {
+  if (phase === "designing") return false;
+  return filePath.includes(`.graphhopper/plans/${goalId}.md`);
 }
 
 /* ================================================================== *

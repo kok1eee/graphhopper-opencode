@@ -29,6 +29,15 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
 - 書けたら `task(subagent_type: "graphhopper-critic")` で**設計を1回敵対レビュー**する
   （要件漏れ・設計の穴・スコープ逸脱を検出。安価モデル = 常設nodeなので毎goal必ず呼ぶ）
 - critic の指摘を design.md に反映してから `graphhopper_phase(phase: "implementing")`
+- 任意で `graphhopper_critic_set(level, reason)` に結果を記録できる（opt-in、`graphhopper_phase`
+  の前提条件にはならない。self-graded防止機構は付けない——「critic を呼んだか」自体の
+  機械チェックはしないので、記録するかどうかもメインエージェントの裁量）
+- **design.md はこのフェーズを抜けた後は不変になる**（`tool.execute.before` が
+  designing以外での該当パスへの書き込みを常にブロックする）。verifierがdrift検出の
+  アンカーとして読むため、実装に合わせて書き直せると「driftをdesign.md側の書き換えで
+  消せる」Goodhart's Lawの穴になる。決定の経緯・棄却した代替案・進捗は
+  `.graphhopper/plans/<goal-id>.log.md`（design.mdとは別物、追記専用・ハードゲート無し、
+  全phaseで自由に書ける）に持つ
 
 ### implementing
 
@@ -89,9 +98,20 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
 - `level: "clean"` が記録されていれば `graphhopper_phase(phase: "done")` → `graphhopper_goal(action: "complete")`
 - self-graded完了は禁止（`graphhopper_goal(complete)` は直近verifierがcleanでないとエラーを返す）
 
+## handoff（別セッションへの引き継ぎ）
+
+- 会話が大きくなると `session.idle` が一度だけ `graphhopper_handoff` の利用を促す通知を挟む
+  （`.graphhopper/config.json` の `handoff_nudge_chars`、既定500,000文字。goalにつき1回だけ）
+- 通知は対応必須ではない。使うなら `graphhopper_handoff(session_id: "<ID>")`
+  （`session_id`未指定なら候補セッション列挙のみ、送信しない）。信頼できるセッション
+  同士でのみ使う（opencodeにはClaude Codeの`crossSessionInbound`相当の受信制御が無く、
+  受け手は許可なしで自動処理するため）
+- 受け手は `graphhopper_resume` → `graphhopper_status` で引き継ぐ
+
 ## Gotchas
 
 - **designing中に無理にEdit/Writeしようとしてエラーになったら**: 設計が先という合図。design.md を先に書いてから implementing へ遷移する
+- **designing終了後にdesign.mdを書き直そうとしてエラーになったら**: 仕様変更や見落としがあっても design.md 自体は書き換えない。`.graphhopper/plans/<goal-id>.log.md` に決定の経緯・棄却した代替案を追記する（design.mdはverifierのdrift検出アンカーなので不変を保つ）
 - **critic を呼ばずに implementing に飛ばない**: `graphhopper-critic` は毎goal必ず1回呼ぶ（安価な常設node）。飛ばすと設計段階の要件漏れ・スコープ逸脱が implementing まで持ち越される。critic の指摘は design.md に反映してから遷移する
 - **route=polishなのに「念のため」でverifier fan-outを省略しない**: router_checkの判定はコード側の機械測定。無条件発火だったcouncilの再発防止はここで担保されている
 - **simplify の diff を inline で subagent に渡さない**: main context を汚す。`/tmp/gh-simplify-diff.txt` に退避して path で渡す（agent は bash deny なので自分で diff は取れない）

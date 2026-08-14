@@ -20,6 +20,9 @@ Claude Codeのshell hook（PreToolUse/Stop）に相当する仕組みが無い�
 | `Stop`（loop-driver.sh の router gate） | `event: session.idle` | `src/index.ts` の continuation |
 | `eval_cmd`（`bin/graphhopper set-eval`、Stop hookで機械実行） | `graphhopper_set_eval` + `session.idle` で機械実行 | `src/state.ts` の `runEval` / `src/index.ts` の `session.idle` |
 | `Workflow`（agent()+parallel()のインラインJS） | 無し | fan-outは skill が `task()` を手動で複数回呼ぶ + `graphhopper_discover_tick` 等のTS toolでround cap/dedupeを強制 |
+| design.md不変化（designing終了後の事後編集ブロック） | `tool.execute.before` の追加チェック | `state.isDesignDocLocked` |
+| `design-set`（design.md質レビューのopt-in記録） | `graphhopper_critic_set` | `state.setCriticVerdict`（`graphhopper-critic`は本移植では元々常設nodeなので、記録機構だけの追加） |
+| transcriptサイズでのhandoff一度きり通知（`GH_HANDOFF_THRESHOLD_KB`） | `client.session.messages()` のJSON文字数で近似 | `session.idle` 内、`config.json`の`handoff_nudge_chars`（opencodeには`transcript_path`相当が無いためSDK呼び出しで代用） |
 
 **flywheel-opencodeとの違い**: flywheel-opencodeは`tool.execute.before`を一切使っていない
 （continuationTextで指示するだけで、実際にEdit/Writeを拒否する強制力が無い）。graphhopper-opencodeは
@@ -56,7 +59,8 @@ graphhopper-opencode/
 | `graphhopper_verifier_set` | verifier結果（clean/drift）を記録。lensが空だとエラーになる（self-graded完了防止の機械ゲート） |
 | `graphhopper_set_eval` | implementingの合否判定コマンド（本体のeval_cmd相当）を設定。設定後はターン終了ごと自動実行され、pass=polish自動遷移／fail=fail_streak機械カウント |
 | `graphhopper_discover_start` / `_tick` / `_clear` | loop-until-dry 探索（round cap/dedupeをtool側で強制） |
-| `graphhopper_handoff` | 現在の goal 状態を要約して別の opencode セッションへ引き継ぎ送信。送信後は送信側が goal から解放（pause + unbind）。`session_id` 未指定なら候補セッションを列挙（送信しない）。受け手は `graphhopper_resume` で引き継ぐ |
+| `graphhopper_critic_set` | designing終了前のdesign.md質レビュー結果（clean/drift）を記録する。opt-in・ハードゲート無し（`graphhopper_phase`の前提条件にはしない） |
+| `graphhopper_handoff` | 現在の goal 状態を要約して別の opencode セッションへ引き継ぎ送信。送信後は送信側が goal から解放（pause + unbind）。`session_id` 未指定なら候補セッションを列挙（送信しない）。受け手は `graphhopper_resume` で引き継ぐ。会話サイズが`handoff_nudge_chars`を超えると`session.idle`が一度だけ利用を促す |
 
 ## 提供する subagent
 
@@ -142,7 +146,12 @@ lens空を拒否するため、diffサイズに関わらず最低1回のverifier
 ├── config.json     — プロジェクト毎の上書き設定（任意）
 ├── history.jsonl   — 監査ログ（append-only）
 ├── discover.json   — discoverセッションの一時state（round/seen/confirmed）
-└── plans/<goal-id>.md — design ドキュメント（designingフェーズで書く唯一の許可パス）
+└── plans/
+    ├── <goal-id>.md      — design ドキュメント（designingフェーズで書く唯一の許可パス。
+    │                        designing終了後は`tool.execute.before`が事後編集を物理ブロックする
+    │                        ——verifierのdrift検出アンカーを守るため、不変）
+    └── <goal-id>.log.md — 決定の経緯・棄却した代替案・進捗（design.mdとは別物、追記専用・
+                             ハードゲート無し、全phaseで自由に書ける。handoff先が読む想定）
 ```
 
 ## インストール
