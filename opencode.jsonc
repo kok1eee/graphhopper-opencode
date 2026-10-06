@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // graphhopper v2 project config (opencode v2 format).
+  // Run with the PROJECT-LOCAL v2 binary: ./node_modules/.bin/opencode
+  // Do NOT open this directory with opencode v1 (1.18.x) — the v1 global
+  // graphhopper plugin would drive .graphhopper/ with the wrong runtime.
+  "plugins": [{ "package": "./.opencode/plugins/graphhopper" }],
+  "mcp": {
+    "servers": {
+      "graft": {
+        "type": "local",
+        "command": ["graft", "mcp"],
+        "cwd": "."
+      }
+    }
+  }
+}

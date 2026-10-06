@@ -1,0 +1,7 @@
+node_modules/
+.graphhopper/*
+!.graphhopper/config.example.json
+*.tsbuildinfo
+
+# opencode v2 local state — machine-specific, not shared.
+opencode.db*

@@ -1,0 +1,23 @@
+{
+  "name": "graphhopper-opencode-v2",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "graphhopper for opencode v2: designing/implementing/polish state machine plugin (Plugin.define + setup(ctx))",
+  "scripts": {
+    "typecheck": "npx tsc --noEmit",
+    "test": "bun test",
+    "opencode": "opencode"
+  },
+  "dependencies": {
+    "@opencode/cli": "2.0.24",
+    "@opencode/plugin": "2.0.24",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "bun-types": "^1.3.14",
+    "typescript": "^7.0.2"
+  }
+}
