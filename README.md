@@ -1,4 +1,4 @@
-# graphhopper-opencode-v2
+# graphhopper-opencode
 
 graphhopper state-machine plugin for **opencode v2** (`@opencode/cli` 2.0.x,
 project-local install). Ported from `graphhopper-opencode` (v1, opencode 1.18.x).

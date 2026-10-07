@@ -26,7 +26,7 @@ export const MAX_DEPTH = 1;
 /* v2 バイナリ解決 (R-M4)。PATH の `opencode` は v1 (mise) のままのため使わない。
  * 誤ランタイムでの実行は黙って通さず null (fail loud) にする。 */
 const V2_PROJECT_BINARY =
-  `${process.env["HOME"] ?? ""}/Documents/personal-dev/graphhopper-opencode-v2/node_modules/.bin/opencode`;
+  `${process.env["HOME"] ?? ""}/Documents/personal-dev/graphhopper-opencode/node_modules/.bin/opencode`;
 
 export interface InvokeArgs {
   agent: string;

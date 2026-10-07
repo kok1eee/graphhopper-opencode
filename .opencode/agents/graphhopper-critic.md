@@ -1,7 +1,7 @@
 ---
 description: "designingフェーズのdesign.mdを敵対レビューする。要件漏れ・設計の穴・スコープ逸脱を検出する安価な常設チェックnode（モデルは .graphhopper/config.json の agents で設定。haiku級で安価・高速に回し、見逃し率はscoreboardで監視）。verifierとは対照的に実装前の計画のみを対象とする"
 mode: all
-model: "opencode-go/deepseek-v4.1-flash"
+model: "claude-oauth/claude-haiku-5-5"
 permissions:
   - { action: "edit", resource: "*", effect: "deny" }
   - { action: "shell", resource: "*", effect: "deny" }
