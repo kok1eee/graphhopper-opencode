@@ -37,7 +37,9 @@ export default Plugin.define({
       }
     });
 
-    /* 21 graphhopper_* tools＋7 lsp_* tools (namespace無し・生名登録。M1) */
+    /* 21 graphhopper_* tools＋7 lsp_* tools (namespace無し・生名登録。M1)。
+     * invoke は MCP 経路 (spawn版) 専用に残し、plugin には session版を置かない。
+     * TUI 内の子起動は task() が正 (native・可視・並列)。P2-1 は MCP spawn で充足済み。 */
     await ctx.tool.transform((editor) => {
       registerCoreTools(editor, gh);
       registerOpsTools(editor, gh);

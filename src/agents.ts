@@ -62,6 +62,7 @@ const SEARCH_RULES: readonly string[] = [
   "- 構造パターン検索は `ast-grep` を使う（例: `ast-grep -p 'function $NAME($$$)' <path>`、YAMLルールは `ast-grep --rule rule.yaml`）。`sg` はLinuxで newgrp を指すため使わない",
   "- テキスト検索は最終手段として `rg` を使う（例: `rg -n <pattern> <path>`）。plain grep は使わない。同じ概念の検索を繰り返さない",
   "- ファイル名・ディレクトリ探索は `fd` を使う（例: `fd --type f <name> <path>`、`fd --max-depth 2 --type d <name>`）。単純なパターン一致は Glob ツールでも可。`find` は使わない",
+  "- `.opencode/` 配下（plugin wiring・agent宣言）は graft の索引対象外（dot-dirは不可）かつ `rg`/`fd` の既定でも不可視（hidden）。探すときは `rg --hidden`/Glob で明示する。graft-first の裏付けに rg を使う際も `--hidden` を忘れると plugin 側の参照を見落とす",
   "- Read で全文取得した直後に同じファイルへ Grep しない（全文が手元にある）",
 ];
 

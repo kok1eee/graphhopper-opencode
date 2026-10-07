@@ -5,3 +5,6 @@ node_modules/
 
 # opencode v2 local state — machine-specific, not shared.
 opencode.db*
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
