@@ -1,15 +1,15 @@
 # graphhopper-opencode
 
-graphhopper state-machine plugin for **opencode v2** (`@opencode/cli` 2.0.x,
-project-local install). Ported from `graphhopper-opencode` (v1, opencode 1.18.x).
+graphhopper state-machine plugin for **opencode v2** (`@opencode/cli` 2.0.28,
+mise-managed). Ported from `graphhopper-opencode` (v1, opencode 1.18.x).
 v1 and v2 run side by side in separate directories.
 
 ## Which binary to use here
 
-Always the project-local v2 binary:
+The mise-managed v2 binary, pinned by this repo's `mise.toml`:
 
 ```sh
-./node_modules/.bin/opencode
+opencode
 ```
 
 Never open this directory with opencode v1 — the v1 global graphhopper plugin
@@ -54,7 +54,7 @@ graft build
 Headless smoke tests (all verified 2026-10-06/07):
 
 ```sh
-./node_modules/.bin/opencode run --standalone --model claude-oauth/claude-sonnet-5-5 \
+opencode run --standalone --model claude-oauth/claude-sonnet-5-5 \
   --title ping "Call graphhopper_status and reply with ONLY its raw output."
 ```
 

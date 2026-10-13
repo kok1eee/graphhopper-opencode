@@ -23,10 +23,9 @@ export const HEARTBEAT_MS = 30000;
 export const DEPTH_ENV = "GH_INVOKE_DEPTH";
 export const MAX_DEPTH = 1;
 
-/* v2 バイナリ解決 (R-M4)。PATH の `opencode` は v1 (mise) のままのため使わない。
- * 誤ランタイムでの実行は黙って通さず null (fail loud) にする。 */
-const V2_PROJECT_BINARY =
-  `${process.env["HOME"] ?? ""}/Documents/personal-dev/graphhopper-opencode/node_modules/.bin/opencode`;
+/* v2 バイナリ解決 (R-M4 → mise 一本化)。
+ * 供給元は mise 管理の `opencode` (PATH) ただ一つ。PATH がまだ v1 を指していると
+ * 誤ランタイムで静かに走るため、`--version` の major を検査し v2 以外は null (fail loud)。 */
 
 export interface InvokeArgs {
   agent: string;
@@ -52,16 +51,40 @@ function defaultSpawn(
   return spawn(cmd, args, opts);
 }
 
-/** v2 binary解決: GH_OPENCODE_BIN > project-local v2。それ以外は null (v1 誤爆防止)。 */
+/** PATH 上の `opencode` が v2 か（v1 誤爆防止）。 */
+function isV2Binary(bin: string): boolean {
+  try {
+    const out = execSync(`${JSON.stringify(bin)} --version`, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const major = /v?(\d+)\./.exec(out.trim());
+    return major !== null && Number(major[1]) >= 2;
+  } catch {
+    return false;
+  }
+}
+
+let cachedV2Binary: string | null | undefined;
+
+/** v2 binary解決: GH_OPENCODE_BIN (検査なし・明示指定優先) > PATH の v2 `opencode`。
+ * どちらも無ければ null (fail loud)。 */
 export function resolveBinary(): string | null {
   const envBin = process.env["GH_OPENCODE_BIN"];
   if (envBin) return envBin;
-  try {
-    execSync(`test -x ${JSON.stringify(V2_PROJECT_BINARY)}`);
-    return V2_PROJECT_BINARY;
-  } catch {
-    return null;
-  }
+  if (cachedV2Binary !== undefined) return cachedV2Binary;
+  cachedV2Binary = (() => {
+    try {
+      const bin = execSync("command -v opencode", {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      return bin && isV2Binary(bin) ? bin : null;
+    } catch {
+      return null;
+    }
+  })();
+  return cachedV2Binary;
 }
 
 function validModel(m: string): boolean {
@@ -270,7 +293,9 @@ export async function invokeStructured(
   }
   const binary = resolveBinary();
   if (!binary)
-    return fail("error: opencode binary not found (PATH and known mise path)");
+    return fail(
+      "error: opencode v2 binary not found (set GH_OPENCODE_BIN, or install v2 as `opencode` on PATH)",
+    );
   const root = resolve(args.root);
   const timeoutMs = Math.min(
     MAX_TIMEOUT_MS,

@@ -1,0 +1,7 @@
+# opencode の供給元を mise 一本化する (project-local の node_modules には置かない)。
+# この repo の v2 バイナリは `opencode` (mise の shim) で、ここでバージョンを pin する。
+# 注意: opencode v1 (1.18.x) でこのディレクトリを開かないこと。
+# allow_builds: @opencode/cli は postinstall で実バイナリを配置するため、
+# mise (embedded aube) の既定「依存の lifecycle script は実行しない」を明示的に解除する。
+[tools]
+"npm:@opencode/cli" = { version = "2.0.28", allow_builds = ["@opencode/cli"] }
