@@ -1,8 +1,11 @@
 # graphhopper-opencode
 
 graphhopper state-machine plugin for **opencode v2** (`@opencode/cli` 2.0.28,
-mise-managed). Ported from `graphhopper-opencode` (v1, opencode 1.18.x).
-v1 and v2 run side by side in separate directories.
+mise-managed). Ported from the v1 (opencode 1.18.x) implementation; the two run
+side by side in separate directories.
+
+- v2 (this repo): https://github.com/kok1eee/graphhopper-opencode
+- v1 legacy: https://github.com/kok1eee/graphhopper-opencode-legacy
 
 ## Which binary to use here
 
