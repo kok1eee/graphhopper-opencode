@@ -181,7 +181,7 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
     description:
       "コードベース事実収集エージェント（graft-first）。ファイル検索・構造把握・呼び出し関係の特定。高頻度に呼ばれるためコストティア最下層で使う（モデルは .graphhopper/config.json の agents で設定）。外部公式ドキュメント調査は graphhopper-librarian に委ねる",
     mode: "all",
-    model: { providerID: "opencode-go", model: "longcat-2.5-preview-free" },
+    model: { providerID: "minimax", model: "MiniMax-M3.1-Flash" },
     temperature: 0.1,
     bash: SEARCH_ONLY_BASH,
     system: [
@@ -201,7 +201,7 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
     description:
       "外部公式ドキュメント・仕様調査専用の安価エージェント。公式doc・仕様・横断的意味質問の事実収集。判断は含まない（モデルは .graphhopper/config.json の agents で設定）",
     mode: "all",
-    model: { providerID: "opencode-go", model: "space-bunny-free" },
+    model: { providerID: "minimax", model: "MiniMax-M3.1-Flash" },
     temperature: 0.1,
     bash: SEARCH_ONLY_BASH,
     system: [
