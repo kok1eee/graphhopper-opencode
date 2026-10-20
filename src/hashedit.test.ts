@@ -48,6 +48,14 @@ const CFG: GraphhopperConfig = {
   stuck_diff_stall: 4,
   lsp_servers: [],
   require_critic: false,
+  cascade: {
+    enabled: false,
+    baseline: "opencode-go/minimax-m3.1-flash-free",
+    escalate: "claude-oauth/claude-sonnet-5-5",
+    escalate_on: ["hard"],
+    fail_threshold: 2,
+    agents: { apply: "always", quality: {} },
+  },
 };
 
 describe("hashedit", () => {

@@ -3,7 +3,7 @@
  *
  * Liquid decisions API専用。d1はchat LLMではなくテキストを生成しないため
  * opencode modelとしては配線できない。plugin/MCP toolから直接HTTPSで叩く。
- * POST https://api.liquid.ai/decisions/v1/systemone（model d1:free）。
+ * POST https://api.liquid.ai/decisions/v1/systemone（model d1）。
  *
  * 構成: callDecision（HTTP・認証・timeout・例外握りの唯一の窓口）の上に
  * 用途別の関数（decideRoute／selectLenses）を載せる。新しい利用場所を足す時は
@@ -12,22 +12,25 @@
  * 失敗は呼び出し側が極性を決める（routeはfull、selectorはfallback=true）。
  * 本モジュールはstateを書かない。
  */
+import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import * as state from "./state";
 
 export const DECISION_API_URL =
   "https://api.liquid.ai/decisions/v1/systemone";
-export const DECISION_MODEL = "d1:free";
+export const DECISION_MODEL = "d1";
 /** routeのconfidenceがこれ未満ならfullに倒す（初期値。scoreboardで調整） */
 export const DECISION_CONFIDENCE_FLOOR = 0.6;
 export const DECISION_TIMEOUT_MS = 15_000;
-/** selectorはadvisory-onlyで取りこぼしの害が小さい。d1:freeはレイテンシがぶれる
- * （実測3〜15s超）ため、遅い時は短く切ってfallbackに倒す（待たせない） */
+/** selectorはadvisory-onlyで取りこぼしの害が小さい。decision APIはレイテンシがぶれる
+ * （無料枠 d1:free の実測で3〜15s超）ため、遅い時は短く切ってfallbackに倒す（待たせない）。
+ * 現在は d1（有料・入力トークン課金のみ）を使うが、timeoutは無料枠時代の保守的な値を維持する */
 export const SELECTOR_TIMEOUT_MS = 5_000;
 /** selectorのみ、一過性の失敗（timeout/429/5xx/ネットワーク）を最大2回リトライする。
- * d1:freeはコールドスタートで初回が15s級に遅れ、温まると0.3s台になるため、
- * 打ち切った初回がサーバーを起こし、2回目以降で拾える。最悪 5s×3=15s */
+ * 無料枠 d1:free はコールドスタートで初回が15s級に遅れ、温まると0.3s台になるため、
+ * 打ち切った初回がサーバーを起こし、2回目以降で拾える。最悪 5s×3=15s
+ * （現在の d1 でも同じリトライ方針を維持する） */
 export const SELECTOR_RETRIES = 2;
 /** selectorのNoul採用閾値（0.5＝公式docの「最大不確実」中点。初期値） */
 export const SELECTOR_NOUL_THRESHOLD = 0.5;
@@ -53,7 +56,10 @@ export type DecisionAnswers = Record<
  * requestは先頭200字のみ（較正には概要で足りる）。書込失敗は握り潰す */
 export type DecisionLog = {
   ts: string;
-  kind: "decide" | "select" | "compact" | "compact-skip";
+  /** decide行のid。outcome行は decision_id で参照する */
+  id?: string;
+  decision_id?: string | null;
+  kind: "decide" | "select" | "compact" | "compact-skip" | "outcome";
   request: string;
   result: string | string[];
   confidence: number | null;
@@ -61,6 +67,19 @@ export type DecisionLog = {
   latencyMs: number;
   fallback: boolean;
   reason: string;
+  /** decide時のd1難易度（較正用） */
+  difficulty?: string | null;
+  difficultyConfidence?: number | null;
+  /** kind=outcome: goal終了時の実績 */
+  outcome?: {
+    goal_id: string;
+    fail_streak: number;
+    escalated: boolean;
+    verifier: string | null;
+    /** workflow runner を使った場合のテンプレ名と挿入ノード列 */
+    workflow?: string;
+    inserted?: string[];
+  };
 };
 
 export async function logDecision(
@@ -184,7 +203,36 @@ export type DecideResult = {
   route: state.EntryRoute;
   confidence: number | null;
   reason: string;
+  /** 難易度（d1判定）。null＝未判定・低confidence・失敗。nullは昇格しない */
+  difficulty: Difficulty | null;
+  /** difficulty の confidence（較正用） */
+  difficultyConfidence: number | null;
 };
+
+export type { Difficulty } from "./state";
+type Difficulty = state.Difficulty;
+
+/* 難易度3択のcriteria。routeとは独立に「失敗コスト」を見る */
+export const DECISION_DIFFICULTY_CRITERIA: Record<Difficulty, string> = {
+  easy: "単純。既存パターンの踏襲で、設計判断なし・変更範囲が狭い・失敗しても即座に直せる",
+  normal: "普通。設計判断が多少ある／複数ファイルに触れる／テストを書く必要がある。easyにもhardにも当てはまらない全て",
+  hard: "難しい。設計判断が重い・未知の領域・変更範囲が広い／失敗コストが高い・アーキテクチャや契約に触れる",
+};
+
+/** d1 difficulty の choice を写像する（純関数）。不正・低confidenceは null（昇格しない） */
+export function mapDifficultyAnswer(
+  choice: unknown,
+  confidence: unknown,
+): { difficulty: Difficulty | null; confidence: number | null; reason: string } {
+  const conf = typeof confidence === "number" ? confidence : null;
+  if (choice !== "easy" && choice !== "normal" && choice !== "hard") {
+    return { difficulty: null, confidence: conf, reason: "d1不正difficulty→未判定" };
+  }
+  if (conf !== null && conf < DECISION_CONFIDENCE_FLOOR) {
+    return { difficulty: null, confidence: conf, reason: `d1低confidence(${conf})→未判定` };
+  }
+  return { difficulty: choice, confidence: conf, reason: `d1判定(${choice})` };
+}
 
 /* d1応答のchoice＋confidence→route写像（純粋関数。単体テスト対象）。
  * 不正choice・5択外・低confidenceはfull */
@@ -195,7 +243,7 @@ export function mapDecisionAnswer(
   const route =
     typeof choice === "string" ? state.normalizeEntryRoute(choice) : null;
   if (!route) {
-    return { route: "full", confidence: null, reason: "d1不正choice→full" };
+    return { route: "full", confidence: null, reason: "d1不正choice→full", difficulty: null, difficultyConfidence: null };
   }
   const conf = typeof confidence === "number" ? confidence : null;
   if (conf !== null && conf < DECISION_CONFIDENCE_FLOOR) {
@@ -203,9 +251,11 @@ export function mapDecisionAnswer(
       route: "full",
       confidence: conf,
       reason: `d1低confidence(${conf})→full`,
+      difficulty: null,
+      difficultyConfidence: null,
     };
   }
-  return { route, confidence: conf, reason: `d1判定(${route})` };
+  return { route, confidence: conf, reason: `d1判定(${route})`, difficulty: null, difficultyConfidence: null };
 }
 
 /* 入口routeをd1で判定する。失敗は一律full（現行fail-safe極性＝重い側）。
@@ -221,7 +271,10 @@ export async function decideRoute(
     failed = false,
   ): Promise<DecideResult> => {
     if (opts?.root) {
+      const id = randomUUID().slice(0, 8);
+      state.writeLastDecisionId(opts.root, id);
       await logDecision(opts.root, {
+        id,
         kind: "decide",
         request: request.slice(0, 200),
         result: d.route,
@@ -229,6 +282,8 @@ export async function decideRoute(
         latencyMs: Math.round(performance.now() - t0),
         fallback: failed,
         reason: d.reason,
+        difficulty: d.difficulty,
+        difficultyConfidence: d.difficultyConfidence,
       });
     }
     return d;
@@ -242,6 +297,12 @@ export async function decideRoute(
           "この作業内容に適したgraphhopperの入口routeを1つ選べ。迷ったらfull",
         criteria: DECISION_ROUTE_CRITERIA,
       },
+      difficulty: {
+        type: "choice",
+        instructions:
+          "この作業自体の難易度を1つ選べ（routeとは独立。迷ったらnormal）",
+        criteria: DECISION_DIFFICULTY_CRITERIA,
+      },
     },
     fetchFn,
   );
@@ -251,13 +312,23 @@ export async function decideRoute(
         route: "full",
         confidence: null,
         reason: `${r.reason}→full`,
+        difficulty: null,
+        difficultyConfidence: null,
       },
       true,
     );
   }
-  return finish(
-    mapDecisionAnswer(r.answers.route?.choice, r.answers.route?.confidence),
+  const base = mapDecisionAnswer(r.answers.route?.choice, r.answers.route?.confidence);
+  const diff = mapDifficultyAnswer(
+    r.answers.difficulty?.choice,
+    r.answers.difficulty?.confidence,
   );
+  return finish({
+    ...base,
+    difficulty: diff.difficulty,
+    difficultyConfidence: diff.confidence,
+    reason: `${base.reason} / ${diff.reason}`,
+  });
 }
 
 /* ───────── verifier編成selector ───────── */
@@ -387,4 +458,84 @@ export async function selectLenses(
     });
   }
   return finish(assembleLenses(r.answers, designExcerpt));
+}
+
+/* ───────── workflow 失敗時の回復選択 ───────── */
+
+export const RECOVERY_CRITERIA: Record<string, string> = {
+  oracle: "原因が不明・設計判断の誤りが疑われる。上位モデルに助言を求めてから再実行する",
+  escalate_tier: "指示は妥当で、モデルの力不足が疑われる。上位モデルで同じノードを再実行する",
+  abort: "要件が曖昧・環境の問題・人間の判断が要る。自動で続けず人間に戻す",
+};
+
+/* 失敗ノードの回復手をd1で選ぶ。失敗・不正・低confidenceは必ず "abort"。
+ * 許可リストの強制（使用済み除外）は呼び出し側 allowRecovery が行う */
+export async function chooseRecovery(
+  failed: { id: string; reason: string; task: string },
+  fetchFn: FetchFn = fetch,
+  opts?: { root?: string },
+): Promise<string> {
+  const t0 = performance.now();
+  const r = await callDecision(
+    `workflowノード失敗\nタスク: ${failed.task.slice(0, 300)}\nノード: ${failed.id}\n理由: ${failed.reason.slice(0, 300)}`,
+    { recovery: { type: "choice", instructions: "失敗への次の手を1つ選べ。迷ったらabort", criteria: RECOVERY_CRITERIA } },
+    fetchFn,
+  );
+  let choice = "abort";
+  let reason = r.ok ? "" : r.reason;
+  let confidence: number | null = null;
+  if (r.ok) {
+    const a = r.answers.recovery;
+    confidence = typeof a?.confidence === "number" ? a.confidence : null;
+    if (typeof a?.choice === "string" && Object.hasOwn(RECOVERY_CRITERIA, a.choice)) {
+      if (confidence !== null && confidence < DECISION_CONFIDENCE_FLOOR) reason = `低confidence(${confidence})→abort`;
+      else choice = a.choice;
+    } else reason = "不正choice→abort";
+  }
+  if (opts?.root) {
+    await logDecision(opts.root, {
+      kind: "select",
+      request: `recovery:${failed.id} ${failed.reason}`.slice(0, 200),
+      result: choice,
+      confidence,
+      latencyMs: Math.round(performance.now() - t0),
+      fallback: !r.ok,
+      reason,
+    });
+  }
+  return choice;
+}
+
+/* タスクに適用するworkflowテンプレをd1で選ぶ。失敗・不正・低confidenceは "none"（自動起動しない） */
+export const WORKFLOW_CRITERIA: Record<string, string> = {
+  bugfix: "症状・再現手順のあるバグ修正。再現テスト→修正→検証で進められる",
+  none: "新機能・設計・調査・リファクタなどバグ修正ではない、または曖昧",
+};
+
+export async function chooseWorkflow(task: string, fetchFn: FetchFn = fetch, opts?: { root?: string }): Promise<string> {
+  const t0 = performance.now();
+  const r = await callDecision(
+    `タスク: ${task.slice(0, 400)}`,
+    { workflow: { type: "choice", instructions: "適用するworkflowを1つ選べ。迷ったらnone", criteria: WORKFLOW_CRITERIA } },
+    fetchFn,
+  );
+  let choice = "none";
+  let confidence: number | null = null;
+  if (r.ok) {
+    const a = r.answers.workflow;
+    confidence = typeof a?.confidence === "number" ? a.confidence : null;
+    if (typeof a?.choice === "string" && Object.hasOwn(WORKFLOW_CRITERIA, a.choice) && (confidence === null || confidence >= DECISION_CONFIDENCE_FLOOR)) choice = a.choice;
+  }
+  if (opts?.root) {
+    await logDecision(opts.root, {
+      kind: "select",
+      request: `workflow:${task}`.slice(0, 200),
+      result: choice,
+      confidence,
+      latencyMs: Math.round(performance.now() - t0),
+      fallback: !r.ok,
+      reason: r.ok ? "" : r.reason,
+    });
+  }
+  return choice;
 }

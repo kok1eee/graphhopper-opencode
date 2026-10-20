@@ -5,6 +5,13 @@
  * H3 対応: context() は全文のみ (limit 無し) のためローカルで tail slice する。
  */
 import { $ } from "bun";
+import { finishCascade, flushOrphanCascade, syncCascade } from "./cascade";
+import {
+  type ChildHost,
+  escalateChildSession,
+  resolveChildModel,
+  shouldSwitchChild,
+} from "../../../src/cascade";
 import {
   autoEscalateOnStuck,
   continuationText,
@@ -21,6 +28,7 @@ import { pushGoalIntent, resolveCompactDb, runCompactGate } from "../../../src/c
 import * as state from "../../../src/state";
 import { isDesignDocLocked, isDesignGateBlocked } from "../../../src/state";
 import { LSPServerManager } from "../../../src/lsp/client";
+import { handleGrandchild } from "./workflow";
 import type { Gh } from "./shared";
 
 const SYSTEM_GUIDE = `## graphhopper（designing/implementing/polishループ）の存在
@@ -217,9 +225,19 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
     for await (const raw of ctx.event.subscribe({ signal: controller.signal })) {
       const event = raw as { type?: string; data?: { sessionID?: string; info?: { id?: string } } };
       try {
+        if (event.type === "session.created") {
+          const created = event.data as Record<string, unknown> | undefined;
+          if (handleGrandchild(gh, created)) continue;
+          handleChildSessionCreated(gh, created);
+          continue;
+        }
         if (event.type === "session.deleted") {
           const id = event.data?.info?.id;
-          if (id) state.unbindSession(root, id);
+          if (id) {
+            const activeGoal = state.getActive(root);
+            if (activeGoal?.state.session_id === id) await finishCascade(gh);
+            state.unbindSession(root, id);
+          }
           try {
             await LSPServerManager.stopAll();
           } catch {
@@ -238,9 +256,98 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
   return () => controller.abort();
 }
 
+/** 切替処理中の子セッション（同一 sessionID の二重切替を防ぐ） */
+const inflightChildren = new Set<string>();
+
+/**
+ * 子セッション（subagent）が作成されたときのモデル切替。
+ * quality マップ（verifier / simplify）に入っている agent だけを対象にし、
+ * 親が goal の bound セッションであるときだけ切り替える。
+ * 実行は detached（イベントループを待たない）。記録は同期書き込み。
+ */
+function handleChildSessionCreated(gh: Gh, data: Record<string, unknown> | undefined): void {
+  if (!data) return;
+  const sessionID = typeof data.sessionID === "string" ? data.sessionID : "";
+  const parentID = typeof data.parentID === "string" ? data.parentID : null;
+  const agent = typeof data.agent === "string" ? data.agent : null;
+  if (!sessionID || !agent) return;
+
+  const active = state.getActive(gh.root);
+  if (!active) return;
+  const config = state.readConfig(gh.root);
+  if (!config.cascade.enabled) return;
+
+  const target = resolveChildModel({ childAgent: agent, quality: config.cascade.agents.quality });
+  if (!target) return;
+
+  const current = data.model as { providerID?: string; id?: string } | undefined;
+  const currentModel =
+    current?.providerID && current?.id ? `${current.providerID}/${current.id}` : null;
+
+  if (
+    !shouldSwitchChild({
+      parentID,
+      boundSessionID: active.state.session_id,
+      goalStatus: active.goal.status,
+      childAgent: agent,
+      currentModel,
+      target,
+      apply: config.cascade.agents.apply,
+      level: active.state.cascade?.level ?? null,
+    })
+  ) {
+    return;
+  }
+  // 冪等: 同じ子セッションは2回切替しない（記録済み or 実行中）
+  if ((active.state.cascade?.children ?? []).some((c) => c.sessionID === sessionID)) return;
+  if (inflightChildren.has(sessionID)) return;
+  inflightChildren.add(sessionID);
+
+  const host: ChildHost = {
+    switchModel: async (id, model) => {
+      await gh.ctx.session.switchModel({ sessionID: id, model: model as never });
+    },
+    getModel: async (id) => {
+      const info = await gh.ctx.session.get({ sessionID: id });
+      const m = info?.model;
+      if (!m?.providerID || !m?.id) return null;
+      return { providerID: m.providerID, id: m.id, ...(m.variant ? { variant: m.variant } : {}) };
+    },
+  };
+
+  void (async () => {
+    try {
+      const r = await escalateChildSession(host, { sessionID, agent, target, timeoutMs: 5000 });
+      if (!r) return;
+      state.appendCascadeChild(gh.root, {
+        sessionID,
+        agent,
+        model: r.model,
+        readback_match: r.readback_match,
+        at: new Date().toISOString(),
+      });
+      if (!r.readback_match) {
+        console.warn(`graphhopper: 子セッションのモデル切替を確認できませんでした (${agent} → ${r.model})`);
+      }
+    } catch {
+      // 切替失敗は子セッションの実行を止めない
+    } finally {
+      inflightChildren.delete(sessionID);
+    }
+  })();
+}
+
 async function onIdle(gh: Gh, sessionID: string): Promise<void> {
   const { ctx, root } = gh;
   if (!sessionID) return;
+  let cascadeNote: string | null = null;
+  /* MCP経由の complete/clear で残った cascade を先に復元する */
+  try {
+    const orphanNote = await flushOrphanCascade(gh);
+    if (orphanNote) cascadeNote = orphanNote;
+  } catch {
+    // 復元失敗で idle 処理を止めない
+  }
   let active = state.getActive(root);
   if (!active) return;
   if (active.goal.status !== "active") return;
@@ -313,6 +420,7 @@ async function onIdle(gh: Gh, sessionID: string): Promise<void> {
     const tail = result.output.split("\n").slice(-20).join("\n");
     state.noteEvalFingerprint(root, `${result.ok}:${state.fnv1a(tail)}`);
     const r = state.recordAttempt(root, result.ok, result.ok ? "" : `eval failed: ${cmd}`);
+    if (!result.ok && !r.giveUp) cascadeNote = await syncCascade(gh);
     const wcLines = await state.measureWorkingCopyLines($, root);
     if (wcLines !== null) state.noteDiffLines(root, wcLines);
     if (active.goal.id) {
@@ -379,7 +487,7 @@ async function onIdle(gh: Gh, sessionID: string): Promise<void> {
 
   await ctx.session.prompt({
     sessionID,
-    text: [state.CONTINUATION_MARKER, evalNote, continuationText(active.goal, active.state)].filter(Boolean).join("\n\n"),
+    text: [state.CONTINUATION_MARKER, evalNote, cascadeNote, continuationText(active.goal, active.state)].filter(Boolean).join("\n\n"),
   });
   if (idleMsgs !== null) {
     state.noteContinuation(

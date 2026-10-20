@@ -3,10 +3,13 @@ import {
   assembleLenses,
   callDecision,
   callDecisionWithRetry,
+  chooseRecovery,
+  chooseWorkflow,
   logDecision,
   DECISION_CONFIDENCE_FLOOR,
   decideRoute,
   mapDecisionAnswer,
+  mapDifficultyAnswer,
   SELECTOR_NOUL_THRESHOLD,
   SELECTOR_RETRIES,
   SELECTOR_TIMEOUT_MS,
@@ -48,6 +51,24 @@ describe("mapDecisionAnswer（d1 choice写像）", () => {
   });
 });
 
+describe("mapDifficultyAnswer（難易度写像）", () => {
+  test("3択はそのまま通す", () => {
+    for (const d of ["easy", "normal", "hard"] as const) {
+      expect(mapDifficultyAnswer(d, 0.9).difficulty).toBe(d);
+    }
+  });
+
+  test("低confidence・不正値は null（昇格しない）", () => {
+    expect(mapDifficultyAnswer("hard", DECISION_CONFIDENCE_FLOOR - 0.01).difficulty).toBeNull();
+    expect(mapDifficultyAnswer("unknown", 0.9).difficulty).toBeNull();
+    expect(mapDifficultyAnswer(null, 0.9).difficulty).toBeNull();
+  });
+
+  test("confidence欠測は通す", () => {
+    expect(mapDifficultyAnswer("hard", undefined)).toMatchObject({ difficulty: "hard", confidence: null });
+  });
+});
+
 describe("decideRoute（fail-safe）", () => {
 
   test("key未設定→full", async () => {
@@ -83,12 +104,29 @@ describe("decideRoute（fail-safe）", () => {
     const fakeFetch = (async () => ({
       ok: true,
       json: async () => ({
-        answers: { route: { choice: "light", confidence: 0.9 } },
+        answers: {
+          route: { choice: "light", confidence: 0.9 },
+          difficulty: { choice: "hard", confidence: 0.8 },
+        },
       }),
     })) as unknown as typeof fetch;
     try {
       const r = await decideRoute("何かやる", fakeFetch);
-      expect(r).toMatchObject({ route: "light", confidence: 0.9 });
+      expect(r).toMatchObject({ route: "light", confidence: 0.9, difficulty: "hard" });
+    } finally {
+      restore();
+    }
+  });
+
+  test("difficulty が無い応答でも route は返し、difficulty は null", async () => {
+    setKey("liquid_test");
+    const fakeFetch = (async () => ({
+      ok: true,
+      json: async () => ({ answers: { route: { choice: "light", confidence: 0.9 } } }),
+    })) as unknown as typeof fetch;
+    try {
+      const r = await decideRoute("何かやる", fakeFetch);
+      expect(r).toMatchObject({ route: "light", difficulty: null });
     } finally {
       restore();
     }
@@ -444,6 +482,60 @@ describe("logDecision（較正ログ）", () => {
     } finally {
       if (saved === undefined) delete process.env.LIQUID_API_KEY;
       else process.env.LIQUID_API_KEY = saved;
+    }
+  });
+});
+
+describe("chooseRecovery（fail-safe）", () => {
+  const f = { id: "fix", reason: "r", task: "t" };
+  const mk = (a: unknown) =>
+    (async () => ({ ok: true, json: async () => ({ answers: { recovery: a } }) })) as unknown as typeof fetch;
+  test("正常choiceは通す", async () => {
+    setKey("liquid_test");
+    try {
+      expect(await chooseRecovery(f, mk({ choice: "oracle", confidence: 0.9 }))).toBe("oracle");
+      expect(await chooseRecovery(f, mk({ choice: "escalate_tier", confidence: 0.9 }))).toBe("escalate_tier");
+    } finally {
+      restore();
+    }
+  });
+  test("不正choice・低confidence・prototypeキーはabort", async () => {
+    setKey("liquid_test");
+    try {
+      expect(await chooseRecovery(f, mk({ choice: "rm", confidence: 0.9 }))).toBe("abort");
+      expect(await chooseRecovery(f, mk({ choice: "oracle", confidence: 0.01 }))).toBe("abort");
+      expect(await chooseRecovery(f, mk({ choice: "toString", confidence: 0.9 }))).toBe("abort");
+    } finally {
+      restore();
+    }
+  });
+  test("key未設定・HTTP失敗はabort", async () => {
+    setKey(undefined);
+    try {
+      expect(await chooseRecovery(f)).toBe("abort");
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe("chooseWorkflow", () => {
+  const mk = (a: unknown) =>
+    (async () => ({ ok: true, json: async () => ({ answers: { workflow: a } }) })) as unknown as typeof fetch;
+  test("bugfix選択・不正/低confidence/key無しはnone", async () => {
+    setKey("liquid_test");
+    try {
+      expect(await chooseWorkflow("t", mk({ choice: "bugfix", confidence: 0.9 }))).toBe("bugfix");
+      expect(await chooseWorkflow("t", mk({ choice: "bugfix", confidence: 0.01 }))).toBe("none");
+      expect(await chooseWorkflow("t", mk({ choice: "x", confidence: 0.9 }))).toBe("none");
+    } finally {
+      restore();
+    }
+    setKey(undefined);
+    try {
+      expect(await chooseWorkflow("t")).toBe("none");
+    } finally {
+      restore();
     }
   });
 });

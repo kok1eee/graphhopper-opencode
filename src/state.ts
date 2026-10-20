@@ -113,6 +113,11 @@ export function normalizeEntryRoute(v: unknown): EntryRoute | null {
   return legacy ?? null;
 }
 
+/** difficulty の正規化。未知値は null（昇格しない） */
+export function normalizeDifficulty(v: unknown): Difficulty | null {
+  return v === "easy" || v === "normal" || v === "hard" ? v : null;
+}
+
 export interface VerifierVerdict {
   level: VerdictLevel;
   reason: string;
@@ -148,6 +153,33 @@ export interface RouterState {
   deep: boolean;
   /** deep=trueの理由（触れたriskファイル列）。false時はnull */
   deep_reason: string | null;
+}
+
+/** 難易度（d1判定）。null＝未判定。昇格判断にのみ使う */
+export type Difficulty = "easy" | "normal" | "hard";
+
+/** 子セッション（subagent）のモデル切替記録 */
+export interface CascadeChild {
+  sessionID: string;
+  agent: string;
+  /** 適用したモデル "provider/model" */
+  model: string;
+  /** 切替後の読み返しが一致したか（実リクエストの保証ではない） */
+  readback_match: boolean;
+  at: string;
+}
+
+/** モデルカスケードの適用状態。goal終了時に restore へ戻す */
+export interface CascadeState {
+  level: "baseline" | "escalated";
+  reason: string;
+  /** 適用中の "provider/model"（表示用。未適用は null） */
+  model: string | null;
+  /** goal開始前のモデル。ここへ戻す。取れなかった場合は null（＝切替しない） */
+  restore: { providerID: string; id: string; variant?: string } | null;
+  /** 直近の子セッション切替記録（古い順に最大10件） */
+  children: CascadeChild[];
+  at: string;
 }
 
 export interface LoopState {
@@ -227,6 +259,12 @@ export interface LoopState {
   initial_diff_files: string[] | null;
   /** 入口判定のroute。null＝full（未呼び出し・legacy）。light/advised→full昇格のみ可 */
   entry_route: EntryRoute | null;
+  /** 入口判定の難易度。null＝未判定（昇格しない） */
+  difficulty: Difficulty | null;
+  /** 入口判定(decide)の較正ログ id。decisions.jsonl の decide 行と outcome 行を結ぶ。null＝未判定 */
+  decision_id: string | null;
+  /** モデルカスケードの適用状態。null＝未適用 */
+  cascade: CascadeState | null;
   /** light/advised→full昇格の実施時刻。null＝未昇格 */
   escalated_at: string | null;
   updated_at: string;
@@ -235,6 +273,27 @@ export interface LoopState {
 export interface GoalsFile {
   goals: Goal[];
   active: string | null;
+}
+
+/** difficulty に応じたモデルカスケード。既定は無効（明示opt-in） */
+export interface CascadeConfig {
+  enabled: boolean;
+  /** 通常時に使う "provider/model#variant" */
+  baseline: string;
+  /** 昇格時に使う "provider/model#variant" */
+  escalate: string;
+  /** 昇格する難易度 */
+  escalate_on: Difficulty[];
+  /** 連続失敗がこの数に達したら難易度に関係なく昇格（0以下で無効） */
+  fail_threshold: number;
+  /** 常に昇格モデルで回す判定用 agent（goal の段には依存しない） */
+  agents: {
+    /** always: 段に関係なく切替 / escalated: メインが escalated のときだけ切替 */
+    apply: "always" | "escalated";
+    quality: { [name: string]: string };
+    /** 後方互換の旧キー。quality と同じ意味（読み取り時に quality へマージする） */
+    escalate?: { [name: string]: string };
+  };
 }
 
 export interface GraphhopperConfig {
@@ -275,6 +334,8 @@ export interface GraphhopperConfig {
   /** trueで designing→implementing 遷移に critic_review 記録を要求する。
    * 既定 false（opt-in維持。ゲート化の是非は未決のためflagで両対応） */
   require_critic: boolean;
+  /** モデルカスケード。既定無効 */
+  cascade: CascadeConfig;
 }
 
 export const DEFAULT_CONFIG: GraphhopperConfig = {
@@ -291,6 +352,14 @@ export const DEFAULT_CONFIG: GraphhopperConfig = {
   stuck_diff_stall: 4,
   lsp_servers: [],
   require_critic: false,
+  cascade: {
+    enabled: false,
+    baseline: "opencode-go/minimax-m3.1-flash-free",
+    escalate: "claude-oauth/claude-sonnet-5-5",
+    escalate_on: ["hard"],
+    fail_threshold: 2,
+    agents: { apply: "always", quality: {} },
+  },
 };
 
 function dir(root: string): string {
@@ -604,6 +673,24 @@ export function readConfig(root: string): GraphhopperConfig {
       raw.stuck_diff_stall ?? DEFAULT_CONFIG.stuck_diff_stall,
     lsp_servers: raw.lsp_servers ?? DEFAULT_CONFIG.lsp_servers,
     require_critic: raw.require_critic ?? DEFAULT_CONFIG.require_critic,
+    cascade: {
+      ...DEFAULT_CONFIG.cascade,
+      ...(raw.cascade ?? {}),
+      agents: {
+        apply:
+          (project.cascade?.agents?.apply ?? global.cascade?.agents?.apply) === "escalated"
+            ? "escalated"
+            : "always",
+        // 後方互換: 旧 `cascade.agents.escalate` は `quality` として読む
+        quality: {
+          ...DEFAULT_CONFIG.cascade.agents.quality,
+          ...(global.cascade?.agents?.escalate ?? {}),
+          ...(global.cascade?.agents?.quality ?? {}),
+          ...(project.cascade?.agents?.escalate ?? {}),
+          ...(project.cascade?.agents?.quality ?? {}),
+        },
+      },
+    },
   };
 }
 
@@ -642,6 +729,9 @@ function emptyState(): LoopState {
     diff_stall: 0,
     last_stuck_reasons: [],
     entry_route: null,
+    difficulty: null,
+    decision_id: null,
+    cascade: null,
     escalated_at: null,
     initial_diff_lines: null,
     initial_diff_files: null,
@@ -656,6 +746,11 @@ export function readState(root: string): LoopState {
     ...loaded,
     router: { ...emptyState().router, ...(loaded.router ?? {}) },
   };
+  // 旧形式（children を持たない cascade）を正規化する。readState 後に [...cascade.children] を
+  // 広げる箇所が壊れないよう children 配列を必ず用意する
+  if (merged.cascade) {
+    merged.cascade = { ...merged.cascade, children: merged.cascade.children ?? [] };
+  }
   // 破損 state.json の未知 phase は designing にフォールバックする。
   // 未検証のまま通すと PHASE_ACTION[phase] 参照が undefined になる。
   if (!(PHASES as readonly string[]).includes(merged.phase)) {
@@ -715,6 +810,7 @@ export function startGoal(
   // pending entry_route（route_set先行）の消費。無ければnull＝full。
   // directはpendingを書かない（historyのみ）ため消費集合に入れない
   const pending = readPendingRoute(root);
+  next.decision_id = readLastDecisionId(root);
   if (
     pending &&
     (pending.route === "full" ||
@@ -723,6 +819,7 @@ export function startGoal(
       pending.route === "oracle")
   ) {
     next.entry_route = pending.route;
+    next.difficulty = pending.difficulty ?? null;
   }
   clearPendingRoute(root);
   writeState(root, next);
@@ -1093,6 +1190,8 @@ export function resetLoopForClear(root: string): void {
 export interface PendingRoute {
   route: EntryRoute;
   reason?: string;
+  /** 入口判定の難易度（goal start で LoopState へ移す） */
+  difficulty?: Difficulty | null;
   at: string;
 }
 
@@ -1101,12 +1200,17 @@ function pendingRoutePath(root: string): string {
 }
 
 /** route_set先行の一時置き場（goal start時に消費・削除。再起動耐性のためstate外ファイル） */
-export function writePendingRoute(root: string, route: EntryRoute, reason?: string): void {
+export function writePendingRoute(
+  root: string,
+  route: EntryRoute,
+  reason?: string,
+  difficulty?: Difficulty | null,
+): void {
   try {
     mkdirSync(dir(root), { recursive: true });
     writeFileSync(
       pendingRoutePath(root),
-      JSON.stringify({ route, reason, at: new Date().toISOString() }),
+      JSON.stringify({ route, reason, difficulty: difficulty ?? null, at: new Date().toISOString() }),
       "utf8",
     );
   } catch {
@@ -1121,7 +1225,27 @@ export function readPendingRoute(root: string): PendingRoute | null {
     // 旧A/B/Cも受理し新名に正規化（history互換）。directは消費側で除外する
     const route = normalizeEntryRoute(p.route);
     if (!route) return null;
-    return { route, reason: p.reason, at: String(p.at ?? "") };
+    return { route, reason: p.reason, difficulty: normalizeDifficulty(p.difficulty), at: String(p.at ?? "") };
+  } catch {
+    return null;
+  }
+}
+
+/** 直近の decide の id（decide が書き、goal start が拾う）。鮮度は10分 */
+export function writeLastDecisionId(root: string, id: string): void {
+  try {
+    mkdirSync(dir(root), { recursive: true });
+    writeFileSync(join(dir(root), "last_decision.json"), JSON.stringify({ id, at: Date.now() }));
+  } catch {
+    // 較正用。失敗しても本体を止めない
+  }
+}
+
+export function readLastDecisionId(root: string): string | null {
+  try {
+    const p = JSON.parse(readFileSync(join(dir(root), "last_decision.json"), "utf8")) as { id?: string; at?: number };
+    if (typeof p.id !== "string" || typeof p.at !== "number") return null;
+    return Date.now() - p.at <= 10 * 60_000 ? p.id : null;
   } catch {
     return null;
   }
@@ -1143,11 +1267,14 @@ export function bindEntryRoute(
   root: string,
   route: EntryRoute,
   reason?: string,
+  difficulty?: Difficulty | null,
 ): ActiveLoop | null {
   const active = getActive(root);
   if (!active || active.goal.status !== "active" || active.state.entry_route) return null;
   if (route === "direct") return null;
-  const r = mutateActive(root, () => ({ state: { entry_route: route } }));
+  const r = mutateActive(root, () => ({
+    state: { entry_route: route, ...(difficulty ? { difficulty } : {}) },
+  }));
   if (r) {
     recordEvent(root, {
       type: "entry_route",
@@ -1157,6 +1284,34 @@ export function bindEntryRoute(
     });
   }
   return r;
+}
+
+/** カスケード状態の保存。null でクリア */
+export function setCascade(root: string, cascade: CascadeState | null): ActiveLoop | null {
+  return mutateActive(root, () => ({ state: { cascade } }));
+}
+
+/** 子セッションの切替記録を積む（古い順・最大10件） */
+export function appendCascadeChild(root: string, child: CascadeChild): ActiveLoop | null {
+  const active = getActive(root);
+  if (!active) return null;
+  const base: CascadeState = active.state.cascade ?? {
+    level: "baseline",
+    reason: "",
+    model: null,
+    restore: null,
+    children: [],
+    at: new Date().toISOString(),
+  };
+  const children = [...(base.children ?? []), child].slice(-10);
+  return mutateActive(root, () => ({ state: { cascade: { ...base, children } } }));
+}
+
+/** active goal が無い状態でも cascade だけ消す（MCP経由の終了などで残った孤児の後始末） */
+export function clearCascadeState(root: string): void {
+  const s = readState(root);
+  if (!s.cascade) return;
+  writeState(root, { ...s, cascade: null });
 }
 
 /* light/advised→full昇格（ラチェット）。full→light・null→lightは拒否。

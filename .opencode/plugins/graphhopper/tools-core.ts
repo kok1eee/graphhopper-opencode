@@ -18,7 +18,9 @@ import {
   SELECTOR_TOOL_DESCRIPTION,
   selectLenses,
 } from "../../../src/decision";
+import { finishCascade, syncCascade } from "./cascade";
 import * as state from "../../../src/state";
+import { readRun, summarizeRun } from "../../../src/workflow";
 import { noteSession, S, text, type Gh } from "./shared";
 
 type Ctx = { sessionID: string };
@@ -74,12 +76,18 @@ export function registerCoreTools(
             // 測定不能は無視（initial null＝旧挙動）
           }
           const started = state.getActive(root) ?? a;
+          const cfg = state.readConfig(root);
+          const cascadeBase = await syncCascade(gh);
+          const cascadeNote =
+            cascadeBase && cfg.cascade.enabled
+              ? `${cascadeBase}（注: 判定nodeは cascade.agents.quality の子セッションだけ昇格モデルに切替）`
+              : cascadeBase;
           const consumed =
             started.state.entry_route !== null && started.state.entry_route !== undefined
               ? `pending entry_route=${started.state.entry_route} を消費`
               : "pending無し→full（未判定・legacy）扱い";
           return text(
-            `goal started: "${started.goal.title}" (${started.goal.id})\n${consumed}\nphase: designing\n次: ${effectivePhaseAction("designing", started.state.entry_route)}`,
+            `goal started: "${started.goal.title}" (${started.goal.id})\n${consumed}${started.state.difficulty ? ` / difficulty=${started.state.difficulty}` : ""}\nphase: designing${cascadeNote ? `\n${cascadeNote}` : ""}\n次: ${effectivePhaseAction("designing", started.state.entry_route)}`,
           );
         }
         case "pause": {
@@ -97,9 +105,10 @@ export function registerCoreTools(
             );
           }
           const a = state.resumeGoal(root, sessionID, args.force);
+          const cascadeNote = a ? await syncCascade(gh) : null;
           return text(
             a
-              ? `resumed: "${a.goal.title}" | phase: ${a.state.phase}${args.force ? " (forced)" : ""}`
+              ? `resumed: "${a.goal.title}" | phase: ${a.state.phase}${args.force ? " (forced)" : ""}${cascadeNote ? `\n${cascadeNote}` : ""}`
               : "no active goal",
           );
         }
@@ -112,13 +121,19 @@ export function registerCoreTools(
                 "小diffで verifier fan-out が不要なら、人間の明示的な判断がある場合のみ force: true を使ってください。",
             );
           }
+          const restored = await finishCascade(gh);
           const done = state.completeGoal(root);
-          return text(done ? `completed: "${done.goal.title}"${args.force ? " (forced)" : ""}` : "no active goal");
+          return text(
+            done
+              ? `completed: "${done.goal.title}"${args.force ? " (forced)" : ""}${restored ? `\n${restored}` : ""}`
+              : "no active goal",
+          );
         }
         case "clear": {
+          const restored = await finishCascade(gh);
           state.clearActiveGoal(root);
           state.unbindSession(root, sessionID);
-          return text("cleared");
+          return text(restored ? `cleared\n${restored}` : "cleared");
         }
         default:
           return text(`error: unknown action "${args.action}"`);
@@ -160,6 +175,16 @@ export function registerCoreTools(
             ? `oracle_consult: ${a.state.oracle_consult.summary.slice(0, 100)}`
             : "oracle_consult: (none)",
           `fail_streak: ${a.state.fail_streak}`,
+          a.state.cascade
+            ? `cascade: level=${a.state.cascade.level} model=${a.state.cascade.model ?? "-"} children=${a.state.cascade.children.length}`
+            : "cascade: (none)",
+          ...(a.state.cascade?.children.length
+            ? a.state.cascade.children
+                .slice(-3)
+                .map((c) => `  child: ${c.agent} → ${c.model}${c.readback_match ? "" : " (readback不一致)"}`)
+            : []),
+          ...(summarizeRun(readRun(root, a.goal.id)) ? [summarizeRun(readRun(root, a.goal.id))!] : []),
+          `difficulty: ${a.state.difficulty ?? "unknown"}`,
           `loop: stop_count=${a.state.loop_stop_count}/${state.readConfig(root).loop_stop_max} resume_blocked=${state.isResumeBlocked(root)} streak=${a.state.loop_streak}`,
           a.state.notes ? `notes: ${a.state.notes}` : null,
           state.planLogExists(root, a.goal.id) ? `log: .graphhopper/plans/${a.goal.id}.log.md` : null,
@@ -221,9 +246,10 @@ export function registerCoreTools(
       return text(
         [
           `route=${r.route}（confidence=${r.confidence ?? "n/a"}。${r.reason}）`,
+          `difficulty=${r.difficulty ?? "unknown"}${r.difficultyConfidence !== null ? `（confidence=${r.difficultyConfidence}）` : ""}`,
           r.route === "direct"
             ? "次: loopなしで直接対応せよ。goalは作らない（必要なら graphhopper_route_set(route: 'direct') でhistoryに残す）。"
-            : "次: graphhopper_route_set(route, reason) で記録する。full/light/advised/oracleなら graphhopper_goal(start)（pending routeが消費される）。",
+            : `次: graphhopper_route_set(route, reason, difficulty: '${r.difficulty ?? "unknown"}') で記録する。full/light/advised/oracleなら graphhopper_goal(start)（pending routeが消費される）。`,
         ].join("\n"),
       );
     },
@@ -237,12 +263,17 @@ export function registerCoreTools(
       {
         route: S.str("decide返却のroute（full/light/direct/advised/oracle。旧A/B/Cも受理。大文字小文字不問。不正値はfullに倒す）"),
         reason: S.optStr("判定理由の要旨（任意）"),
+        difficulty: S.enumOf(["easy", "normal", "hard"], "decide返却のdifficulty（任意。goal start時にカスケード判定へ渡る）"),
       },
       ["route"],
     ),
     execute: async (input: unknown) => {
-      const args = input as { route: string; reason?: string };
+      const args = input as { route: string; reason?: string; difficulty?: string };
       const parsed = parseEntryRoute(args.route);
+      const difficulty =
+        args.difficulty === "easy" || args.difficulty === "normal" || args.difficulty === "hard"
+          ? args.difficulty
+          : null;
       const reason = args.reason ?? parsed.reason;
       if (parsed.route === "direct") {
         const active = state.getActive(root);
@@ -254,8 +285,8 @@ export function registerCoreTools(
         });
         return text("entry_route=direct を記録（historyのみ）。loopなしで直接対応せよ。goalは作らない。");
       }
-      state.writePendingRoute(root, parsed.route, reason);
-      const bound = state.bindEntryRoute(root, parsed.route, reason);
+      state.writePendingRoute(root, parsed.route, reason, difficulty);
+      const bound = state.bindEntryRoute(root, parsed.route, reason, difficulty);
       if (bound) state.clearPendingRoute(root);
       return text(
         [
@@ -340,6 +371,11 @@ export function registerCoreTools(
       if (!active) return text("error: no active goal");
       const r = state.recordAttempt(root, args.ok, args.note);
       const managed = !args.ok && active.state.eval_cmd ? `\n${EVAL_MANAGED_NOTE}` : "";
+      const attemptCascade = !args.ok ? await syncCascade(gh) : null;
+      const cascadeNote =
+        attemptCascade && state.readConfig(root).cascade.enabled
+          ? `${attemptCascade}（注: 判定nodeの子セッションは quality マップで昇格モデルに切替）`
+          : attemptCascade;
       if (args.ok) return text("attempt recorded: ok (fail_streak reset to 0)");
       if (r.giveUp) {
         const paused = state.pauseGoal(root);
@@ -351,6 +387,7 @@ export function registerCoreTools(
             `attempt recorded: fail (fail_streak=${r.fail_streak})`,
             `giveUp: true — 連続失敗が上限に達したため goal を pause した。修正して graphhopper_goal(action: 'resume') で再開せよ（fail_streak は 0 に戻る）。`,
             managed,
+            cascadeNote,
           ]
             .filter(Boolean)
             .join("\n"),
@@ -363,6 +400,7 @@ export function registerCoreTools(
             "escalate: true",
             "次: task(subagent_type: 'graphhopper-oracle') に相談せよ。これまでの失敗試行（何を試して何が起きたか）を渡すこと。",
             managed,
+            cascadeNote,
           ]
             .filter(Boolean)
             .join("\n"),
@@ -378,6 +416,7 @@ export function registerCoreTools(
               `stuck: ${stuck.reasons.join(", ")} → light/advised→full自動昇格（designingに巻き戻し）。`,
               ESCALATE_NEXT,
               managed,
+              cascadeNote,
             ]
               .filter(Boolean)
               .join("\n"),
@@ -389,6 +428,7 @@ export function registerCoreTools(
             `escalate: true (stuck: ${stuck.reasons.join(", ")})`,
             "次: task(subagent_type: 'graphhopper-oracle') に相談せよ。これまでの失敗試行・編集履歴を渡すこと。",
             managed,
+            cascadeNote,
           ]
             .filter(Boolean)
             .join("\n"),

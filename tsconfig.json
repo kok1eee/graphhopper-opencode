@@ -6,7 +6,9 @@
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
+    "jsx": "preserve",
+    "jsxImportSource": "@opentui/solid",
     "types": ["bun-types", "node"]
   },
-  "include": ["src/**/*.ts", ".opencode/plugins/**/*.ts"]
+  "include": ["src/**/*.ts", ".opencode/plugins/**/*.ts", ".opencode/plugins/**/*.tsx"]
 }

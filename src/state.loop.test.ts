@@ -72,6 +72,14 @@ const CFG: GraphhopperConfig = {
   stuck_diff_stall: 4,
   lsp_servers: [],
   require_critic: false,
+  cascade: {
+    enabled: false,
+    baseline: "opencode-go/minimax-m3.1-flash-free",
+    escalate: "claude-oauth/claude-sonnet-5-5",
+    escalate_on: ["hard"],
+    fail_threshold: 2,
+    agents: { apply: "always", quality: {} },
+  },
 };
 
 function tmpRoot(): string {
@@ -2284,5 +2292,19 @@ describe("goal_summary telemetry", () => {
     expect(files.some((f) => f.includes("goal_complete"))).toBe(true);
     expect(files.some((f) => f.includes("goal_summary"))).toBe(true);
     void g;
+  });
+});
+
+import { mkdtempSync as _mk } from "node:fs";
+import { tmpdir as _tmp } from "node:os";
+import { join as _join } from "node:path";
+import { readLastDecisionId, writeLastDecisionId } from "./state";
+
+describe("last_decision id（decide→goal の橋渡し）", () => {
+  test("書いた id を読める・無ければ null", () => {
+    const root = _mk(_join(_tmp(), "gh-ld-"));
+    expect(readLastDecisionId(root)).toBeNull();
+    writeLastDecisionId(root, "abc12345");
+    expect(readLastDecisionId(root)).toBe("abc12345");
   });
 });

@@ -9,6 +9,7 @@ import { registerHooks } from "./hooks";
 import { registerCoreTools } from "./tools-core";
 import { registerLspTools } from "./tools-lsp";
 import { registerOpsTools } from "./tools-ops";
+import { registerWorkflowTool } from "./workflow";
 import type { Gh } from "./shared";
 
 export default Plugin.define({
@@ -44,6 +45,7 @@ export default Plugin.define({
       registerCoreTools(editor, gh);
       registerOpsTools(editor, gh);
       registerLspTools(editor, gh);
+      registerWorkflowTool(editor, gh);
     });
 
     return registerHooks(gh);
