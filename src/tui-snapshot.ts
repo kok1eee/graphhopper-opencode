@@ -337,6 +337,8 @@ export function loadSnapshot(root: string, opts?: { historyLimit?: number }): Sn
 
 /** フッター用の1行チップ（サイドバーが隠れていても見える面） */
 export function formatChip(snapshot: Snapshot): string {
+  // 完了した goal の diff・進捗は過去の値が残っているだけなので出さない（紛らわしい）
+  if (snapshot.phase === "done") return "done";
   const loop = snapshot.loop.blocked ? `·!loop` : snapshot.failStreak > 0 ? `·f${snapshot.failStreak}` : "";
   const diff = snapshot.diff.lines === null ? "" : `·Δ${snapshot.diff.lines}`;
   const c = snapshot.cascade;

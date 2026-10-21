@@ -354,3 +354,17 @@ describe("cascade 表示", () => {
     expect(shortModel(null)).toBe("");
   });
 });
+
+describe("formatChip: 完了 goal", () => {
+  test("done では Δ・進捗を出さない", () => {
+    const snap = buildSnapshot({
+      root: "/r",
+      state: { ...state(), phase: "done", router: { diff_lines: 1282 } },
+      goals,
+      config: null,
+      history: [],
+      todos: { total: 28, done: 23, open: 0, unreadable: false, invalidCount: 0 },
+    });
+    expect(formatChip(snap!)).toBe("done");
+  });
+});
