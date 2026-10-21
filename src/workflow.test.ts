@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   BUGFIX_WORKFLOW,
   allowRecovery,
+  RECOVERY_KINDS,
   canReuse,
   expandTemplate,
   extractJsonBlock,
@@ -13,6 +14,7 @@ import {
   resolveNodeModel,
   validateOutput,
 } from "./workflow";
+import { RECOVERY_CRITERIA } from "./decision";
 import { runWorkflow, type WorkflowHost } from "./workflow-runner";
 import type { CascadeConfig } from "./state";
 
@@ -23,6 +25,8 @@ const cascade = (over: Partial<CascadeConfig> = {}): CascadeConfig => ({
   escalate_on: ["hard"],
   fail_threshold: 2,
   agents: { apply: "always", quality: { "graphhopper-verifier": "p/ver" } },
+  second: "p/second",
+  expert: "p/expert",
   ...over,
 });
 
@@ -31,7 +35,13 @@ describe("純粋層", () => {
     const [repro, , verify] = BUGFIX_WORKFLOW.nodes;
     expect(resolveNodeModel(repro!, cascade())).toBe("p/base");
     expect(resolveNodeModel(verify!, cascade())).toBe("p/ver");
-    expect(resolveNodeModel(repro!, cascade(), true)).toBe("p/esc");
+    expect(resolveNodeModel(repro!, cascade(), "quality")).toBe("p/esc");
+    // quality override は agent 割当表を優先する（verify のverifier は p/ver）
+    expect(resolveNodeModel(verify!, cascade(), "quality")).toBe("p/ver");
+    expect(resolveNodeModel(repro!, cascade(), "second")).toBe("p/second");
+    expect(resolveNodeModel(repro!, cascade(), "expert")).toBe("p/expert");
+    // second/expert 未設定なら escalate にフォールバック
+    expect(resolveNodeModel(repro!, cascade({ second: undefined, expert: undefined }), "second")).toBe("p/esc");
     expect(resolveNodeModel(repro!, cascade({ enabled: false }))).toBeNull();
   });
   test("expandTemplate", () => {
@@ -59,12 +69,18 @@ describe("純粋層", () => {
     expect(canReuse({ ...rec, status: "failed" }, rec.key, "r1")).toBe(false);
     expect(canReuse(undefined, rec.key, "r1")).toBe(false);
   });
+  test("RECOVERY_CRITERIA は RECOVERY_KINDS と一致する", () => {
+    expect(Object.keys(RECOVERY_CRITERIA).sort()).toEqual([...RECOVERY_KINDS].sort());
+  });
+
   test("allowRecovery: 許可リスト外・使用済みは abort", () => {
     expect(allowRecovery("oracle", [])).toBe("oracle");
     expect(allowRecovery("oracle", ["oracle"])).toBe("abort");
     expect(allowRecovery("rm -rf", [])).toBe("abort");
     expect(allowRecovery(undefined, [])).toBe("abort");
     expect(allowRecovery("abort", ["oracle"])).toBe("abort");
+    expect(allowRecovery("second_opinion", [])).toBe("second_opinion");
+    expect(allowRecovery("second_opinion", ["second_opinion"])).toBe("abort");
   });
 });
 
@@ -181,7 +197,7 @@ describe("runWorkflow", () => {
     expect(r.status).toBe("done");
     expect(r.inserted).toEqual(["oracle"]);
     const oracleCall = f.calls.find((c) => c.title.includes("oracle"))!;
-    expect(oracleCall.model).toBe("p/esc");
+    expect(oracleCall.model).toBe("p/expert");
   });
 
   test("許可リスト外の回復・d1 失敗は abort", async () => {
@@ -191,6 +207,16 @@ describe("runWorkflow", () => {
     const f2 = fake({ ...OK, repro: ["x"] });
     const r2 = await runWorkflow(f2.host, base({ decideRecovery: async () => { throw new Error("d1 down"); } }));
     expect(r2.status).toBe("failed");
+  });
+
+  test("second_opinion は別角度モデルで再実行し、2回目の失敗は abort", async () => {
+    const f = fake({ ...OK, repro: ["x"] });
+    const r = await runWorkflow(f.host, base({ decideRecovery: async () => "second_opinion" }));
+    expect(r.status).toBe("failed");
+    expect(r.inserted).toEqual(["second_opinion"]);
+    const retry = f.calls.filter((c) => c.title.includes("repro"));
+    expect(retry[0]!.model).toBe("p/base");
+    expect(retry[retry.length - 1]!.model).toBe("p/second");
   });
 
   test("escalate_tier は quality モデルで再実行、2回目の失敗は abort", async () => {

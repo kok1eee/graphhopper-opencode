@@ -282,6 +282,10 @@ export interface CascadeConfig {
   baseline: string;
   /** 昇格時に使う "provider/model#variant" */
   escalate: string;
+  /** 別角度の再試行に使うモデル（省略時は escalate にフォールバック） */
+  second?: string;
+  /** お手上げ段（oracle 用）のモデル（省略時は escalate にフォールバック） */
+  expert?: string;
   /** 昇格する難易度 */
   escalate_on: Difficulty[];
   /** 連続失敗がこの数に達したら難易度に関係なく昇格（0以下で無効） */
@@ -334,6 +338,11 @@ export interface GraphhopperConfig {
   /** trueで designing→implementing 遷移に critic_review 記録を要求する。
    * 既定 false（opt-in維持。ゲート化の是非は未決のためflagで両対応） */
   require_critic: boolean;
+  /** dynamic workflow runner の設定 */
+  workflow?: {
+    /** 1ノードのタイムアウト(ms)。省略時は 10 分 */
+    node_timeout_ms?: number;
+  };
   /** モデルカスケード。既定無効 */
   cascade: CascadeConfig;
 }
@@ -356,6 +365,8 @@ export const DEFAULT_CONFIG: GraphhopperConfig = {
     enabled: false,
     baseline: "opencode-go/minimax-m3.1-flash-free",
     escalate: "claude-oauth/claude-sonnet-5-5",
+    second: "opencode-go/deepseek-v4.1-flash",
+    expert: "claude-oauth/claude-opus-5-5",
     escalate_on: ["hard"],
     fail_threshold: 2,
     agents: { apply: "always", quality: {} },
@@ -673,6 +684,10 @@ export function readConfig(root: string): GraphhopperConfig {
       raw.stuck_diff_stall ?? DEFAULT_CONFIG.stuck_diff_stall,
     lsp_servers: raw.lsp_servers ?? DEFAULT_CONFIG.lsp_servers,
     require_critic: raw.require_critic ?? DEFAULT_CONFIG.require_critic,
+    workflow: {
+      ...(global.workflow ?? {}),
+      ...(project.workflow ?? {}),
+    },
     cascade: {
       ...DEFAULT_CONFIG.cascade,
       ...(raw.cascade ?? {}),

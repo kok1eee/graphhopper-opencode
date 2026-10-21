@@ -8,7 +8,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { CascadeConfig } from "./state";
 
-export type Tier = "baseline" | "quality";
+export type Tier = "baseline" | "quality" | "second" | "expert";
 export type FieldType = "string" | "number" | "boolean" | "array";
 
 export interface OutputSpec {
@@ -36,13 +36,13 @@ export interface WorkflowDef {
   nodes: WorkflowNode[];
 }
 
-export const RECOVERY_KINDS = ["oracle", "escalate_tier", "abort"] as const;
+export const RECOVERY_KINDS = ["oracle", "escalate_tier", "second_opinion", "abort"] as const;
 export type RecoveryKind = (typeof RECOVERY_KINDS)[number];
 
 export const ORACLE_NODE: WorkflowNode = {
   id: "oracle",
   agent: "graphhopper-oracle",
-  tier: "quality",
+  tier: "expert",
   prompt:
     "以下のノードが失敗した。原因と次に取るべき手を助言せよ。\n失敗ノード: {{failed.id}}\n失敗理由: {{failed.reason}}\n" +
     "末尾に ```json {\"advice\": \"...\"} ``` を出力すること。",
@@ -108,16 +108,27 @@ export function getWorkflow(name: string): WorkflowDef | null {
   return name === "bugfix" ? BUGFIX_WORKFLOW : null;
 }
 
-/** tier→モデル。cascade 無効なら null（親セッションのモデルを継承） */
+/**
+ * tier→モデル。cascade 無効なら null（親セッションのモデルを継承）。
+ * - baseline: 初期作業（安いモデル）
+ * - quality: 判定・検証（信頼モデル）
+ * - second: 別角度での再試行
+ * - expert: お手上げ（人が判断すべき段階）
+ * tierOverride は failure recovery の表現。escalate_tier=quality（同一手順を信頼モデルで再実行）、
+ * second_opinion=second（別角度のモデルで再実行）。
+ */
 export function resolveNodeModel(
   node: WorkflowNode,
   cascade: CascadeConfig,
-  forceQuality = false,
+  tierOverride?: Tier | null,
 ): string | null {
   if (!cascade.enabled) return null;
-  if (forceQuality || node.tier === "quality") {
+  const tier = tierOverride ?? node.tier;
+  if (tier === "quality") {
     return (node.agent ? cascade.agents.quality[node.agent] : undefined) ?? cascade.escalate;
   }
+  if (tier === "second") return cascade.second ?? cascade.escalate;
+  if (tier === "expert") return cascade.expert ?? cascade.escalate;
   return cascade.baseline;
 }
 

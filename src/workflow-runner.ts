@@ -12,6 +12,7 @@ import {
   extractJsonBlock,
   nodeKey,
   resolveNodeModel,
+  type Tier,
   validateOutput,
   writeRun,
   type NodeRecord,
@@ -201,9 +202,9 @@ export async function runWorkflow(host: WorkflowHost, opts: RunOptions): Promise
   /** ノードを実行（キャッシュ→子起動）。fanout は lens ごとに並列で直接の子を起動 */
   const execNode = async (
     node: WorkflowNode,
-    forceQuality: boolean,
+    tierOverride?: Tier | null,
   ): Promise<{ ok: boolean; output: Record<string, unknown> | null; reason: string }> => {
-    const model = resolveNodeModel(node, opts.cascade, forceQuality);
+    const model = resolveNodeModel(node, opts.cascade, tierOverride);
     const baseVars = { task: opts.task, outputs, feedback, advice: run.adviceNode === node.id ? advice : "" };
     const lenses = node.fanout ?? [null];
     const prompts = lenses.map((lens) => expandTemplate(node.prompt, { ...baseVars, lens: lens ?? "" }));
@@ -259,8 +260,8 @@ export async function runWorkflow(host: WorkflowHost, opts: RunOptions): Promise
     run.current = node.id;
     save();
 
-    let forceQuality = false;
-    let r = await execNode(node, forceQuality);
+    let tierOverride: Tier | null = null;
+    let r = await execNode(node, tierOverride);
     while (!r.ok) {
       if (r.reason === "aborted") return finish("aborted", "abort 要求");
       const choice: RecoveryKind = allowRecovery(
@@ -278,10 +279,12 @@ export async function runWorkflow(host: WorkflowHost, opts: RunOptions): Promise
         run.advice = advice;
         run.adviceNode = node.id;
         save();
+      } else if (choice === "second_opinion") {
+        tierOverride = "second";
       } else {
-        forceQuality = true;
+        tierOverride = "quality";
       }
-      r = await execNode(node, forceQuality);
+      r = await execNode(node, tierOverride);
     }
     outputs[node.id] = r.output!;
 

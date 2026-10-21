@@ -16,12 +16,16 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import * as state from "./state";
+import { RECOVERY_KINDS } from "./workflow";
 
 export const DECISION_API_URL =
   "https://api.liquid.ai/decisions/v1/systemone";
 export const DECISION_MODEL = "d1";
 /** routeのconfidenceがこれ未満ならfullに倒す（初期値。scoreboardで調整） */
 export const DECISION_CONFIDENCE_FLOOR = 0.6;
+/** 回復手選択専用のconfidence下限。d1の「次の手」判断は routing より本質的に曖昧で、
+ * 0.6では全部abortに落ちる（実測: 0.02〜0.52）。0.3は「ほぼ自信がない」場合だけを弾く */
+export const RECOVERY_CONFIDENCE_FLOOR = 0.3;
 export const DECISION_TIMEOUT_MS = 15_000;
 /** selectorはadvisory-onlyで取りこぼしの害が小さい。decision APIはレイテンシがぶれる
  * （無料枠 d1:free の実測で3〜15s超）ため、遅い時は短く切ってfallbackに倒す（待たせない）。
@@ -463,8 +467,9 @@ export async function selectLenses(
 /* ───────── workflow 失敗時の回復選択 ───────── */
 
 export const RECOVERY_CRITERIA: Record<string, string> = {
-  oracle: "原因が不明・設計判断の誤りが疑われる。上位モデルに助言を求めてから再実行する",
-  escalate_tier: "指示は妥当で、モデルの力不足が疑われる。上位モデルで同じノードを再実行する",
+  oracle: "原因が不明・設計判断の誤りが疑われる。お手上げモデルに助言を求めてから再実行する",
+  escalate_tier: "指示は妥当で、モデルの力不足が疑われる。信頼モデルで同じノードを再実行する",
+  second_opinion: "同じ手順では同じ結果が出そう。別角度のモデルで同じノードを再実行する",
   abort: "要件が曖昧・環境の問題・人間の判断が要る。自動で続けず人間に戻す",
 };
 
@@ -484,11 +489,13 @@ export async function chooseRecovery(
   let choice = "abort";
   let reason = r.ok ? "" : r.reason;
   let confidence: number | null = null;
+  let raw = "";
   if (r.ok) {
     const a = r.answers.recovery;
     confidence = typeof a?.confidence === "number" ? a.confidence : null;
-    if (typeof a?.choice === "string" && Object.hasOwn(RECOVERY_CRITERIA, a.choice)) {
-      if (confidence !== null && confidence < DECISION_CONFIDENCE_FLOOR) reason = `低confidence(${confidence})→abort`;
+    if (typeof a?.choice === "string" && (RECOVERY_KINDS as readonly string[]).includes(a.choice)) {
+      raw = a.choice;
+      if (confidence !== null && confidence < RECOVERY_CONFIDENCE_FLOOR) reason = `低confidence(${confidence})→abort`;
       else choice = a.choice;
     } else reason = "不正choice→abort";
   }
@@ -500,7 +507,7 @@ export async function chooseRecovery(
       confidence,
       latencyMs: Math.round(performance.now() - t0),
       fallback: !r.ok,
-      reason,
+      reason: raw && raw !== choice ? `${reason || ""} d1の選択=${raw}` : reason,
     });
   }
   return choice;

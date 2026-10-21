@@ -177,7 +177,7 @@ export function registerWorkflowTool(
             task,
             def,
             cascade: config.cascade,
-            nodeTimeoutMs: Number((config as { workflow?: { node_timeout_ms?: number } }).workflow?.node_timeout_ms) || 10 * 60_000,
+            nodeTimeoutMs: config.workflow?.node_timeout_ms || 10 * 60_000,
             isAborted: () => flag.aborted,
             abortSignal,
             resume: prev,
