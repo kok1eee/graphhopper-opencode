@@ -62,7 +62,7 @@ export function registerOpsTools(
             : null,
           route === "polish"
             ? "次: task(subagent_type: 'graphhopper-verifier') をrequirement/behavior/progressの3charterで呼び、graphhopper_verifier_setで記録する"
-            : "次: task(subagent_type: 'graphhopper-verifier') を1回、'general'charter（3観点を統合したレビュー）で呼び、graphhopper_verifier_set(results: [{lens: 'general', level}])で記録する（自己レビューだけでの完了は不可）",
+            : "次: task(subagent_type: 'graphhopper-verifier') を1回、'general'charter（3観点を統合したレビュー）で呼び、graphhopper_verifier_set(results: [{lens: 'general', level}], reason: '要約1〜3文')で記録する（reason必須。自己レビューだけでの完了は不可）",
         ]
           .filter(Boolean)
           .join("\n"),
@@ -136,7 +136,9 @@ export function registerOpsTools(
         models: results.map((r) => r.model ?? args.model ?? null),
       });
       if (result.last_verifier?.level === "clean") {
-        return text("verifier verdict: clean\ngraphhopper_phase(phase: 'done') で完了に進める。");
+        return text(
+          "verifier verdict: clean\n同じターン内で続けること: graphhopper_phase(phase: 'done') → graphhopper_goal(action: 'complete')。途中で報告して止まらない。",
+        );
       }
       return text(
         [
