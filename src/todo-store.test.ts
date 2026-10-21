@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { $ } from "bun";
 import {
   ensureTodos,
+  completeGoal,
   evalToPolish,
   evalTransitionInput,
   planPath,
@@ -425,5 +426,21 @@ describe("implementing→polish の進捗ゲート", () => {
     mkdirSync(dirname(p), { recursive: true });
     writeFileSync(p, JSON.stringify({ items: "nope" }), "utf8");
     expect(readTodos(root, g.id).items.length).toBe(0);
+  });
+});
+
+describe("完了 goal のアーカイブ", () => {
+  test("completeGoal で todos/plans が archive/ へ移り、内容は残る", () => {
+    const root = tmpRoot();
+    const g = startGoal(root, "t", "s").goal;
+    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    todoAction(root, g.id, "add", { text: "x" });
+    expect(existsSync(todosPath(root, g.id))).toBe(true);
+    completeGoal(root);
+    expect(existsSync(todosPath(root, g.id))).toBe(false);
+    expect(existsSync(planPath(root, g.id))).toBe(false);
+    const arch = join(dirname(todosPath(root, g.id)), "archive", `${g.id}.json`);
+    expect(existsSync(arch)).toBe(true);
+    expect(existsSync(join(dirname(planPath(root, g.id)), "archive", `${g.id}.md`))).toBe(true);
   });
 });

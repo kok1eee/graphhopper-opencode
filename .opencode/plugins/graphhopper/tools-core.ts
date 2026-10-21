@@ -278,7 +278,7 @@ export function registerCoreTools(
           `difficulty=${r.difficulty ?? "unknown"}${r.difficultyConfidence !== null ? `（confidence=${r.difficultyConfidence}）` : ""}`,
           r.route === "direct"
             ? "次: loopなしで直接対応せよ。goalは作らない（必要なら graphhopper_route_set(route: 'direct') でhistoryに残す）。"
-            : `次: graphhopper_route_set(route, reason, difficulty: '${r.difficulty ?? "unknown"}') で記録する。full/light/advised/oracleなら graphhopper_goal(start)（pending routeが消費される）。`,
+            : `次: graphhopper_route_set(route, reason${r.difficulty ? `, difficulty: '${r.difficulty}'` : "（difficulty は unknown なので省略。easy/normal/hard 以外は渡せない）"}) で記録する。full/light/advised/oracleなら graphhopper_goal(start)（pending routeが消費される）。`,
         ].join("\n"),
       );
     },

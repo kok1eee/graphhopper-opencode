@@ -1284,8 +1284,29 @@ export function completeGoal(root: string): ActiveLoop | null {
     ]);
     // diff退避を掃除（.graphhopper/tmp。蓄積＋古いpath誤読の防止）
     removeStashedDiff(root, r.goal.id);
+    archiveGoalFiles(root, r.goal.id);
   }
   return r;
+}
+
+/** 完了 goal の todos/plans を archive/ へ移す（削除しない＝事後に cancel 理由を確認できる） */
+export function archiveGoalFiles(root: string, goalId: string): void {
+  const pairs: [string, string][] = [
+    [todosPath(root, goalId), join(dirname(todosPath(root, goalId)), "archive", `${goalId}.json`)],
+  ];
+  for (const ext of [".md", ".log.md"]) {
+    const src = join(dirname(planPath(root, goalId)), `${goalId}${ext}`);
+    pairs.push([src, join(dirname(src), "archive", `${goalId}${ext}`)]);
+  }
+  for (const [src, dst] of pairs) {
+    try {
+      if (!existsSync(src)) continue;
+      mkdirSync(dirname(dst), { recursive: true });
+      renameSync(src, dst);
+    } catch {
+      // 移せなくても完了処理は止めない
+    }
+  }
 }
 
 /** goal出来栄えの機械採点。history由来の機械事実のみで計算し、人手採点はしない（v1）。
