@@ -15,6 +15,7 @@
 import { Plugin, usePlugin } from "@opencode/plugin/tui";
 import { type FSWatcher, existsSync, watch } from "node:fs";
 import { join } from "node:path";
+import { isTurnEndEvent } from "../../../src/events";
 import { For, Show, createSignal, onCleanup } from "solid-js";
 import {
   type Phase,
@@ -444,7 +445,7 @@ function setupNotifications(context: Plugin.Context): () => void {
         notify(`failed:${sessionID}`, "run failed", "error");
         return;
       }
-      if (event.type === "session.idle") {
+      if (isTurnEndEvent(event.type)) {
         let isChild = false;
         try {
           isChild = context.data.session.root(sessionID) !== sessionID;
@@ -487,9 +488,7 @@ function setupRunning(context: Plugin.Context): () => void {
         type === "session.execution.started" ||
         type === "session.execution.succeeded" ||
         type === "session.execution.failed" ||
-        type === "session.execution.interrupted" ||
-        type === "session.idle" ||
-        type === "session.status"
+        type === "session.execution.interrupted"
       ) {
         schedule();
       }

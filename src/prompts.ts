@@ -9,6 +9,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import * as state from "./state";
+import { formatTodoList } from "./todos";
 
 /* 言語版ガード（critic/verifier 共通）。PEP 758 系の誤検知を止める。
  * SKILL.md の同名ルールと一対で維持すること。 */
@@ -58,6 +59,44 @@ function readDesignDoc(root: string, goalId: string): string {
   const p = join(root, ".graphhopper", "plans", `${goalId}.md`);
   if (!existsSync(p)) throw new Error(`design doc が無い: plans/${goalId}.md`);
   return readFileSync(p, "utf8");
+}
+
+/**
+ * 進捗タスク一覧（charter に渡す）。
+ * design.md は planning 終端で immutable なので進捗の source of truth は
+ * .graphhopper/todos/<goalId>.json のほう。タスク 0 件なら空文字を返す。
+ * ストアを読めなかった場合は空文字ではなく「読めなかった」を明示する
+ * （タスク無しと区別.Fail-open にして進捗チェックを黙って消さない）。
+ */
+function todoSection(root: string, goalId: string): string {
+  const loaded = state.readTodosStatus(root, goalId);
+  if (!loaded.valid) {
+    return [
+      "",
+      "## 進捗タスク（source of truth: .graphhopper/todos/）",
+      "",
+      "ストアを読み込めなかった（壊れている可能性がある）。進捗起因の drift は判定不能として扱い、",
+      "『進捗は確認できなかった』と evidence_state に明記せよ。",
+    ].join("\n");
+  }
+  if (loaded.store.items.length === 0) return "";
+  const lines = [
+    "",
+    "## 進捗タスク（source of truth: .graphhopper/todos/）",
+    "",
+    formatTodoList(loaded.store),
+    "",
+    "未完了タスクが残っていないか、cancelled の理由が妥当かを見よ。",
+  ];
+  if (loaded.invalidCount > 0) {
+    // 不正要素は store から消えている（drop される）。0件扱いすると進捗を見失うので明示する
+    lines.push(
+      "",
+      `⚠ ストアに不正要素が ${loaded.invalidCount} 件ある（一覧から除かれている）。` +
+        "進捗は完全には確認できないので、その旨を evidence_state に明記せよ。",
+    );
+  }
+  return lines.join("\n");
 }
 
 function goalHeader(root: string, goalId: string): string {
@@ -174,6 +213,7 @@ export const PROMPT_DEFS: PromptDef[] = [
     ],
     render: (args, root) => {
       const id = activeGoalId(root, args["goalId"]);
+      const todos = todoSection(root, id);
       return [
         "あなたは graphhopper の verifier（progress lens）である。",
         "変更が goal に収束しているか、スコープ外の膨張・未完の残骸が無いかを検証せよ。",
@@ -183,6 +223,7 @@ export const PROMPT_DEFS: PromptDef[] = [
         PARALLEL_NOTE,
         "",
         goalHeader(root, id),
+        todos,
       ].join("\n");
     },
   },
@@ -195,6 +236,7 @@ export const PROMPT_DEFS: PromptDef[] = [
     ],
     render: (args, root) => {
       const id = activeGoalId(root, args["goalId"]);
+      const todos = todoSection(root, id);
       return [
         "あなたは graphhopper の verifier（general charter）である。",
         "「実装が design.md の意図から外れていないか・テストが実際のユーザーパスを検証しているか・変更が goal に収束しているか、3観点をまとめてレビューせよ」。",
@@ -204,6 +246,7 @@ export const PROMPT_DEFS: PromptDef[] = [
         VERSION_GUARD_RULE,
         "",
         goalHeader(root, id),
+        todos,
       ].join("\n");
     },
   },

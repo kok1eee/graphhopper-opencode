@@ -25,6 +25,7 @@ import {
 } from "../../../src/gate";
 import { PONYTAIL_RULES } from "../../../src/ponytail-rules";
 import { pushGoalIntent, resolveCompactDb, runCompactGate } from "../../../src/compact";
+import { isFailedEvent, isInterruptedEvent, isTurnEndEvent } from "../../../src/events";
 import * as state from "../../../src/state";
 import { isDesignDocLocked, isDesignGateBlocked } from "../../../src/state";
 import { LSPServerManager } from "../../../src/lsp/client";
@@ -222,34 +223,47 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
   /* event 駆動: deleted→unbind、idle→loop検知・dedupe・eval・continuation注入 */
   const controller = new AbortController();
   void (async () => {
-    for await (const raw of ctx.event.subscribe({ signal: controller.signal })) {
-      const event = raw as { type?: string; data?: { sessionID?: string; info?: { id?: string } } };
-      try {
-        if (event.type === "session.created") {
-          const created = event.data as Record<string, unknown> | undefined;
-          if (handleGrandchild(gh, created)) continue;
-          handleChildSessionCreated(gh, created);
-          continue;
-        }
-        if (event.type === "session.deleted") {
-          const id = event.data?.info?.id;
-          if (id) {
-            const activeGoal = state.getActive(root);
-            if (activeGoal?.state.session_id === id) await finishCascade(gh);
-            state.unbindSession(root, id);
+    try {
+      for await (const raw of ctx.event.subscribe({ signal: controller.signal })) {
+        const event = raw as {
+          type?: string;
+          data?: { sessionID?: string; info?: { id?: string }; status?: { type?: string } };
+        };
+        /* turn 完了のシグナルは session.execution.succeeded（v2 の正）。
+         * 判定は src/events.ts に集約している（src/events.ts:1 参照）。
+         * interrupted（ユーザー中断）と failed（プロバイダ障害）は自動継続しない。
+         *   両者は自動継続すると空回りするため、意図的に除外する。 */
+        if (isInterruptedEvent(event.type) || isFailedEvent(event.type)) continue;
+        const idle = isTurnEndEvent(event.type);
+        try {
+          if (event.type === "session.created") {
+            const created = event.data as Record<string, unknown> | undefined;
+            if (handleGrandchild(gh, created)) continue;
+            handleChildSessionCreated(gh, created);
+            continue;
           }
-          try {
-            await LSPServerManager.stopAll();
-          } catch {
-            // 停止失敗は無視（idle timeout 60sが最終防御）
+          if (event.type === "session.deleted") {
+            const id = event.data?.info?.id;
+            if (id) {
+              const activeGoal = state.getActive(root);
+              if (activeGoal?.state.session_id === id) await finishCascade(gh);
+              state.unbindSession(root, id);
+            }
+            try {
+              await LSPServerManager.stopAll();
+            } catch {
+              // 停止失敗は無視（idle timeout 60sが最終防御）
+            }
+            continue;
           }
-          continue;
+          if (!idle) continue;
+          await onIdle(gh, String(event.data?.sessionID ?? ""));
+        } catch {
+          // ループを止めないためイベントハンドラ内の例外は握りつぶす
         }
-        if (event.type !== "session.idle") continue;
-        await onIdle(gh, String(event.data?.sessionID ?? ""));
-      } catch {
-        // ループを止めないためイベントハンドラ内の例外は握りつぶす
       }
+    } catch (e) {
+      console.warn(`graphhopper: event subscribe failed: ${String(e)}`);
     }
   })();
 
@@ -427,26 +441,10 @@ async function onIdle(gh: Gh, sessionID: string): Promise<void> {
       state.recordEvent(root, { type: "eval_run", goal: active.goal.id, ok: result.ok, fail_streak: r.fail_streak });
     }
     if (result.ok) {
-      const baseline = active.state.router.baseline_rev ?? (await state.captureBaselineRev($, root));
-      const measured = await state.measureDiffLines($, root, baseline);
-      const diffLines = state.effectiveDiffLines(measured, state.getActive(root)?.state.initial_diff_lines);
-      if (baseline === null) {
-        await state.recordRouterCheckWithRisk($, root, baseline, 0, "advisor");
-        state.setPhase(root, "polish");
-        evalNote = `eval_cmd passed but baseline not captured — polishへ進む（simplifyはスキップ、verifierで検証）: ${cmd}`;
-      } else if (diffLines > 0) {
-        const cfg = state.readConfig(root);
-        const route: state.RouterRoute = diffLines > cfg.router_threshold_lines ? "polish" : "advisor";
-        const recorded = await state.recordRouterCheckWithRisk($, root, baseline, diffLines, route);
-        state.setPhase(root, "polish");
-        evalNote = `eval_cmd passed (diff ${diffLines} lines since baseline): ${cmd}`;
-        if (recorded.router.deep) {
-          evalNote += `\ndeep: ${recorded.router.deep_reason} — behavior lens（polish時）／general lens（advisor時）は休止中（verifier既定がsonnet-5-5のため上書き不要）`;
-        }
-      } else {
-        await state.recordRouterCheckWithRisk($, root, baseline, 0, "advisor");
-        evalNote = `eval_cmd passed but effective diff_lines=0 since baseline — 実装なしか前goal残骸との相殺のいずれか。実装を進めるか、router_check で手動確認せよ: ${cmd}`;
-      }
+      // 遷移入力・遷移判定は MCP 側と同一の実装を使う（分岐の食い違いを防ぐ）
+      const inp = await state.evalTransitionInput($, root, active.state.router.baseline_rev);
+      const t = await state.evalToPolish($, root, { cmd, ...inp });
+      evalNote = t.note;
     } else if (r.giveUp) {
       const paused = state.pauseGoal(root);
       if (paused) {

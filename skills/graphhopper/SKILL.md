@@ -92,6 +92,11 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
 ### implementing
 
 - design.md のタスクを1つずつ実装する
+- **タスクの完了は `graphhopper_todo` で申告する**（`action: "done"` / 進行中は `"start"` /
+  やらないと判断したものは `"cancel"`＋`reason` 必須 / 追加は `"add"` / 一覧は `"list"`）。
+  design.md の「実装タスク列」セクションが designing→implementing 遷移時に todo ストアへ seed される。
+  **未完了タスク（pending / in_progress）が残ると polish へ遷移できない**（eval_cmd 通過でも同じ）。
+  完了が済んだら必ず `graphhopper_todo` を呼ぶこと
 - goal中のsource編集は `graphhopper_hash` でhash取得→ `graphhopper_edit`（hash検証付き）を使え。
   素のedit/writeはフォールバック。拒否（throw）はhash再取得の合図
 - 詰まったら `task(subagent_type: "graphhopper-researcher")` で並列調査。

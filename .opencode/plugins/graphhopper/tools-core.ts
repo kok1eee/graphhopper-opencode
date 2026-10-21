@@ -175,6 +175,7 @@ export function registerCoreTools(
             ? `oracle_consult: ${a.state.oracle_consult.summary.slice(0, 100)}`
             : "oracle_consult: (none)",
           `fail_streak: ${a.state.fail_streak}`,
+          state.todoSummaryLine(root, a.goal.id),
           a.state.cascade
             ? `cascade: level=${a.state.cascade.level} model=${a.state.cascade.model ?? "-"} children=${a.state.cascade.children.length}`
             : "cascade: (none)",
@@ -210,9 +211,37 @@ export function registerCoreTools(
       const args = input as { phase: state.Phase; notes?: string };
       const rejected = checkPhaseMove(root, args.phase);
       if (rejected) return text(rejected);
-      const a = state.setPhase(root, args.phase, args.notes);
+      const mv = state.setPhaseChecked(root, args.phase, args.notes);
+      if (!mv.ok) return text(`error: ${mv.error ?? "遷移に失敗"}`);
+      const a = mv.active;
       if (!a) return text("error: no active goal or invalid phase");
       return text(`phase -> ${a.state.phase}\n次: ${effectivePhaseAction(a.state.phase, a.state.entry_route)}`);
+    },
+  });
+
+  editor.add({
+    name: "graphhopper_todo",
+    description:
+      "進捗タスクの操作。list=一覧 / start=進行中 / done=完了 / cancel=やらない（reason必須） / add=追加 / reopen=cancelの誤操作から復帰。implementing→polish の遷移は未完了タスクが残ると拒否される",
+    input: S.obj(
+      {
+        action: S.enumOf(["list", "start", "done", "cancel", "add", "reopen"]),
+        id: S.optStr("対象タスクのID（list/start/done/cancel で必須。t1, t2, ...）"),
+        text: S.optStr("追加するタスクの文（action=add で必須）"),
+        reason: S.optStr("理由（action=cancel で必須）"),
+      },
+      ["action"],
+    ),
+    execute: async (input: unknown) => {
+      const args = input as { action: state.TodoAction; id?: string; text?: string; reason?: string };
+      const active = state.getActive(root);
+      if (!active) return text("error: no active goal");
+      const r = state.todoAction(root, active.goal.id, args.action, {
+        ...(args.id ? { id: args.id } : {}),
+        ...(args.text ? { text: args.text } : {}),
+        ...(args.reason ? { reason: args.reason } : {}),
+      });
+      return text(r.text);
     },
   });
 
@@ -336,7 +365,7 @@ export function registerCoreTools(
   editor.add({
     name: "graphhopper_set_eval",
     description:
-      "implementingの合否を機械判定するコマンド（テスト/lint/typecheck等）を設定する。設定後はsession.idle（ターン終了）ごとに自動実行され、pass=polishへ自動遷移・fail=fail_streak機械カウントになる。graphhopper_attemptの自己申告より優先される",
+      "implementingの合否を機械判定するコマンド（テスト/lint/typecheck等）を設定する。設定後はturn終了（session.execution.succeeded）ごとに自動実行され、pass=polishへ自動遷移・fail=fail_streak機械カウントになる。graphhopper_attemptの自己申告より優先される",
     input: S.obj(
       { cmd: S.str("実行するシェルコマンド（例: 'npx tsc --noEmit && npm test'）。空文字で解除") },
       ["cmd"],

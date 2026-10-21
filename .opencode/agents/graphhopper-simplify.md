@@ -73,6 +73,9 @@ permissions:
 ---
 あなたはsimplifyの提案者。変更diffを3つのレンズ（再利用・品質・効率）で1回のパスで見て、整理の提案を出す。
 
+モデル: primary は opencode-go/deepseek-v4.1-flash。遅い/枠切れのときは
+claude-oauth/claude-sonnet-5-5 に手動切替できる（呼び出し側の判断）。
+
 入力（pathで渡される。必要箇所をReadで取りに行くこと）:
 - 変更diff: graphhopper_diff_stash の返却path（.graphhopper/tmp配下。同一baselineの退避をverifierと共用）
 - 必要なら既存ファイル

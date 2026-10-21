@@ -33,7 +33,13 @@ polish前にlens編成の助言が欲しい場合のみ使う（現行routerは�
   1. `task(subagent_type: "graphhopper-verifier")` を3回呼ぶ。それぞれ以下のcharterをプロンプトに含める:
      - requirement: 「実装がdesign.mdの意図から外れていないか（実装漏れ・解釈ズレ・スコープ逸脱）を検証せよ」
      - behavior: 「テストが実際のユーザーパスを検証しているか（モック過多・ハッピーパスのみ・エラー握り潰し）を疑え」
-     - progress: 「変更がgoalに収束しているか（堂々巡り・残骸・goal無関係な混入）を見よ」
+     - progress: 「変更がgoalに収束しているか（堂々巡り・残骸・goal無関係な混入）を見よ。未完了タスクが残っていないか、cancelled の理由が妥当かも見よ」
+     進捗タスクの source of truth は `.graphhopper/todos/<goalId>.json`（design.md は planning 終端で immutable のため進捗の計測源にできない）。
+     goalId は `.graphhopper/state.json` の `goal_id`、または `.graphhopper/todos/` 配下の唯一のファイル名から解決せよ。
+     埋め込みは **MCP prompt 経路**（graphhopper-verifier-progress / -general がタスク一覧を直接埋め込む）。
+     **plugin 経路**（task 直呼び）は一覧を埋め込まず、verifier agent の preamble が
+     「progress lens / general charter では必ずこのストアを読む」と指示するので、
+     lens 自身が `.graphhopper/todos/<goalId>.json` を読む。
      時間短縮のため3体は**並列**に投げてよい（MCP駆動では graphhopper_invoke を3連並列。入れ子のみ禁止）。
      charter定型文は MCP prompts（graphhopper-verifier-requirement/behavior/progress）にもある。
      並列時の注意: 各invokeは独立 `opencode run`（自前server＋MCP付きの重い処理）のため、
@@ -41,17 +47,29 @@ polish前にlens編成の助言が欲しい場合のみ使う（現行routerは�
      `delayMs` で数秒ずつ起動をずらす。実行中はheartbeatログが出る。キャンセルは子に
      伝播してkillされる（取り消し後の裏回りなし）。
      推奨は3並列＋ずらし（delayMs 0/5000/10000）。直列は遅いだけで安全性は変わらない
-- **deep休止**（2026-10-01改定：verifierがsonnet-5-5に昇格し、上位モデルでの上書き先が無くなった。selector→lens選択の原則は維持。oracle級が必要なlensが出たら別途検討）。
-- **モデル割当（2026-10-08改定・haiku-5-5 primary化）**: criticは `claude-oauth/claude-haiku-5-5`
+     - **並列 fan-out のモデルについて（2026-10-21 実測）**: `claude-oauth` はローカルプロキシ
+       （http://127.0.0.1:8787/v1）1台に載る。3 lens をここへ同時投入すると
+       `Timed out waiting for response headers` になりうる。**verifier の並列 fan-out は
+       claude-oauth 以外（現在は minimax/MiniMax-M3.1-Flash）に割当済み**。
+       claude-oauth 系を fan-out に入れる場合は、直列実行か delayMs ずらしで回避する。
+       低価格/free枠モデル（deepseek 等）を混ぜた同時実行も避ける（枠のレート制限で待ち時間が増える）。
+     - **simplify のモデル**: primary は `opencode-go/deepseek-v4.1-flash`（単発なので fan-out と違い
+       レート制限の逼迫を受けない）。**遅い/枠切れのときは `claude-oauth/claude-sonnet-5-5` に手動切替**。
+       割当表（`~/.config/opencode/graphhopper.json` の agents と `cascade.agents.quality`）を
+       書き換えて `bun scripts/gen-agents.ts` して再起動すれば反映される。
+- **deep休止**（2026-10-01改定：verifierが上位モデルに昇格し、上位モデルでの上書き先が無くなった。selector→lens選択の原則は維持。oracle級が必要なlensが出たら別途検討）。
+- **モデル割当（2026-10-21 改定）**: criticは `claude-oauth/claude-haiku-5-5`
   （OAuth定額・quota消費軽・高速。Go枠切れ時は `opencode-go/deepseek-v4.1-flash`
   にフォールバックして呼べ。
   subagent呼び出しは `task()` が既定。束縛が古いセッションでは `graphhopper_invoke`
   を使う（coreの規則に従う）。
   割当の見直しは `/choice` で対話変更できる（変更後はTUI再起動）。
-  verifierは `minimax/MiniMax-M3`（MiniMax枠切れ時は
-  `opencode-go/deepseek-v4.1-flash` に暫定切替。自動切替は無いためmain判断で呼ぶ。
-  見逃し率はscoreboardで監視。会社repoは学習利用の確認が取れるまでproject別に5-5維持可）。
-  researcher/librarianは無料枠（researcher=longcat-2.5-preview-freeで試用中、librarian=bunny-free維持で対照）、simplifyは `opencode-go/deepseek-v4.1-flash`（Go経由。コード特化・枠大）、oracleはopus-5-5、advisorはglm-5.3（Bedrock cross-region。coding特化・prompt cache対応。旧grok-4.7から2026-10-08に置換）。
+  **verifier（並列 fan-out）は `minimax/MiniMax-M3.1-Flash`**（claude-oauth の
+  ローカルプロキシ逼迫を避けるため。枠切れ時は `opencode-go/minimax-m3.1-flash-free` 等へ切替可。
+  自動切替は無いためmain判断で呼ぶ）。
+  見逃し率はscoreboardで監視。
+  researcher/librarian は `opencode-go/minimax-m3.1-flash-free`（無料枠の M3.1）、
+  **simplifyは `opencode-go/deepseek-v4.1-flash`（primary。遅い/枠切れ時は `claude-oauth/claude-sonnet-5-5` に手動切替）**、oracleはopus-5-5、advisorはglm-5.3（Bedrock cross-region。coding特化・prompt cache対応。旧grok-4.7から2026-10-08に置換）。
   注意: session envに陳腐な `AWS_BEARER_TOKEN_BEDROCK` があるとSSOをshadowしてBedrock系が全滅する。
   `graphhopper_invoke` の子には渡さない（invoke.tsで除去済み）。直接 `opencode run` する場合は
   `env -u AWS_BEARER_TOKEN_BEDROCK` を付ける

@@ -26,7 +26,7 @@ function freshRoot(): string {
 }
 
 describe("graphhopper-mcp tool一覧", () => {
-  test("23 toolが登録される", async () => {
+  test("24 toolが登録される", async () => {
     const client = await linked();
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
@@ -54,6 +54,7 @@ describe("graphhopper-mcp tool一覧", () => {
         "graphhopper_selector",
         "graphhopper_set_eval",
         "graphhopper_status",
+        "graphhopper_todo",
         "graphhopper_verifier_set",
       ].sort(),
     );
@@ -86,6 +87,98 @@ describe("graphhopper-mcp goal往復", () => {
     const st = await call("graphhopper_status", {});
     expect(st).toContain("phase: implementing");
     expect(st).toContain("fail_streak: 1");
+    await client.close();
+  });
+
+  test("graphhopper_todo 往復: list/add/done/cancel と eval 自動遷移のゲート", async () => {
+    const client = await linked();
+    const root = freshRoot();
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const r = await client.callTool({ name, arguments: { ...args, root } });
+      const c = r.content as { type: string; text: string }[];
+      return c[0]?.text ?? "";
+    };
+    await call("graphhopper_goal", { action: "start", title: "todo test" });
+
+    // design.md にタスク列を書いて implementing へ（seed される）
+    const goalId = await (async () => {
+      const st = await call("graphhopper_status", {});
+      return st.match(/\((g-[a-z0-9]+)\)/)?.[1] ?? "";
+    })();
+    writeFileSync(
+      join(root, ".graphhopper", "plans", `${goalId}.md`),
+      [
+        "# design: todo test",
+        "",
+        "## 1. goal理解",
+        "",
+        "## 2. 現状",
+        "",
+        "## 3. 設計判断",
+        "",
+        "## 4. 実装タスク列",
+        "",
+        "- [ ] T1 実装する",
+        "- [ ] T2 テストを書く",
+        "",
+        "## 5. 棄却した代替案",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    expect(await call("graphhopper_phase", { phase: "implementing" })).toContain(
+      "phase -> implementing",
+    );
+
+    // list: 2 件 seed されている
+    const listed = await call("graphhopper_todo", { action: "list" });
+    expect(listed).toContain("T1 実装する");
+    expect(listed).toContain("T2 テストを書く");
+
+    // add: 3 件目
+    expect(await call("graphhopper_todo", { action: "add", text: "追加タスク" })).toContain(
+      "added",
+    );
+    expect(await call("graphhopper_todo", { action: "list" })).toContain("完了 0/3");
+
+    // done: 1 件完了
+    expect(await call("graphhopper_todo", { action: "done", id: "t1" })).toContain(
+      "t1 -> completed",
+    );
+    expect(await call("graphhopper_todo", { action: "list" })).toContain("完了 1/3");
+
+    // cancel は reason 必須
+    expect(await call("graphhopper_todo", { action: "cancel", id: "t2" })).toContain(
+      "error",
+    );
+    expect(
+      await call("graphhopper_todo", { action: "cancel", id: "t2", reason: "不要" }),
+    ).toContain("t2 -> cancelled");
+
+    // まだ t3 が未完了 → eval が pass しても polish に入らない（A2 の MCP 経路）
+    await call("graphhopper_set_eval", { cmd: "true" });
+    const ran = await call("graphhopper_eval", {});
+    expect(ran).toContain("eval_cmd は通ったが polish へ進めない");
+    expect(ran).toContain("未完了のタスク");
+    expect(await call("graphhopper_status", {})).toContain("phase: implementing");
+
+    // 全部完了すれば polish に入れる
+    await call("graphhopper_todo", { action: "done", id: "t3" });
+    const ran2 = await call("graphhopper_eval", {});
+    expect(ran2).not.toContain("polish へ進めない");
+    expect(await call("graphhopper_status", {})).toContain("phase: polish");
+    await client.close();
+  });
+
+  test("graphhopper_todo は goal 不在時に error を返す", async () => {
+    const client = await linked();
+    const root = freshRoot();
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const r = await client.callTool({ name, arguments: { ...args, root } });
+      const c = r.content as { type: string; text: string }[];
+      return c[0]?.text ?? "";
+    };
+    expect(await call("graphhopper_todo", { action: "list" })).toContain("no active goal");
     await client.close();
   });
 

@@ -12,6 +12,7 @@ import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "no
 import { dirname, isAbsolute, join } from "node:path";
 import { applySingleEdit, decodeUtf8Strict, sha1Hex, verifyHash } from "./hashedit";
 import * as state from "./state";
+import { parseTaskLines, todoGateError, todoStoreError } from "./todos";
 
 /* フェーズごとの次のアクション指示文（plugin tool応答・MCP応答の単一源泉）。
  * plugin entry（index.ts）には置けない（loaderが非関数exportでload失敗するため）。
@@ -20,19 +21,19 @@ export const PHASE_ACTION: Record<state.Phase, string> = {
   designing:
     "goalを理解し、設計判断・実装タスク列を .graphhopper/plans/<goal-id>.md に書く。source編集はここではブロックされる。書けたら task(subagent_type: 'graphhopper-critic') で設計を1回敵対レビューし、指摘を design.md に反映してから graphhopper_phase(phase: 'implementing') へ（任意で graphhopper_critic_set に結果を記録できる。opt-inでphase遷移の前提条件ではない）。design.md はこのフェーズを抜けた後は不変になる（verifierのdrift検出アンカーのため）——決定の経緯・棄却した代替案・進捗はここで固めず、実装中は .graphhopper/plans/<goal-id>.log.md に追記すること",
   implementing:
-    "design.md のタスクを実装する。goal中のsource編集は graphhopper_edit（hash検証付き）を使え、素のedit/writeはフォールバック。まず graphhopper_set_eval(cmd) で合否を機械判定できるコマンド（テスト/lint/typecheck）を1度設定せよ。設定後はターン終了ごとに自動実行され、passならpolishへ自動遷移、failならfail_streakが機械カウントされ、escalateが返ったら task(subagent_type: 'graphhopper-oracle') に相談する。eval_cmdが無い（機械判定できない）場合のみ graphhopper_attempt(ok, note) の自己申告にフォールバックする。外部公式doc裏付けが必要なら task(subagent_type: 'graphhopper-librarian') を使える",
+    "design.md のタスクを実装する。進捗タスク（.graphhopper/todos/）は graphhopper_todo で完了・cancel を申告する（全タスクが completed か cancelled でないと polish へ進めない）。goal中のsource編集は graphhopper_edit（hash検証付き）を使え、素のedit/writeはフォールバック。まず graphhopper_set_eval(cmd) で合否を機械判定できるコマンド（テスト/lint/typecheck）を1度設定せよ。設定後はターン終了ごとに自動実行され、passならpolishへ自動遷移、failならfail_streakが機械カウントされ、escalateが返ったら task(subagent_type: 'graphhopper-oracle') に相談する。eval_cmdが無い（機械判定できない）場合のみ graphhopper_attempt(ok, note) の自己申告にフォールバックする。外部公式doc裏付けが必要なら task(subagent_type: 'graphhopper-librarian') を使える",
   polish:
     "graphhopper_router_check の route に従う。route=polish（大diff）ならまず simplify を実行する: メインが graphhopper_diff_stash で diff を退避し（verifierと同一ファイルを共用）、返却pathを task(subagent_type: 'graphhopper-simplify') に渡して提案を集める（3レンズ統合）。適用はメインが行う: 各 finding を Read で裏付け、critical は挙動不変・局所的なものだけ自動適用、high は人間確認、medium/note は報告のみ。適用後は eval_cmd を再実行して機械確認。route=advisor（小diff）なら simplify はスキップ。verifier 呼び出しの前にメインが型・lint診断を1回実行し .graphhopper/tmp/diag-<goal>.txt に保存してpathを渡す（verifierの個別実行は禁止。添付無しならverifierは「診断未実行」を明記）。その後 verifier: route=polish なら requirement/behavior/progress の3charterで、route=advisor なら general charter で task(subagent_type: 'graphhopper-verifier') を呼び、verifierは添付診断を裏付けに使え（診断クリーン≠driftなし）。周辺探索は graft-first（漁り読み禁止）。結果を graphhopper_verifier_set で記録。集約 clean で graphhopper_phase(phase: 'done') へ。集約 drift かつ target=implementing なら implementing に戻る。advisor でも第三者チェック（verifier）は省略不可",
   done: "完了済み。graphhopper_goal(action: 'complete') を確認",
 };
 
-/* continuation（session.idle → promptAsync）のuser向け表示用の1行要約。
+/* continuation（turn 終了 → promptAsync）のuser向け表示用の1行要約。
  * LLM向けの詳細指示は PHASE_ACTION のまま chat.system.transform 側で注入する
  * （design g-mtwhdb4t）。done は continuation 自体が発火しない（idle ハンドラが
  * phase==="done" で早期return）ため実質未使用だが、Record の型完全性のために残す。 */
 export const PHASE_ACTION_SHORT: Record<state.Phase, string> = {
   designing: "設計ドキュメントを書き、criticレビュー後にimplementingへ",
-  implementing: "design.mdのタスクを実装し、eval_cmdを設定",
+  implementing: "design.mdのタスクを実装し、eval_cmdを設定。タスク完了はgraphhopper_todoで申告",
   polish: "router_checkのrouteに従いsimplify/verifierを実行",
   done: "goalをcompleteする",
 };
@@ -42,7 +43,7 @@ export const PHASE_ACTION_SHORT: Record<state.Phase, string> = {
  * ponytail短縮行と対で使う */
 export const PHASE_ACTION_BRIEF: Record<state.Phase, string> = {
   designing: "design.mdを書け。source編集不可（plans/のみ）。詳細は初回指示参照",
-  implementing: "実装続行。eval設定済みなら自動判定。詰まったらoracle",
+  implementing: "実装続行。eval設定済みなら自動判定。詰まったらoracle。タスク完了はgraphhopper_todoで申告",
   polish: "router→verifier必須（verifier_set記録）。自己レビュー完結不可",
   done: "goalをcompleteする",
 };
@@ -341,7 +342,8 @@ export interface DesignProgress {
 }
 
 /* design.md のタスク列抽出（progress素材）。チェックボックス行のみ。
- * 素朴な行パースであり、ネスト・改行またぎは対象外。読取専用 */
+ * 素朴な行パースであり、ネスト・改行またぎは対象外。読取専用。
+ * 行の解釈は src/todos.ts の parseTaskLines に集約（進捗ストアと同じ解釈を使う） */
 export function extractTasks(root: string, goalId: string): DesignProgress {
   let raw: string;
   try {
@@ -349,12 +351,7 @@ export function extractTasks(root: string, goalId: string): DesignProgress {
   } catch {
     return { total: 0, done: 0, items: [] };
   }
-  const items: DesignTask[] = [];
-  for (const line of raw.split("\n")) {
-    const m = line.match(/^\s*-\s*\[([ x])\]\s*(\S.*)$/);
-    if (!m) continue;
-    items.push({ text: (m[2] ?? "").slice(0, 200), done: m[1] === "x" });
-  }
+  const items = parseTaskLines(raw).map((t) => ({ text: t.text, done: t.done }));
   return { total: items.length, done: items.filter((i) => i.done).length, items };
 }
 
@@ -470,6 +467,35 @@ export function checkPhaseMove(
         `質の指摘はcriticの領分であり、このゲートは骨格の有無だけを見る。`
       );
     }
+  }
+  // 進捗ゲート: implementing→polish は未完了タスクを残さない。
+  // 実効ゲートは state.setPhaseChecked（eval 自動遷移経路を含む）だが、
+  // 手動遷移は checkPhaseMove を先に通るためここで同じ判定を見る（文言は同一の純粋関数）。
+  if (to === "polish" && active.state.phase === "implementing") {
+    const loaded = state.readTodosStatus(root, active.goal.id);
+    const storeErr = todoStoreError(loaded);
+    if (storeErr) {
+      state.recordEvent(root, {
+        type: "todo_seed_warning",
+        goal: active.goal.id,
+        reason: `polish への遷移を拒否した（fail-closed）: ${storeErr}`,
+      });
+      return `error: ${storeErr}`;
+    }
+    // ストアが空なら移行救済として design.md から seed する（design 判断2）
+    const store =
+      loaded.store.items.length === 0
+        ? state.ensureTodos(root, active.goal.id, { warn: true })
+        : loaded.store;
+    // design.md が「あるが読めない」場合は進捗が不明なので fail-closed
+    if (store.items.length === 0 && state.planReadState(root, active.goal.id) === "unreadable") {
+      return (
+        "error: design.md を読み込めません（不正なエンコーディングの可能性）。" +
+        "進捗を機械的に強制できないため polish への遷移を拒否します（fail-closed）"
+      );
+    }
+    const err = todoGateError(store);
+    if (err) return `error: ${err}`;
   }
   return null;
 }

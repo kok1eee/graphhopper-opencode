@@ -58,7 +58,7 @@ export function registerOpsTools(
           `diff_lines: ${diffLines} (threshold: ${cfg.router_threshold_lines})`,
           `route: ${route}`,
           recorded.router.deep
-            ? `deep: ${recorded.router.deep_reason} — behavior lens（polish時）／general lens（advisor時）は休止中（verifier既定がsonnet-5-5のため上書き不要。詳細はSKILL refs/verifier.md）`
+            ? `deep: ${recorded.router.deep_reason} — behavior lens（polish時）／general lens（advisor時）は休止中（verifier既定モデルの上書きは不要。詳細はSKILL refs/verifier.md）`
             : null,
           route === "polish"
             ? "次: task(subagent_type: 'graphhopper-verifier') をrequirement/behavior/progressの3charterで呼び、graphhopper_verifier_setで記録する"

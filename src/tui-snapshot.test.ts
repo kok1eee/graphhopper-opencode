@@ -265,6 +265,88 @@ describe("formatChip / truncate", () => {
   });
 });
 
+describe("formatChip: 進捗タスク", () => {
+  const todos = (items: { status: string }[]) => {
+    const total = items.length;
+    const done = items.filter((i) => i.status === "completed").length;
+    const open = items.filter(
+      (i) => i.status === "pending" || i.status === "in_progress",
+    ).length;
+    return { total, done, open, unreadable: false, invalidCount: 0 };
+  };
+
+  test("タスク 0 件なら ✓ を出さない", () => {
+    const snap = buildSnapshot({
+      root: "/r",
+      state: state(),
+      goals,
+      config: null,
+      history: [],
+      todos: todos([]),
+    });
+    expect(formatChip(snap!)).toBe("implementing·Δ12·f2");
+  });
+
+  test("タスクがあれば ✓完了/全体 を出す", () => {
+    const snap = buildSnapshot({
+      root: "/r",
+      state: state(),
+      goals,
+      config: null,
+      history: [],
+      todos: todos([{ status: "completed" }, { status: "pending" }, { status: "in_progress" }]),
+    });
+    expect(formatChip(snap!)).toBe("implementing·Δ12·f2·✓1/3");
+  });
+
+  test("cancelled は done に数えない（open のみ別管理）", () => {
+    const snap = buildSnapshot({
+      root: "/r",
+      state: state(),
+      goals,
+      config: null,
+      history: [],
+      todos: todos([{ status: "completed" }, { status: "cancelled" }]),
+    });
+    expect(formatChip(snap!)).toContain("✓1/2");
+  });
+
+  test("ストア不読なら ✓? を出す（0件に潰さない）", () => {
+    const snap = buildSnapshot({
+      root: "/r",
+      state: state(),
+      goals,
+      config: null,
+      history: [],
+      todos: { total: 0, done: 0, open: 0, unreadable: true, invalidCount: 0 },
+    });
+    expect(formatChip(snap!)).toContain("✓?");
+  });
+
+  test("チップは 40 文字以内に収まる（最悪ケース）", () => {
+    const snap = buildSnapshot({
+      root: "/r",
+      state: state({
+        fail_streak: 9,
+        router: { baseline_rev: "x", diff_lines: 12345, route: "polish", checked_at: null },
+        cascade: { level: "escalated", model: "anthropic/claude-sonnet-5-5", children: 0 },
+      }),
+      goals,
+      config: null,
+      history: [],
+      todos: todos([
+        { status: "completed" },
+        { status: "completed" },
+        { status: "pending" },
+        { status: "pending" },
+        { status: "pending" },
+      ]),
+    });
+    const chip = formatChip(snap!);
+    expect(chip.length).toBeLessThanOrEqual(40);
+  });
+});
+
 describe("cascade 表示", () => {
   test("shortModel は model 部分だけ・claude- と #variant を落とす", () => {
     expect(shortModel("claude-oauth/claude-sonnet-5-5#default")).toBe("sonnet-5-5");

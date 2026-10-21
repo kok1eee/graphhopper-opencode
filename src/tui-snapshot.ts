@@ -16,7 +16,10 @@ import {
   normalizeEntryRoute,
   readConfig,
   readJson,
+  readTodosStatus,
+  todoProgressView,
 } from "./state";
+import { formatTodoChip } from "./todos";
 
 export type { EntryRoute, GoalStatus, Phase };
 
@@ -62,6 +65,14 @@ export interface Snapshot {
   loop: { stopCount: number; stopMax: number; blocked: boolean; streak: number };
   verifier: SnapshotVerdict | null;
   critic: SnapshotVerdict | null;
+  /** 進捗タスク。null = タスク無し。unreadable=true はストア不読（進捗不明） */
+  tasks: {
+    total: number;
+    done: number;
+    open: number;
+    unreadable: boolean;
+    invalidCount: number;
+  } | null;
   evalCmd: string | null;
   notes: string;
   updatedAt: string;
@@ -117,6 +128,31 @@ function parseVerdict(v: unknown): SnapshotVerdict | null {
   const level = asString(r.level);
   if (level !== "clean" && level !== "drift") return null;
   return { level, reason: asString(r.reason) ?? "", at: asString(r.at) };
+}
+
+/**
+ * 進捗タスクの公開ビュー（state.todoProgressView の出力）から表示用の集計を作る。
+ * ストア不読（unreadable）は「0 件」に潰さず、不読として出す。
+ */
+function parseTasks(raw: unknown): {
+  total: number;
+  done: number;
+  open: number;
+  unreadable: boolean;
+  invalidCount: number;
+} | null {
+  const rec = asRecord(raw);
+  if (!rec) return null;
+  const unreadable = rec.unreadable === true;
+  const total = asNumber(rec.total) ?? 0;
+  if (!unreadable && total === 0) return null;
+  return {
+    total,
+    done: asNumber(rec.done) ?? 0,
+    open: asNumber(rec.open) ?? 0,
+    unreadable,
+    invalidCount: asNumber(rec.invalidCount) ?? 0,
+  };
 }
 
 /** designing → implementing → polish のラダー。done は全項目 done として扱う */
@@ -195,6 +231,8 @@ export function buildSnapshot(input: {
   config: unknown;
   history: readonly string[];
   historyLimit?: number;
+  /** 進捗タスクストア（.graphhopper/todos/<goalId>.json の中身） */
+  todos?: unknown;
 }): Snapshot | null {
   const state = asRecord(input.state);
   if (!state) return null;
@@ -246,6 +284,7 @@ export function buildSnapshot(input: {
     },
     verifier: parseVerdict(state.last_verifier),
     critic: parseVerdict(state.critic_review),
+    tasks: parseTasks(input.todos),
     evalCmd: asString(state.eval_cmd),
     notes: asString(state.notes) ?? "",
     updatedAt: asString(state.updated_at) ?? "",
@@ -280,13 +319,19 @@ function readTail(path: string, limit = HISTORY_TAIL_BYTES): string | null {
  */
 export function loadSnapshot(root: string, opts?: { historyLimit?: number }): Snapshot | null {
   const dir = join(root, ".graphhopper");
+  const goalsRaw = readJson<unknown>(join(dir, "goals.json"), null);
+  const goalID =
+    (asRecord(goalsRaw)?.active as string | undefined) ??
+    (asString(asRecord(readJson<unknown>(join(dir, "state.json"), null))?.goal_id) ??
+      undefined);
   return buildSnapshot({
     root,
     state: readJson<unknown>(join(dir, "state.json"), null),
-    goals: readJson<unknown>(join(dir, "goals.json"), null),
+    goals: goalsRaw,
     config: readConfig(root),
     history: (readTail(join(dir, "history.jsonl")) ?? "").split("\n"),
     historyLimit: opts?.historyLimit,
+    todos: goalID ? todoProgressView(readTodosStatus(root, goalID)) : null,
   });
 }
 
@@ -296,7 +341,14 @@ export function formatChip(snapshot: Snapshot): string {
   const diff = snapshot.diff.lines === null ? "" : `·Δ${snapshot.diff.lines}`;
   const c = snapshot.cascade;
   const model = c?.level === "escalated" ? `·↑${shortModel(c.model)}` : "";
-  return `${snapshot.phase}${diff}${loop}${model}`;
+  const t = snapshot.tasks;
+  const chip = !t
+    ? null
+    : t.unreadable
+      ? "✓?"
+      : formatTodoChip({ total: t.total, done: t.done });
+  const tasks = chip ? `·${chip}` : "";
+  return `${snapshot.phase}${diff}${loop}${tasks}${model}`;
 }
 
 /** 判定時刻からの経過を 1〜2 文字の相対表記にする（鮮度の目安） */

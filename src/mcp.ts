@@ -60,6 +60,7 @@ import {
 import * as state from "./state";
 import { invokeStructured } from "./invoke";
 import { PROMPT_DEFS } from "./prompts";
+import { type TodoItem } from "./todos";
 
 const ROOT_DESC =
   "対象プロジェクトのディレクトリ（.graphhopper/ の親。省略時は client roots の先頭→プロセス cwd）";
@@ -177,6 +178,7 @@ function statusText(root: string): string {
       ? `oracle_consult: ${a.state.oracle_consult.summary.slice(0, 100)}`
       : "oracle_consult: (none)",
     `fail_streak: ${a.state.fail_streak}`,
+    state.todoSummaryLine(root, a.goal.id),
     a.goal.score ? `score: ${a.goal.score.value} ${JSON.stringify(a.goal.score.breakdown)}` : null,
     `loop: stop_count=${a.state.loop_stop_count}/${state.readConfig(root).loop_stop_max} resume_blocked=${state.isResumeBlocked(root)} streak=${a.state.loop_streak}`,
     a.state.notes ? `notes: ${a.state.notes}` : null,
@@ -396,7 +398,7 @@ function attemptRecord(root: string, ok: boolean, note: string): ToolOut {
   };
 }
 
-/** plugin の session.idle 内 eval 経路と同型の遷移（promptAsync・loop検知・
+/** plugin の turn 終了時 eval 経路と同型の遷移（promptAsync・loop検知・
  * continuation dedupe を除く。MCP には idle 駆動が無いため明示実行する）。 */
 async function evalOnce(root: string): Promise<string> {
   const active = state.getActive(root);
@@ -433,38 +435,10 @@ async function evalOnce(root: string): Promise<string> {
       fail_streak: r.fail_streak,
     });
   if (result.ok) {
-    const baseline =
-      active.state.router.baseline_rev ??
-      (await state.captureBaselineRev($, root));
-    const measured = await state.measureDiffLines($, root, baseline);
-    const diffLines = state.effectiveDiffLines(
-      measured,
-      state.getActive(root)?.state.initial_diff_lines,
-    );
-    if (baseline === null) {
-      await state.recordRouterCheckWithRisk($, root, baseline, 0, "advisor");
-      state.setPhase(root, "polish");
-      return `eval_cmd passed but baseline not captured — polishへ進む（simplifyはスキップ、verifierで検証）: ${cmd}\n${tail}`;
-    } else if (diffLines > 0) {
-      const cfg = state.readConfig(root);
-      const route: state.RouterRoute =
-        diffLines > cfg.router_threshold_lines ? "polish" : "advisor";
-      const recorded = await state.recordRouterCheckWithRisk(
-        $,
-        root,
-        baseline,
-        diffLines,
-        route,
-      );
-      state.setPhase(root, "polish");
-      const deepLine = recorded.router.deep
-        ? `\ndeep: ${recorded.router.deep_reason} — behavior lens（polish時）／general lens（advisor時）は休止中（verifier既定がsonnet-5-5のため上書き不要）`
-        : "";
-      return `eval_cmd passed (diff ${diffLines} lines since baseline): ${cmd}${deepLine}\n${tail}`;
-    } else {
-      await state.recordRouterCheckWithRisk($, root, baseline, 0, "advisor");
-      return `eval_cmd passed but effective diff_lines=0 since baseline — 実装なしか前goal残骸との相殺のいずれか。実装を進めるか、router_check で手動確認せよ: ${cmd}\n${tail}`;
-    }
+    // 遷移入力・遷移判定は plugin 側と同一の実装を使う（分岐の食い違いを防ぐ）
+    const inp = await state.evalTransitionInput($, root, active.state.router.baseline_rev);
+    const t = await state.evalToPolish($, root, { cmd, ...inp });
+    return `${t.note}\n${tail}`;
   }
   if (r.giveUp) {
     const paused = state.pauseGoal(root);
@@ -550,7 +524,7 @@ async function routerCheck(root: string): Promise<ToolOut> {
       `diff_lines: ${diffLines} (threshold: ${cfg.router_threshold_lines})`,
       `route: ${route}`,
       recorded.router.deep
-        ? `deep: ${recorded.router.deep_reason} — behavior lens（polish時）／general lens（advisor時）は休止中（verifier既定がsonnet-5-5のため上書き不要。詳細はSKILL refs/verifier.md）`
+        ? `deep: ${recorded.router.deep_reason} — behavior lens（polish時）／general lens（advisor時）は休止中（verifier既定モデルの上書きは不要。詳細はSKILL refs/verifier.md）`
         : null,
       route === "polish"
         ? "次: task(subagent_type: 'graphhopper-verifier') をrequirement/behavior/progressの3charterで呼び、graphhopper_verifier_setで記録する"
@@ -835,13 +809,58 @@ const TOOL_DEFS: ToolDef[] = [
       const rejected = checkPhaseMove(ctx.root, a.phase);
       // 拒否時もdataを返す（欠くとMCP -32600で真因がマスクされる）
       if (rejected) return { text: rejected, data: { ok: false } };
-      const r = state.setPhase(ctx.root, a.phase, a.notes);
-      if (!r)
-        return { text: "error: no active goal or invalid phase", data: { ok: false } };
+      const mv = state.setPhaseChecked(ctx.root, a.phase, a.notes);
+      if (!mv.ok)
+        return { text: `error: ${mv.error ?? "遷移に失敗"}`, data: { ok: false } };
+      const r = mv.active;
+      if (!r) return { text: "error: no active goal or invalid phase", data: { ok: false } };
       return {
         text: `phase -> ${r.state.phase}\n次: ${effectivePhaseAction(r.state.phase, r.state.entry_route)}${driverNote(ctx.root, sessionOf(a.session_id))}`,
         data: { ok: true, phase: r.state.phase },
       };
+    },
+  },
+  {
+    name: "graphhopper_todo",
+    description:
+      "進捗タスクの操作。list=一覧 / start=進行中 / done=完了 / cancel=やらない（reason必須） / add=追加 / reopen=cancelの誤操作から復帰。implementing→polish の遷移は未完了タスクが残ると拒否される",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["list", "start", "done", "cancel", "add", "reopen"],
+        },
+        id: { type: "string", description: "対象タスクのID（list/start/done/cancel で必須。t1, t2, ...）" },
+        text: { type: "string", description: "追加するタスクの文（action=add で必須）" },
+        reason: { type: "string", description: "理由（action=cancel で必須）" },
+        root: ROOT_PROP,
+        session_id: SESSION_PROP,
+      },
+      required: ["action"],
+    },
+    schema: z.object({
+      action: z.enum(["list", "start", "done", "cancel", "add", "reopen"]),
+      id: z.string().optional(),
+      text: z.string().optional(),
+      reason: z.string().optional(),
+      root: rootZ,
+      session_id: sessionZ,
+    }),
+    outputSchema: {
+      type: "object",
+      properties: { ok: { type: "boolean" } },
+      required: ["ok"],
+    },
+    run: (a, ctx) => {
+      const active = state.getActive(ctx.root);
+      if (!active) return { text: "error: no active goal", data: { ok: false } };
+      const r = state.todoAction(ctx.root, active.goal.id, a.action, {
+        ...(a.id ? { id: a.id } : {}),
+        ...(a.text ? { text: a.text } : {}),
+        ...(a.reason ? { reason: a.reason } : {}),
+      });
+      return { text: r.text, data: { ok: r.ok } };
     },
   },
   {
@@ -1783,8 +1802,10 @@ const realSkeletonRunner: SkeletonRunner = (root, file) =>
 /** buildLineage に editedSymbols を付与する。run 注入可（テスト用） */
 export interface EnrichedGoalLineage extends state.GoalLineage {
   editedSymbols: FileSymbols[];
-  /** design.md タスク列の進捗（progress lens 素材） */
-  tasks: { total: number; done: number; items: { text: string; done: boolean }[] };
+  /** 進捗タスク（source of truth: .graphhopper/todos/）。不読なら unreadable=true */
+  tasks: state.TodoProgressView;
+  /** design.md 由来のタスク列（初期計画。design.md は planning 終端で immutable なので done は常に 0） */
+  planTasks: { total: number; done: number; items: { text: string; done: boolean }[] };
 }
 
 export async function lineageEnriched(
@@ -1813,7 +1834,11 @@ export async function lineageEnriched(
         file: f,
         symbols: table.get(f) ?? [],
       })),
-      tasks: extractTasks(root, g.id),
+      // 進捗の source of truth は todo ストア。design.md 由来の件数も planTasks で併記する
+      // （design.md は planning 終端で immutable のため done は常に 0 になる）。
+      // ストア不読・不正要素は「0件」に潰さず、不読として出す。
+      tasks: state.todoProgressView(state.readTodosStatus(root, g.id)),
+      planTasks: extractTasks(root, g.id),
     })),
     discover: lin.discover,
   };

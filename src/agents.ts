@@ -181,7 +181,7 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
     description:
       "コードベース事実収集エージェント（graft-first）。ファイル検索・構造把握・呼び出し関係の特定。高頻度に呼ばれるためコストティア最下層で使う（モデルは .graphhopper/config.json の agents で設定）。外部公式ドキュメント調査は graphhopper-librarian に委ねる",
     mode: "all",
-    model: { providerID: "minimax", model: "MiniMax-M3.1-Flash" },
+    model: { providerID: "opencode-go", model: "minimax-m3.1-flash-free" },
     temperature: 0.1,
     bash: SEARCH_ONLY_BASH,
     system: [
@@ -201,7 +201,7 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
     description:
       "外部公式ドキュメント・仕様調査専用の安価エージェント。公式doc・仕様・横断的意味質問の事実収集。判断は含まない（モデルは .graphhopper/config.json の agents で設定）",
     mode: "all",
-    model: { providerID: "minimax", model: "MiniMax-M3.1-Flash" },
+    model: { providerID: "opencode-go", model: "minimax-m3.1-flash-free" },
     temperature: 0.1,
     bash: SEARCH_ONLY_BASH,
     system: [
@@ -246,7 +246,7 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
     description:
       "designingフェーズのdesign.mdを敵対レビューする。要件漏れ・設計の穴・スコープ逸脱を検出する安価な常設チェックnode（モデルは .graphhopper/config.json の agents で設定。haiku級で安価・高速に回し、見逃し率はscoreboardで監視）。verifierとは対照的に実装前の計画のみを対象とする",
     mode: "all",
-    model: { providerID: "opencode-go", model: "deepseek-v4.1-flash" },
+    model: { providerID: "claude-oauth", model: "claude-haiku-5-5" },
     /* temperature未指定: criticは既定温度で回す（敵対レビュー用途ではばらつき許容）。
      * verifier等は維持 */
     bash: SEARCH_ONLY_BASH,
@@ -280,6 +280,9 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
     system: [
       "あなたはsimplifyの提案者。変更diffを3つのレンズ（再利用・品質・効率）で1回のパスで見て、整理の提案を出す。",
       "",
+      "モデル: primary は opencode-go/deepseek-v4.1-flash。遅い/枠切れのときは",
+      "claude-oauth/claude-sonnet-5-5 に手動切替できる（呼び出し側の判断）。",
+      "",
       "入力（pathで渡される。必要箇所をReadで取りに行くこと）:",
       "- 変更diff: graphhopper_diff_stash の返却path（.graphhopper/tmp配下。同一baselineの退避をverifierと共用）",
       "- 必要なら既存ファイル",
@@ -306,7 +309,7 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
     description:
       "polish/advisorのverifier用。route=polishではrequirement/behavior/progressの3レンズfan-out、route=advisorでは'general'（3観点統合）charterで単発呼び出しされる。判断nodeなので上位品質モデルで使う（モデルは .graphhopper/config.json の agents で設定）。実装者本人（メインエージェント）とは独立した第三者チェックであることが呼び出しの目的そのもの",
     mode: "all",
-    model: { providerID: "minimax", model: "MiniMax-M3" },
+    model: { providerID: "minimax", model: "MiniMax-M3.1-Flash" },
     temperature: 0.2,
     bash: VERIFIER_BASH,
     system: [
@@ -315,6 +318,13 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
       "呼び出し側が渡すcharterに従う:",
       "- requirement/behavior/progress のいずれか: そのレンズだけに集中する（polishの3-way fan-out）",
       "- general: 3観点（要件逸脱・挙動の妥当性・進捗の収束）を1回のレビューでまとめて見る（advisorの単発呼び出し）",
+      "",
+      "進捗タスク（source of truth）:",
+      "- 進捗の source of truth は .graphhopper/todos/<goalId>.json（design.md は planning 終端で immutable のため進捗の計測源にできない）",
+      "- goalId の解決: `.graphhopper/state.json` の `goal_id` を読む。取れなければ `.graphhopper/todos/` 配下のファイル名（通常1つ）を使う",
+      "- progress lens / general charter では必ずこのストアを読む。未完了タスクが残っていないか、cancelled の理由が妥当かを見よ",
+      "- ストアが 0 件ならタスクなしとして扱い、進捗起因の drift は報告しない",
+      "- ストアが壊れて読めない場合は『進捗は確認できなかった』と evidence_state に明記する（0件扱いしない）",
       "",
       "調査効率則: 周辺探索は graft MCP / ast-grep / rg を優先し漁り読み禁止。",
       "Readはdiff本体＋graft/diffが指した関数・テスト単位のみ。全文catして数える（cat | wc等）・同一範囲の再読は禁止。行特定はgrep/graftで行い、Readは1範囲1回。",

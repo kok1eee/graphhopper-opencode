@@ -27,6 +27,22 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { decodeUtf8Strict } from "./hashedit";
+import {
+  addTodo,
+  applyMark,
+  formatTodoList,
+  parseSeedTasks,
+  parseTaskLines,
+  seedMerge,
+  splitTodoItems,
+  todoGateError,
+  todoProgress,
+  todoStoreError,
+  type TodoItem,
+  type TodoStatus,
+  type TodoStore,
+} from "./todos";
 
 /** graphhopper 本体（Claude Code版）の3相グラフに合わせる。flywheelの8フェーズより薄い */
 export const PHASES = ["designing", "implementing", "polish", "done"] as const;
@@ -207,7 +223,7 @@ export interface LoopState {
   fail_streak: number;
   /**
    * implementing の合否を機械判定するコマンド（graphhopper本体のeval_cmd相当）。
-   * 設定されていれば session.idle 発火時に毎回実行し、exit codeで自動的に
+   * 設定されていれば turn 終了（session.execution.succeeded）ごとに毎回実行し、exit codeで自動的に
    * pass（polishへ遷移）/fail（fail_streakを機械カウント）を判定する。
    * 未設定なら graphhopper_attempt の自己申告にフォールバックする。
    */
@@ -225,7 +241,7 @@ export interface LoopState {
    */
   last_eval_fingerprint: string | null;
   /**
-   * 無限ループ検知（echoループ）の連続カウント。session.idle 発火ごとに
+   * 無限ループ検知（echoループ）の連続カウント。turn 終了ごとに
    * 「直前のassistantメッセージとほぼ同一のuserメッセージ」を検知して増える。
    * ループでない（人間の新規入力）と判定されたら0に戻る。
    */
@@ -405,6 +421,275 @@ export function planPath(root: string, goalId: string): string {
   return join(dir(root), "plans", `${goalId}.md`);
 }
 
+/* ---------- 進捗 todo ストア ----------
+ * 進捗の source of truth。design.md は planning 終端で immutable なので計測源にできない。
+ * goal ごとに 1 ファイル。plugin / MCP 両方から read・write できる。 */
+export function todosPath(root: string, goalId: string): string {
+  return join(dir(root), "todos", `${goalId}.json`);
+}
+
+function emptyTodoStore(goalId: string): TodoStore {
+  return { goal_id: goalId, items: [], updated_at: new Date().toISOString() };
+}
+
+/**
+ * ストアを読む。ファイルが無い / 壊れている場合は空ストア。
+ * valid=false は「ファイルは在るが読めない（壊れている）」ことを表す。
+ * 「タスク 0 件」と「読めなかった」を区別するために使う（fail-open 防止）。
+ */
+export function readTodosStatus(
+  root: string,
+  goalId: string,
+): { store: TodoStore; valid: boolean; invalidCount: number } {
+  const p = todosPath(root, goalId);
+  if (!existsSync(p)) return { store: emptyTodoStore(goalId), valid: true, invalidCount: 0 };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(p, "utf8"));
+  } catch {
+    return { store: emptyTodoStore(goalId), valid: false, invalidCount: 0 };
+  }
+  const rec = raw as { items?: unknown; updated_at?: unknown } | null;
+  if (!rec || !Array.isArray(rec.items)) {
+    return { store: emptyTodoStore(goalId), valid: false, invalidCount: 0 };
+  }
+  const split = splitTodoItems(raw);
+  return {
+    store: {
+      goal_id: goalId,
+      items: split.items,
+      updated_at: typeof rec.updated_at === "string" ? rec.updated_at : "",
+    },
+    valid: true,
+    invalidCount: split.invalidCount,
+  };
+}
+
+/** ストアを読む。ファイルが無い / 壊れている場合は空ストア */
+export function readTodos(root: string, goalId: string): TodoStore {
+  return readTodosStatus(root, goalId).store;
+}
+
+/** ストアを書く（atomic） */
+export function writeTodos(root: string, store: TodoStore): void {
+  const p = todosPath(root, store.goal_id);
+  mkdirSync(dirname(p), { recursive: true });
+  atomicWrite(p, store);
+}
+
+/** design.md の読み込み状態。missing=タスク無し相当／unreadable=進捗不明 */
+export type PlanReadState = "ok" | "missing" | "unreadable";
+
+/**
+ * design.md が読めるか判定する。
+ * - missing: ファイルが無い（タスクの記録源が無い＝タスク0件相当。既存 goal の後方互換）
+ * - unreadable: あるが読めない（非UTF-8・fs エラー）。進捗が不明なので fail-closed の対象
+ */
+export function planReadState(root: string, goalId: string): PlanReadState {
+  const p = planPath(root, goalId);
+  if (!existsSync(p)) return "missing";
+  try {
+    decodeUtf8Strict(readFileSync(p));
+    return "ok";
+  } catch {
+    return "unreadable";
+  }
+}
+
+/**
+ * タスクの seed を保証する（冪等 merge）。
+ * design.md の「タスク列」セクションを毎回読み、**ストアに無いものだけ追記**する。
+ * - 既存タスクの id と status は保つ（消さない・上書きしない）
+ * - 既存 goal の移行救済（デプロイ時点で implementing だった goal も追跡される）
+ * - 同じ文言が既にあるときは追加しない（text 一致で照合）
+ *
+ * warn=true のときだけ seed の異常（チェックボックスが取得できない・同文重複）を
+ * history に残す。読み取り専用の経路では噪声になるので渡さない。
+ */
+export function ensureTodos(
+  root: string,
+  goalId: string,
+  opts: { warn?: boolean } = {},
+): TodoStore {
+  const { store, valid } = readTodosStatus(root, goalId);
+  if (!valid) {
+    // 壊れたストアは上書きしない（完了記録を失う）。警告して保留する。
+    if (opts.warn) {
+      recordEvent(root, {
+        type: "todo_seed_warning",
+        goal: goalId,
+        reason: "todo ストアが壊れている（読み込めません）。上書きせず保留した。",
+      });
+    }
+    return store;
+  }
+  let raw = "";
+  try {
+    raw = decodeUtf8Strict(readFileSync(planPath(root, goalId)));
+  } catch {
+    // design.md が読めない（不存在・非UTF-8・fs エラー）なら seed できない。
+    // 無言で返すとゲートが無言で開くので、警告を残す。
+    if (opts.warn) {
+      recordEvent(root, {
+        type: "todo_seed_warning",
+        goal: goalId,
+        reason: "design.md を読み込めなかった（不存在・非UTF-8・fs エラー）ためタスクを seed できない",
+      });
+    }
+    return store;
+  }
+  const tasks = parseSeedTasks(raw);
+  if (tasks.length === 0) {
+    // チェックボックスが文書全体にあるのにタスク列セクションから取れなかった
+    // = 見出し名辿い_progress ゲートが無言で無効化される。見えるようにする。
+    const all = parseTaskLines(raw);
+    if (opts.warn && all.length > 0) {
+      recordEvent(root, {
+        type: "todo_seed_warning",
+        goal: goalId,
+        reason:
+          `design.md にチェックボックスが ${all.length} 行あるが「タスク列」セクションから取得できない` +
+          `（見出し名を確認せよ。進捗ゲートが無効になる）`,
+      });
+    }
+    return store;
+  }
+  const merged = seedMerge(store, tasks, new Date().toISOString());
+  if (opts.warn && merged.duplicateTexts > 0) {
+    recordEvent(root, {
+      type: "todo_seed_warning",
+      goal: goalId,
+      reason: `design.md に同じ文言のタスクが ${merged.duplicateTexts} 件ある（別 id で seed した）`,
+    });
+  }
+  if (merged.added === 0) return store;
+  writeTodos(root, merged.store);
+  return merged.store;
+}
+
+export type TodoAction = "list" | "start" | "done" | "cancel" | "add" | "reopen";
+
+/**
+ * 進捗タスクの1行サマリ。タスク 0 件なら null（行ごと落とす）。plugin/MCP 共通の単一源泉。
+ * 読み取り専用（seed しない）。seed は designing→implementing 遷移と todoAction のみ。
+ */
+export function todoSummaryLine(root: string, goalId: string): string | null {
+  try {
+    const loaded = readTodosStatus(root, goalId);
+    if (!loaded.valid) return "tasks: (ストア不読・進捗不明)";
+    if (loaded.invalidCount > 0) {
+      const p = todoProgress(loaded.store);
+      return `tasks: ${p.done}/${p.total} done（cancel ${p.cancelled}・未完了 ${p.open}・不正要素 ${loaded.invalidCount}）`;
+    }
+    if (loaded.store.items.length === 0) return null;
+    const p = todoProgress(loaded.store);
+    return `tasks: ${p.done}/${p.total} done（cancel ${p.cancelled}・未完了 ${p.open}）`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 進捗の公開ビュー（goals.json resource 用）。
+ * ストア不読・不正要素を「0件」に潰さず、不読として出す。
+ */
+export interface TodoProgressView {
+  total: number;
+  done: number;
+  cancelled: number;
+  open: number;
+  items: TodoItem[];
+  /** ストアを読めなかった場合 true */
+  unreadable?: boolean;
+  /** 捨てられた不正要素の件数 */
+  invalidCount?: number;
+}
+
+export function todoProgressView(loaded: {
+  store: TodoStore;
+  valid: boolean;
+  invalidCount: number;
+}): TodoProgressView {
+  if (!loaded.valid) {
+    return { total: 0, done: 0, cancelled: 0, open: 0, items: [], unreadable: true, invalidCount: 0 };
+  }
+  const p = todoProgress(loaded.store);
+  return {
+    total: p.total,
+    done: p.done,
+    cancelled: p.cancelled,
+    open: p.open,
+    items: p.items,
+    ...(loaded.invalidCount > 0 ? { invalidCount: loaded.invalidCount } : {}),
+  };
+}
+
+const TODO_ACTION_STATUS: Record<
+  Exclude<TodoAction, "list" | "add">,
+  TodoStatus
+> = {
+  start: "in_progress",
+  done: "completed",
+  cancel: "cancelled",
+  /** cancel の誤操作からの復旧（遷移表 cancelled → pending） */
+  reopen: "pending",
+};
+
+/**
+ * 進捗タスクの操作（plugin / MCP 共通の単一入口）。
+ * 読み・検証・書き込み・監査記録まで行う。失敗時はストアを弄らない。
+ */
+export function todoAction(
+  root: string,
+  goalId: string,
+  action: TodoAction,
+  opts: { id?: string; text?: string; reason?: string } = {},
+): { ok: boolean; text: string; store: TodoStore } {
+  const loaded = readTodosStatus(root, goalId);
+  if (!loaded.valid) {
+    return {
+      ok: false,
+      text: "error: todo ストアが壊れています（読み込めません）。手動で修復してから再実行せよ",
+      store: loaded.store,
+    };
+  }
+  const store = ensureTodos(root, goalId);
+  const now = new Date().toISOString();
+  if (action === "list") {
+    return { ok: true, text: formatTodoList(store), store };
+  }
+  if (action === "add") {
+    const r = addTodo(store, opts.text ?? "", now);
+    if (!r.ok) return { ok: false, text: `error: ${r.error}`, store };
+    writeTodos(root, r.store);
+    recordEvent(root, {
+      type: "todo_update",
+      goal: goalId,
+      id: r.id ?? "",
+      from: null,
+      to: "pending",
+      ...(opts.text ? { text: opts.text } : {}),
+    });
+    return { ok: true, text: `added ${r.id}\n${formatTodoList(r.store)}`, store: r.store };
+  }
+  const id = opts.id;
+  if (!id) return { ok: false, text: "error: id が要る（list でIDを確認せよ）", store };
+  const status = TODO_ACTION_STATUS[action];
+  const r = applyMark(store, id, status, { reason: opts.reason, now });
+  if (!r.ok) return { ok: false, text: `error: ${r.error}`, store };
+  writeTodos(root, r.store);
+  const from = store.items.find((i) => i.id === id)?.status ?? null;
+  recordEvent(root, {
+    type: "todo_update",
+    goal: goalId,
+    id,
+    from,
+    to: status,
+    ...(opts.reason ? { reason: opts.reason } : {}),
+  });
+  return { ok: true, text: `${id} -> ${status}\n${formatTodoList(r.store)}`, store: r.store };
+}
+
 /* design doc scaffold: goal開始時に骨格を自動生成する。
  * 構造検証（gate.ts checkDesignDoc）のアンカー。既存ファイルは壊さない（冪等）。 */
 export function designTemplate(goalId: string, title: string): string {
@@ -512,6 +797,25 @@ export type HistoryEvent =
     }
   | { type: "eval_set"; goal: string; cmd: string }
   | { type: "eval_run"; goal: string; ok: boolean; fail_streak: number }
+  | {
+      /* 進捗タスクの変更記録。done/cancel は自己申告だが監査に残す
+       *（cancel は reason 必須。progress lens が理由の妥当性を検証する） */
+      type: "todo_update";
+      goal: string;
+      id: string;
+      from: TodoStatus | null;
+      to: TodoStatus;
+      reason?: string;
+      /** add 時のタスク本文（reason とは別枠） */
+      text?: string;
+    }
+  | {
+      /* seed の異常（チェックボックスが取れない・同文重複）。
+       * 見出し名の違いで進捗ゲートが無言で無効化されるのを防ぐための可視化 */
+      type: "todo_seed_warning";
+      goal: string;
+      reason: string;
+    }
   | { type: "eval_gave_up"; goal: string; fail_streak: number }
   | { type: "stuck_hint"; goal: string; reasons: string[] }
   | {
@@ -1393,12 +1697,77 @@ export function setPhase(
   phase: Phase,
   notes?: string,
 ): ActiveLoop | null {
-  if (!PHASES.includes(phase)) return null;
+  return setPhaseChecked(root, phase, notes).active;
+}
+
+/**
+ * phase 遷移（理由つき）。gate を全部通ったときだけ遷移する。
+ *
+ * 進捗ゲート（implementing→polish で未完了タスクがある）はここで効く。
+ * setPhase だけをゲートすると eval_cmd 通過による自動 polish 遷移
+ * （hooks.ts / mcp.ts が setPhase を直接呼ぶ）が素通りするため、
+ * 遷移の実効点である setPhase 側に置いている。
+ */
+export function setPhaseChecked(
+  root: string,
+  phase: Phase,
+  notes?: string,
+): { ok: boolean; active: ActiveLoop | null; error: string | null } {
+  if (!PHASES.includes(phase)) {
+    return { ok: false, active: null, error: `未知の phase: ${phase}` };
+  }
   const before = getActive(root);
   // 遷移合法性（takt workflow doctorの発想の機械版）。
   // 特に *→done の直指定を塞ぐ: doneはcomplete（verifier cleanガード付き）のみ。
   // setPhase(done)で抜けるとgoalがactiveのままloopだけ止まるself-graded doneの穴になる。
-  if (before && !isLegalPhaseTransition(before.state.phase, phase)) return null;
+  if (before && !isLegalPhaseTransition(before.state.phase, phase)) {
+    return {
+      ok: false,
+      active: null,
+      error:
+        `非法遷移 ${before.state.phase} -> ${phase}。` +
+        `合法遷移: ${(LEGAL_TRANSITIONS[before.state.phase] ?? []).join(", ")}。`,
+    };
+  }
+  // 進捗ゲート: implementing→polish は未完了タスクを残さない。
+  // - ストアが読めない場合は fail-closed（拒否する）。タスク0件だと無言で通ると
+  //   進捗の強制点が消えるため、「読めない」と「0件」を区別する。
+  // - ストアが空なら移行救済として design.md から seed する（デプロイ時点で
+  //   implementing だった goal も追跡対象にする。design 判断2）。
+  if (before && before.state.phase === "implementing" && phase === "polish") {
+    const loaded = readTodosStatus(root, before.goal.id);
+    const storeErr = todoStoreError(loaded);
+    if (storeErr) {
+      recordEvent(root, {
+        type: "todo_seed_warning",
+        goal: before.goal.id,
+        reason: `polish への遷移を拒否した（fail-closed）: ${storeErr}`,
+      });
+      return { ok: false, active: null, error: storeErr };
+    }
+    const store =
+      loaded.store.items.length === 0
+        ? ensureTodos(root, before.goal.id, { warn: true })
+        : loaded.store;
+    // design.md が「あるが読めない」場合は進捗が不明なので fail-closed。
+    // （design.md が無い ＝ タスク0件相当は既存 goal の後方互換として通す）
+    if (store.items.length === 0 && planReadState(root, before.goal.id) === "unreadable") {
+      const err =
+        "design.md を読み込めません（不正なエンコーディングの可能性）。進捗を機械的に強制できないため遷移を拒否します（fail-closed）";
+      recordEvent(root, {
+        type: "todo_seed_warning",
+        goal: before.goal.id,
+        reason: err,
+      });
+      return { ok: false, active: null, error: err };
+    }
+    const err = todoGateError(store);
+    if (err) return { ok: false, active: null, error: err };
+  }
+  // seed は designing→implementing の遷移時にだけ行う（implementing 中は design.md を触らない）
+  if (before && before.state.phase === "designing" && phase === "implementing") {
+    ensureTodos(root, before.goal.id, { warn: true });
+  }
   const r = mutateActive(root, () => ({
     // phaseが変わるたびfail系・stuck系カウンタをリセット
     // （implementingに戻ってきた時も0から数え直す。巻き戻し直後のインフレ防止）
@@ -1417,7 +1786,7 @@ export function setPhase(
       ...(notes ? { notes } : {}),
     });
   }
-  return r;
+  return { ok: true, active: r, error: null };
 }
 
 export function unbindSession(root: string, sessionID: string): void {
@@ -1782,6 +2151,82 @@ export async function recordRouterCheckWithRisk(
   return recordRouterCheck(root, baseline, diffLines, route, { deep, reason });
 }
 
+/** eval 遷移の応答（plugin の evalNote / MCP の返り値） */
+export interface EvalToPolishResult {
+  /** polish へ遷移したか */
+  transitioned: boolean;
+  /** 遷移しなかった理由（ゲート拒否・diff=0 など） */
+  note: string;
+}
+
+/**
+ * eval 成功時の implementing→polish 遷移。**plugin（hooks.ts）と MCP（mcp.ts）の単一実装**。
+ *
+ * 規則（2 経路に散らばせないこと）:
+ * - 遷移するのは「baseline 取得失敗」と「diff>0」の 2 分岐だけ。
+ *   実効 diff=0 は「実装なし」の可能性があるので遷移せず、警告だけ返す。
+ * - 進捗ゲートに拒否されたら router 記録もしない（拒否のたびに router_check が積み上がるのを防ぐ）。
+ * - router 記録は遷移に成功したときだけ。
+ */
+/**
+ * eval 遷移の入力（baseline と実効 diff 行数）を計算する。
+ * plugin（hooks.ts）と MCP（mcp.ts）が同じ物を使う（配線の取り違えを防ぐ）。
+ */
+export async function evalTransitionInput(
+  shell: Shell,
+  root: string,
+  baselineRev: string | null | undefined,
+): Promise<{ baseline: string | null; diffLines: number }> {
+  const baseline = baselineRev ?? (await captureBaselineRev(shell, root));
+  const measured = await measureDiffLines(shell, root, baseline);
+  const diffLines = effectiveDiffLines(
+    measured,
+    getActive(root)?.state.initial_diff_lines,
+  );
+  return { baseline, diffLines };
+}
+
+export async function evalToPolish(
+  shell: Shell,
+  root: string,
+  input: { cmd: string; baseline: string | null; diffLines: number },
+): Promise<EvalToPolishResult> {
+  const { cmd, baseline, diffLines } = input;
+  if (baseline === null) {
+    const mv = setPhaseChecked(root, "polish");
+    if (!mv.ok) {
+      return { transitioned: false, note: `eval_cmd は通ったが polish へ進めない: ${mv.error}` };
+    }
+    await recordRouterCheckWithRisk(shell, root, baseline, 0, "advisor");
+    return {
+      transitioned: true,
+      note: `eval_cmd passed but baseline not captured — polishへ進む（simplifyはスキップ、verifierで検証）: ${cmd}`,
+    };
+  }
+  if (diffLines > 0) {
+    const cfg = readConfig(root);
+    const route: RouterRoute = diffLines > cfg.router_threshold_lines ? "polish" : "advisor";
+    const mv = setPhaseChecked(root, "polish");
+    if (!mv.ok) {
+      return { transitioned: false, note: `eval_cmd は通ったが polish へ進めない: ${mv.error}` };
+    }
+    const recorded = await recordRouterCheckWithRisk(shell, root, baseline, diffLines, route);
+    const deep = recorded.router.deep
+      ? `\ndeep: ${recorded.router.deep_reason} — behavior lens（polish時）／general lens（advisor時）は休止中（verifier既定モデルの上書きは不要）`
+      : "";
+    return {
+      transitioned: true,
+      note: `eval_cmd passed (diff ${diffLines} lines since baseline): ${cmd}${deep}`,
+    };
+  }
+  // 実効 diff=0: 実装なし or 前goal残骸との相殺。遷移しない（人手確認）。
+  await recordRouterCheckWithRisk(shell, root, baseline, 0, "advisor");
+  return {
+    transitioned: false,
+    note: `eval_cmd passed but effective diff_lines=0 since baseline — 実装なしか前goal残骸との相殺のいずれか。実装を進めるか、router_check で手動確認せよ: ${cmd}`,
+  };
+}
+
 /** verifier fan-out の1レンズ分の結果（verifier_set の results 要素）。
  * model は per-lens上書き（deep時の上位モデル等）。省略時はトップレベルmodel→config既定。
  * 申告値であり実在は検証しない（critic_set／consult_set同型の既知トレードオフ） */
@@ -1991,7 +2436,7 @@ export function setConsult(
 
 /* ================================================================== *
  * 無限ループ検知（echoループ + 同一tool call反復）: assistant出力がそのまま次の
- * user入力にミラーされ続けると、session.idle が連続発火して自動継続が延々回る。
+ * user入力にミラーされ続けると、turn 終了が連続して自動継続が延々回る。
  * 検知は2種:
  * - echo: 直前のassistantメッセージとほぼ同一のuserメッセージ（3パターン）
  * - tool: 直近ウィンドウ内で同一 (tool名+入力ハッシュ) の反復

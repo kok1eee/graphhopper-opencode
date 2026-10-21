@@ -11,6 +11,8 @@ global `~/.config/opencode/AGENTS.md` (CodeGraph / graft-first / rg制限) を�
   - verifier が clean なら、同じターン内で `graphhopper_verifier_set`（`reason` 必須）→ `graphhopper_phase(done)` → `graphhopper_goal(complete)` まで続ける。途中で報告して止まらない。
   - `execute` 内の呼び方: graphhopper の tool は `tools.graphhopper_goal(...)` のようにフラットに呼ぶ（`tools.graphhopper.graphhopper_goal` ではない）。
   - `shell` は `execute` の中では呼べない。直接ツールとして呼ぶ。
+  - `execute` 内の `tools.xxx(...)` はすべて `await` する（`tools.search` も Promise）。同期なのはグローバルの `search(...)` だけ。
+  - 呼ぶツール名はカタログかグローバル `search` で確認したものだけを使う。名前を推測して直接呼び出さない（codegraph は `tools.codegraph.codegraph_explore`）。
   - `Unknown tool ...` のようなツール呼び出しエラーは作業の失敗ではない。止まらず、呼び方を直して同じ操作をやり直す。
 - `.graphhopper/config.json` / global `graphhopper.json` の割当表を変えたら
   `bun scripts/gen-agents.ts` して再起動

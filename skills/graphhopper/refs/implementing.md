@@ -3,10 +3,22 @@
     （公式doc・仕様・実装例を webfetch / context7 で。URLと引用付き、判断なし。
     context7に無い一般web（issue・blog・changelog）はwebsearch MCP（Exa）、
     コード例はgrep.app MCPにフォールバック）
+  - **モデル**: primary は `opencode-go/minimax-m3.1-flash-free`（無料枠）。枠切れ・遅いときは
+    課金枠の `minimax/MiniMax-M3.1-Flash` に手動切替できる（割当表を書き換えて
+    `bun scripts/gen-agents.ts` して再起動）
   - 独立した問いなら `task()` で2体を**並列**に呼び、メインが統合する（discover fan-outと同型）
   - 外部問いが内部findingsに依存するなら**直列**にする（researcherで対象ライブラリ・版を
     特定してからlibrarianにdocを引かせる。逆順・同時投げは版ズレの温床）
   - researcherは外部調査を自分でやらずlibrarian委譲を提案し、librarianは判断を含めない（境界の二重化）
+- **進捗タスクの完了申告（`graphhopper_todo`）**: design.md の「実装タスク列」セクションが
+  designing→implementing 遷移時に todo ストア（`.graphhopper/todos/<goalId>.json`）へ seed される。
+  タスクを1つ終えるたびに `graphhopper_todo(action: "done", id: "tN")` で申告する。
+  進行中は `action: "start"`、やらないと判断したものは `action: "cancel"` ＋`reason` 必須、
+  実装中に増えたものは `action: "add"`、一覧は `action: "list"`。
+  **未完了タスク（pending / in_progress）が1件でも残ると polish へ遷移できない**
+  （eval_cmd が pass しても同じ。ゲート拒否メッセージに残りタスクが列挙される）。
+  したがって「全タスク実施したら router_check を呼ぶ」の**前に**、
+  全タスクを completed か cancelled にしておくこと
 - **実装試行のたびに `graphhopper_attempt(ok, note)` を呼ぶ**（成否をコード側で機械カウントする）。
   ただし **eval_cmd設定中はattemptを呼ばない**（idle/MCP-evalが自動記録するため二重計数になる。
   手動の進捗メモが必要ならnoteに残す）。eval未設定時のみ自己申告フォールバックとして使う
