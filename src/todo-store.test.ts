@@ -1,3 +1,4 @@
+import { goalResumeContext } from "./gate";
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -442,5 +443,23 @@ describe("完了 goal のアーカイブ", () => {
     const arch = join(dirname(todosPath(root, g.id)), "archive", `${g.id}.json`);
     expect(existsSync(arch)).toBe(true);
     expect(existsSync(join(dirname(planPath(root, g.id)), "archive", `${g.id}.md`))).toBe(true);
+  });
+});
+
+describe("goalResumeContext（compact・handoff 共通）", () => {
+  test("phase・次の手・残タスク・文書の場所を含み、active なしなら null", () => {
+    const root = tmpRoot();
+    expect(goalResumeContext(root)).toBeNull();
+    const g = startGoal(root, "t", "s").goal;
+    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    setPhase(root, "implementing");
+    const out = goalResumeContext(root, { includeLoop: true })!;
+    expect(out).toContain(g.id);
+    expect(out).toContain("phase: implementing");
+    expect(out).toContain("次のアクション");
+    expect(out).toContain("未完了タスク");
+    expect(out).toContain("T1 実装する");
+    expect(out).toContain(`plans/${g.id}.md`);
+    expect(out).toContain("loop:");
   });
 });

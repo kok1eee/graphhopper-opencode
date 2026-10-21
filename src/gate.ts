@@ -554,3 +554,44 @@ export function continuationText(goal: state.Goal, s: state.LoopState): string {
     .filter(Boolean)
     .join("\n");
 }
+
+/**
+ * goal の再開文脈（compact・handoff 共通の単一源泉）。
+ * 要約や別セッションへ渡しても、続きに必要な事実（phase・次の手・残タスク・文書の場所）を失わせない。
+ */
+export function goalResumeContext(
+  root: string,
+  opts: { includeLoop?: boolean } = {},
+): string | null {
+  const active = state.getActive(root);
+  if (!active || active.goal.status !== "active") return null;
+  const { goal, state: s } = active;
+  const progress = state.todoSummaryLine(root, goal.id);
+  const store = state.readTodosStatus(root, goal.id);
+  const open = store.valid
+    ? store.store.items
+        .filter((i) => i.status === "pending" || i.status === "in_progress")
+        .slice(0, 8)
+        .map((i) => `  - ${i.id}: ${i.text}`)
+    : [];
+  return [
+    `- goal: "${goal.title}" (${goal.id}) [${goal.status}]`,
+    `- phase: ${s.phase}`,
+    `- 次のアクション: ${effectivePhaseAction(s.phase, s.entry_route)}`,
+    s.notes ? `- notes: ${s.notes}` : null,
+    s.eval_cmd ? `- eval_cmd: ${s.eval_cmd}` : null,
+    progress ? `- ${progress}` : null,
+    open.length ? `- 未完了タスク:\n${open.join("\n")}` : null,
+    s.fail_streak > 0 ? `- fail_streak: ${s.fail_streak}` : null,
+    s.last_verifier ? `- last_verifier: ${s.last_verifier.level} (${s.last_verifier.reason})` : null,
+    `- design doc: .graphhopper/plans/${goal.id}.md（designing終了後は不変）`,
+    state.planLogExists(root, goal.id)
+      ? `- log: .graphhopper/plans/${goal.id}.log.md（決定の経緯・棄却した代替案）`
+      : null,
+    opts.includeLoop
+      ? `- loop: stop_count=${s.loop_stop_count}/${state.readConfig(root).loop_stop_max} resume_blocked=${state.isResumeBlocked(root)}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}

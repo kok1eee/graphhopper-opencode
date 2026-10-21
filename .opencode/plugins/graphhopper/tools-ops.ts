@@ -354,7 +354,7 @@ export function registerOpsTools(
         return text(`error: session ${args.session_id} は subagent なので handoff 先にできない`);
       }
 
-      const { effectivePhaseAction: epa } = await import("../../../src/gate");
+      const { goalResumeContext } = await import("../../../src/gate");
       const s = active.state;
       const textBody = [
         "## graphhopper handoff",
@@ -363,25 +363,8 @@ export function registerOpsTools(
         "これは1回限りの handoff であり、さらに他セッションへ転送しないこと。",
         "続行には graphhopper_resume で goal を再バインドしてから実施せよ。",
         "",
-        `- goal: "${active.goal.title}" (${active.goal.id}) [${active.goal.status}]`,
-        `- phase: ${s.phase}`,
-        `- notes: ${s.notes || "(none)"}`,
-        `- fail_streak: ${s.fail_streak}`,
-        `- loop: stop_count=${s.loop_stop_count}/${state.readConfig(root).loop_stop_max} resume_blocked=${state.isResumeBlocked(root)}`,
-        `- eval_cmd: ${s.eval_cmd || "(none)"}`,
-        s.router.route
-          ? `- router: route=${s.router.route} diff_lines=${s.router.diff_lines}${s.router.deep ? " deep" : ""}`
-          : null,
-        s.last_verifier ? `- last_verifier: ${s.last_verifier.level} (${s.last_verifier.reason})` : null,
-        s.critic_review
-          ? `- critic_review: ${s.critic_review.level} (${s.critic_review.reason})`
-          : "- critic_review: (none, opt-in)",
-        `- design doc: .graphhopper/plans/${active.goal.id}.md（designing終了後は不変）`,
-        state.planLogExists(root, active.goal.id)
-          ? `- log: .graphhopper/plans/${active.goal.id}.log.md（決定の経緯・棄却した代替案・進捗）`
-          : null,
+        goalResumeContext(root, { includeLoop: true }),
         `- 送信元 session: ${sessionID} | state updated: ${s.updated_at}`,
-        `- 次のアクション: ${epa(s.phase, s.entry_route)}`,
         args.note ? `- 補足: ${args.note}` : null,
         "",
         `引き継いだら「handoff received: ${active.goal.id}」と返信せよ。`,

@@ -24,7 +24,8 @@ import {
   PONYTAIL_BRIEF,
 } from "../../../src/gate";
 import { PONYTAIL_RULES } from "../../../src/ponytail-rules";
-import { pushGoalIntent, resolveCompactDb, runCompactGate } from "../../../src/compact";
+import { resolveCompactDb, runCompactGate } from "../../../src/compact";
+import { goalResumeContext } from "../../../src/gate";
 import { isFailedEvent, isInterruptedEvent, isTurnEndEvent } from "../../../src/events";
 import * as state from "../../../src/state";
 import { isDesignDocLocked, isDesignGateBlocked } from "../../../src/state";
@@ -208,7 +209,12 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
       e.messages?.push({ role: "user", content: [{ type: "text", text: t }] });
     };
     try {
-      pushGoalIntent(() => state.getActive(root), push);
+      const ctxText = goalResumeContext(root);
+      if (ctxText) {
+        push(
+          "[graphhopper] active goal の再開文脈（要約で失わず、そのまま残せ）:\n" + ctxText,
+        );
+      }
     } catch {
       // 要約を壊さないため例外は握りつぶす
     }
