@@ -59,13 +59,13 @@ function fakeCtx(opts: { parentID?: string | null } = {}) {
 }
 
 /** d1 の応答を模した fetch（一時的にグローバルを差し替える） */
-const patchFetch = () => {
+const patchFetch = (route: "light" | "direct" = "light") => {
   const original = globalThis.fetch;
   globalThis.fetch = (async () => ({
     ok: true,
     json: async () => ({
       answers: {
-        route: { choice: "light", confidence: 0.3 },
+        route: { choice: route, confidence: 0.3 },
         difficulty: { choice: "normal", confidence: 0.9 },
       },
     }),
@@ -215,6 +215,68 @@ describe("plugin hook: 入口d1判定の prompt hook", () => {
         const rows = readRows(root);
         expect(rows.some((r) => r.kind === "decide")).toBe(false);
         expect(rows[0]).toMatchObject({ kind: "decide-skip", result: "no_api_key" });
+      });
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe("plugin hook: 入口d1判定の context hook（注入）", () => {
+  /* 注入ヘッダ。SYSTEM_GUIDE にも「graphhopper 入口判定」という語が出るので
+   * ヘッダ全文で判定する */
+  const INJECT_HEADER = "## graphhopper 入口判定（d1・自動判定済み）";
+
+  test("判定結果を system に注入する（1ターン1回・消費したら入れない）", async () => {
+    const root = tmpRoot();
+    const restore = patchFetch("light");
+    try {
+      await withKey(async () => {
+        const { ctx, hooks } = fakeCtx();
+        await registerHooks({ ctx: ctx as never, root });
+        const promptHook = hooks.get("prompt")?.[0];
+        const contextHook = hooks.get("context")?.[0];
+        if (!promptHook || !contextHook) throw new Error("hook が登録されていない");
+
+        await promptHook({
+          sessionID: "s-main",
+          prompt: { text: "複数ファイルを変更する重い依頼" },
+        });
+
+        const system: Array<{ type: string; text?: string }> = [];
+        await contextHook({ sessionID: "s-main", system });
+        const injected = system.map((s) => s.text ?? "").join("\n");
+        expect(injected).toContain(INJECT_HEADER);
+        expect(injected).toContain("route: 'light'");
+
+        /* 2回目の context では注入しない（消費済み） */
+        const system2: Array<{ type: string; text?: string }> = [];
+        await contextHook({ sessionID: "s-main", system: system2 });
+        expect(system2.map((s) => s.text ?? "").join("\n")).not.toContain(INJECT_HEADER);
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  test("raw=direct なら注入しない", async () => {
+    const root = tmpRoot();
+    const restore = patchFetch("direct");
+    try {
+      await withKey(async () => {
+        const { ctx, hooks } = fakeCtx();
+        await registerHooks({ ctx: ctx as never, root });
+        const promptHook = hooks.get("prompt")?.[0];
+        const contextHook = hooks.get("context")?.[0];
+        if (!promptHook || !contextHook) throw new Error("hook が登録されていない");
+
+        await promptHook({
+          sessionID: "s-main",
+          prompt: { text: "こんにちは" },
+        });
+        const system: Array<{ type: string; text?: string }> = [];
+        await contextHook({ sessionID: "s-main", system });
+        expect(system.map((s) => s.text ?? "").join("\n")).not.toContain(INJECT_HEADER);
       });
     } finally {
       restore();

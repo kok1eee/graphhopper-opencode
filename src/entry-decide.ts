@@ -24,8 +24,9 @@ export const ENTRY_DECIDE_TIMEOUT_MS = 5_000;
 /** goal start 時の保険で「直近」とみなす decide 行の窓 */
 export const ENTRY_DECIDE_FRESH_MS = 5 * 60_000;
 
-/** decisions.jsonl を末尾何バイト読むか（先頭からの全走査を避ける） */
-export const DECISION_TAIL_BYTES = 64 * 1024;
+/** decisions.jsonl を末尾何バイト読むか（先頭からの全走査を避ける）。
+ * skip 行も毎 prompt 記録されるので 5 分の窓を余裕をもって覆う */
+export const DECISION_TAIL_BYTES = 256 * 1024;
 
 /** plugin 内部 prompt の識別子。ctx.session.prompt に付けて渡す */
 export const INTERNAL_PROMPT_METADATA_KEY = "graphhopper_internal";
@@ -205,6 +206,7 @@ export function hasRecentEntryDecision(
  * goal start 時の保険: 直近に decide 行が無ければ goal title を入力に判定して**記録だけ**残す。
  * route は変えない（entry_route は既存の route_set / fail-safe に委ねる）。
  *
+ * - セッションが不明なときは何もしない（他セッションの decide と二重計上になるため）。
  * - API キーが無い環境では判定しない（失敗した decide 行が goal ごとに残ると
  *   calibrate の decide×outcome 結合が偽の decide に実績を吸わせる）。
  * - 例外は投げない（goal start を止めない）。呼び出し側で try/catch しないためのもの。
@@ -216,6 +218,9 @@ export async function ensureEntryDecision(
   opts?: { fetchFn?: FetchFn; timeoutMs?: number; now?: number },
 ): Promise<EntryVerdict | null> {
   try {
+    /* セッション不明では Recent 判定も紐付けもできない。
+     * 保険 运行すると他セッションの decide と二重計上になるので行わない */
+    if (!sessionID) return null;
     if (!process.env.LIQUID_API_KEY?.trim()) {
       await recordEntrySkip(root, "no_api_key", title, sessionID);
       return null;

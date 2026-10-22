@@ -6,7 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -851,6 +851,25 @@ describe("評価機能（成績表・採点）", () => {
 });
 
 describe("graphhopper-mcp route系tool（統合）", () => {
+  test("route_set は difficulty を pending に載せる（goal start のカスケード判定へ渡る）", async () => {
+    const client = await linked();
+    const root = freshRoot();
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const r = await client.callTool({ name, arguments: { ...args, root } });
+      const c = r.content as { type: string; text: string }[];
+      return c[0]?.text ?? "";
+    };
+    expect(
+      await call("graphhopper_route_set", { route: "light", reason: "d1", difficulty: "easy" }),
+    ).toContain("entry_route=light");
+    const pending = JSON.parse(
+      readFileSync(join(root, ".graphhopper", "pending_route.json"), "utf-8"),
+    ) as { route: string; difficulty: string | null };
+    expect(pending.route).toBe("light");
+    expect(pending.difficulty).toBe("easy");
+    await client.close();
+  });
+
   test("route_set B→bind→verifier×1可・3lens拒否→escalate", async () => {
     const client = await linked();
     const root = freshRoot();

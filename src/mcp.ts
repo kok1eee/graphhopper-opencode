@@ -1063,10 +1063,11 @@ const TOOL_DEFS: ToolDef[] = [
       properties: {
         root: ROOT_PROP,
         request: { type: "string", description: "これからやる内容のテキスト" },
+        session_id: SESSION_PROP,
       },
       required: ["request"],
     },
-    schema: z.object({ root: rootZ, request: z.string() }),
+    schema: z.object({ root: rootZ, request: z.string(), session_id: z.string().optional() }),
     outputSchema: {
       type: "object",
       properties: {
@@ -1079,6 +1080,8 @@ const TOOL_DEFS: ToolDef[] = [
     run: async (a, ctx) => {
       const r = await decideRoute(a.request as string, fetch, {
         root: ctx.root,
+        /* 手動判定もセッションに紐付ける（goal start の保険の二重走防止） */
+        sessionID: sessionOf(a.session_id) || null,
       });
       const text = [...formatDecisionSummary(r), formatDecisionNextStep(r)].join("\n");
       return {
@@ -1097,10 +1100,11 @@ const TOOL_DEFS: ToolDef[] = [
         root: ROOT_PROP,
         route: { type: "string", description: "decide返却のroute（full/light/direct/advised/oracle。旧A/B/Cも受理。不正値はfullに倒す）" },
         reason: { type: "string", description: "判定理由の要旨（任意）" },
+        difficulty: { type: "string", enum: ["easy", "normal", "hard"], description: "decide返却のdifficulty（任意。goal start時にカスケード判定へ渡る）" },
       },
       required: ["route"],
     },
-    schema: z.object({ root: rootZ, route: z.string(), reason: z.string().optional() }),
+    schema: z.object({ root: rootZ, route: z.string(), reason: z.string().optional(), difficulty: z.enum(["easy", "normal", "hard"]).optional() }),
     outputSchema: {
       type: "object",
       properties: {
@@ -1113,6 +1117,7 @@ const TOOL_DEFS: ToolDef[] = [
     run: (a, ctx) => {
       const parsed = parseEntryRoute(a.route as string);
       const reason = (a.reason as string | undefined) ?? parsed.reason;
+      const difficulty = a.difficulty ?? null;
       if (parsed.route === "direct") {
         const active = state.getActive(ctx.root);
         state.recordEvent(ctx.root, {
@@ -1126,8 +1131,8 @@ const TOOL_DEFS: ToolDef[] = [
           data: { route: "direct", bound: false },
         };
       }
-      state.writePendingRoute(ctx.root, parsed.route, reason);
-      const bound = state.bindEntryRoute(ctx.root, parsed.route, reason);
+      state.writePendingRoute(ctx.root, parsed.route, reason, difficulty);
+      const bound = state.bindEntryRoute(ctx.root, parsed.route, reason, difficulty);
       if (bound) state.clearPendingRoute(ctx.root);
       // goalIdはbind成功時のみ（required不変・null禁止。client検証の慣例）
       return {

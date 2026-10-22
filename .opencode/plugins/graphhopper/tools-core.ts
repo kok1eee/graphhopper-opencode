@@ -277,9 +277,14 @@ export function registerCoreTools(
     name: "graphhopper_decide",
     description: "d1 decision-modelで入口routeを判定する（jev置換。通常の入口判定はhookが自動実行する。これは手動用）。requestを渡すとroute＋confidenceを返す。stateは書かない",
     input: S.obj({ request: S.str("これからやる内容のテキスト") }, ["request"]),
-    execute: async (input: unknown) => {
+    execute: async (input: unknown, context: unknown) => {
       const args = input as { request: string };
-      const r = await decideRoute(args.request, fetch, { root });
+      const r = await decideRoute(args.request, fetch, {
+        root,
+        /* 手動判定もセッションに紐付ける。goal start の保険が同じ decide 行を
+         * 見つけて二重に走らないようにする */
+        sessionID: sess(gh, context as Ctx) || null,
+      });
       return text(
         [
           ...formatDecisionSummary(r),

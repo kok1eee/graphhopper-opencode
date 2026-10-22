@@ -311,6 +311,20 @@ describe("hasRecentEntryDecision / ensureEntryDecision（goal start 時の保険
     });
   });
 
+  test("セッション不明では保険を動かさない（他セッションの decide と二重計上しない）", async () => {
+    const root = mkRoot();
+    await withKey(async () => {
+      const v = await ensureEntryDecision(
+        root,
+        null,
+        "goal の題名",
+        { fetchFn: fakeFetch({ route: { choice: "light", confidence: 0.9 } }) },
+      );
+      expect(v).toBeNull();
+      expect(() => readRows(root)).toThrow();
+    });
+  });
+
   test("例外を投げない（goal start を止めない）", async () => {
     const root = mkRoot();
     await withKey(async () => {
