@@ -6,6 +6,7 @@
 import { randomUUID } from "node:crypto";
 import { $ } from "bun";
 import { chooseRecovery, chooseWorkflow } from "../../../src/decision";
+import { INTERNAL_PROMPT_METADATA_KEY } from "../../../src/entry-decide";
 import * as state from "../../../src/state";
 import { parseCascadeModel } from "../../../src/cascade";
 import {
@@ -47,7 +48,11 @@ function makeHost(gh: Gh, parentID: string): WorkflowHost {
       return id;
     },
     async prompt(sessionID, t) {
-      await ctx.session.prompt({ sessionID, text: t });
+      await ctx.session.prompt({
+        sessionID,
+        text: t,
+        metadata: { [INTERNAL_PROMPT_METADATA_KEY]: true },
+      });
     },
     async wait(sessionID) {
       await ctx.session.wait({ sessionID });

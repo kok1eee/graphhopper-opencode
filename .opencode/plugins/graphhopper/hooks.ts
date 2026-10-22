@@ -26,6 +26,16 @@ import {
 import { PONYTAIL_RULES } from "../../../src/ponytail-rules";
 import { resolveCompactDb, runCompactGate } from "../../../src/compact";
 import { goalResumeContext } from "../../../src/gate";
+import {
+  decideEntry,
+  ENTRY_DECIDE_TIMEOUT_MS,
+  formatEntryVerdict,
+  INTERNAL_PROMPT_METADATA_KEY,
+  isInternalPrompt,
+  recordEntrySkip,
+  shouldRunEntryDecide,
+  type EntryVerdict,
+} from "../../../src/entry-decide";
 import { isFailedEvent, isInterruptedEvent, isTurnEndEvent } from "../../../src/events";
 import * as state from "../../../src/state";
 import { isDesignDocLocked, isDesignGateBlocked } from "../../../src/state";
@@ -36,6 +46,8 @@ import type { Gh } from "./shared";
 const SYSTEM_GUIDE = `## graphhopper（designing/implementing/polishループ）の存在
 
 この環境には graphhopper プラグインが常駐している。複数ファイルにまたがる変更・設計判断を含む実装を依頼されたら、手を付ける前に graphhopper_goal(action: "start", title: ...) でループを開始せよ。
+
+入口の route 判定（d1）はプラグインが自動実行し、判定結果はこのプロンプトの「graphhopper 入口判定」として渡される（direct の場合は渡されない）。その判定に従って graphhopper_route_set → graphhopper_goal(start) へ進むこと。判定は参考値であり、明らかに単一ファイルの小修正ならループを作らず直接対応してよい。
 
 designing フェーズでは source ファイルの edit/write は物理的にブロックされる（許可されるのは .graphhopper/plans/ 配下の design ドキュメントのみ）。まず design ドキュメントを書き、graphhopper-critic で1回敵対レビューしてから implementing フェーズに遷移して実装せよ。
 
@@ -55,6 +67,29 @@ let oversizeSticky = false;
 /* system注入節約用の記憶 (v1 と同型。再起動・compact後は消失しfull再送) */
 const seenPhaseGuides = new Set<string>();
 const seenPonytails = new Set<string>();
+
+/* 入口d1判定: prompt hook で起動し、context hook で注入する。
+ * prompt hook では await しない（メッセージ受付を遅らせない）。context hook が結果を待つ。
+ * セッションごとに 1 件だけ保持し、context hook で消費したら捨てる（1ターン1回）。 */
+const entryVerdicts = new Map<string, { at: number; promise: Promise<EntryVerdict> }>();
+
+/** 保持している判定が古すぎる（失敗したターンの取り残し）なら注入しない */
+const ENTRY_VERDICT_MAX_AGE_MS = 5 * 60_000;
+
+/** 判定の例外が漏れたときの保険。fallback なので注入はしない */
+const FALLBACK_VERDICT: EntryVerdict = {
+  route: "full",
+  rawChoice: null,
+  rawRoute: null,
+  confidence: null,
+  reason: "entry判定例外",
+  fallback: true,
+  difficulty: null,
+  difficultyConfidence: null,
+};
+
+/* 子セッション（subagent）の一覧。session.created で parentID 付きが来たら登録する */
+const childSessions = new Set<string>();
 
 function resolveFilePath(args: unknown): string | undefined {
   if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
@@ -125,6 +160,13 @@ interface ContextEvent {
   system?: { type: string; text?: string }[];
 }
 
+/* prompt admission イベント（opencode 2.1 の session.hook("prompt")） */
+interface PromptEvent {
+  sessionID?: string;
+  prompt?: { text?: string };
+  metadata?: Record<string, unknown>;
+}
+
 interface CompactionEvent {
   sessionID?: string;
   messages?: unknown[];
@@ -170,12 +212,59 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
     }
   });
 
-  /* system 注入: guide＋phase指示＋ponytail (v1 と同型の節約つき) */
-  await ctx.session.hook("context", (event: unknown) => {
+  /* 入口d1判定: prompt admission で起動し、context（モデル呼び出し直前）で注入する。
+   * prompt hook は await しない（メッセージ受付を遅らせない）。結果は context hook が待つ。 */
+  await ctx.session.hook("prompt", (event: unknown) => {
+    try {
+      const e = event as PromptEvent;
+      const sessionID = String(e.sessionID ?? "");
+      if (!sessionID) return;
+      const text = String(e.prompt?.text ?? "");
+      const active = state.getActive(root);
+      const decision = shouldRunEntryDecide({
+        text,
+        isInternal: isInternalPrompt(e.metadata, text),
+        isChildSession: childSessions.has(sessionID),
+        hasActiveGoal: !!active && active.goal.status === "active",
+        hasApiKey: !!process.env.LIQUID_API_KEY?.trim(),
+      });
+      if (!decision.run) {
+        void recordEntrySkip(root, decision.reason, text, sessionID);
+        return;
+      }
+      /* 前回の判定は捨てる（1セッション1件だけ保持） */
+      entryVerdicts.set(sessionID, {
+        at: Date.now(),
+        promise: decideEntry(text, fetch, { root, sessionID, timeoutMs: ENTRY_DECIDE_TIMEOUT_MS }).catch(
+          () => FALLBACK_VERDICT,
+        ),
+      });
+    } catch {
+      // 判定の失敗でユーザー入力を止めない
+    }
+  });
+
+  /* system 注入: guide＋phase指示＋ponytail＋入口判定 (v1 と同型の節約つき) */
+  await ctx.session.hook("context", async (event: unknown) => {
     const e = event as ContextEvent;
     const push = (t: string) => e.system?.push({ type: "text", text: t });
     const active = state.getActive(root);
     push(active?.goal.status === "active" ? SYSTEM_GUIDE_IDLE : SYSTEM_GUIDE);
+    /* 入口判定の注入（1ターン1回。消費したら捨てる） */
+    const sessionID = String(e.sessionID ?? "");
+    const pending = sessionID ? entryVerdicts.get(sessionID) : undefined;
+    if (pending) {
+      entryVerdicts.delete(sessionID);
+      if (Date.now() - pending.at <= ENTRY_VERDICT_MAX_AGE_MS) {
+        try {
+          const verdict = await pending.promise;
+          const text = formatEntryVerdict(verdict);
+          if (text) push(text);
+        } catch {
+          // 判定の失敗でモデル呼び出しを止めない
+        }
+      }
+    }
     if (
       active && active.goal.status === "active" && active.state.phase !== "done" &&
       e.sessionID && e.sessionID === active.state.session_id
@@ -244,6 +333,10 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
         try {
           if (event.type === "session.created") {
             const created = event.data as Record<string, unknown> | undefined;
+            /* 子セッション（subagent）は入口判定の対象外 */
+            const createdID = typeof created?.sessionID === "string" ? created.sessionID : "";
+            const createdParent = typeof created?.parentID === "string" ? created.parentID : null;
+            if (createdID && createdParent) childSessions.add(createdID);
             if (handleGrandchild(gh, created)) continue;
             handleChildSessionCreated(gh, created);
             continue;
@@ -254,6 +347,9 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
               const activeGoal = state.getActive(root);
               if (activeGoal?.state.session_id === id) await finishCascade(gh);
               state.unbindSession(root, id);
+              /* 子セッション一覧から消す（set が膨らまないように） */
+              childSessions.delete(id);
+              entryVerdicts.delete(id);
             }
             try {
               await LSPServerManager.stopAll();
@@ -407,6 +503,7 @@ async function onIdle(gh: Gh, sessionID: string): Promise<void> {
             await ctx.session.prompt({
               sessionID,
               text: "[graphhopper] 無限ループ（echo または同一tool callの反復）を検知したため自動継続を停止しました（goal は pause）。以後、同じ応答・同じtool callの繰り返しには応答せず、新しい実際の作業指示を待ってください。",
+              metadata: { [INTERNAL_PROMPT_METADATA_KEY]: true },
             });
           } catch {
             // 通知失敗でも停止は成立している
@@ -464,6 +561,7 @@ async function onIdle(gh: Gh, sessionID: string): Promise<void> {
           await ctx.session.prompt({
             sessionID,
             text: `[graphhopper] eval_cmd が ${r.fail_streak} 回連続失敗したため自動継続を停止しました（goal は pause）。eval を修正してから graphhopper_goal(action: 'resume') で再開してください（fail_streak は resume 時に 0 に戻ります）。\n${cmd}\n${tail}`,
+            metadata: { [INTERNAL_PROMPT_METADATA_KEY]: true },
           });
         } catch {
           // 通知失敗でも停止は成立している
@@ -492,6 +590,7 @@ async function onIdle(gh: Gh, sessionID: string): Promise<void> {
   await ctx.session.prompt({
     sessionID,
     text: [state.CONTINUATION_MARKER, evalNote, cascadeNote, continuationText(active.goal, active.state)].filter(Boolean).join("\n\n"),
+    metadata: { [INTERNAL_PROMPT_METADATA_KEY]: true },
   });
   if (idleMsgs !== null) {
     state.noteContinuation(

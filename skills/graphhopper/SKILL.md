@@ -43,18 +43,23 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
 
 ### 入口トリアージ（decide・route full/light/direct/advised/oracle）
 
-フルループが大袈裟な作業に相応の重さで回す入口判定。判定は `graphhopper_decide`
-（d1 decision-modelのChoice型でroute 5択＋confidence。低confidence・障害時はfull。`LIQUID_API_KEY` が要る）:
+フルループが大袈裟な作業に相応の重さで回す入口判定。**判定は plugin の hook が自動で走らせる**
+（ユーザー入力の prompt admission で d1 を起動し、モデル呼び出し直前に結果を渡す）。
+`LIQUID_API_KEY` が要る（無いと判定は走らない）:
 
-- `graphhopper_route(request)` → 手順取得 → `graphhopper_decide(request)` で判定 →
-  `graphhopper_route_set(route, reason)` で記録。
-  decide/selectorの呼び出しは `.graphhopper/decisions.jsonl` に自動記録される
-  （route・confidence・レイテンシ。閾値較正の材料にするため入口では必ず呼ぶこと）
+- **自動判定が基本**: モデルが `graphhopper_decide` を呼ぶ必要はない。
+  判定結果は `.graphhopper/decisions.jsonl` に自動記録される
+  （route・confidence・rawChoice・レイテンシ。閾値較正の材料）
+- 判定結果（route が direct 以外）がモデルに渡される。モデル是其に従って
+  `graphhopper_route_set(route, reason, difficulty)` → `graphhopper_goal(action: "start")` へ進む。
+  **d1 の判定は参考値**。明らかに単一ファイルの小修正なら route_set をしない（ループを作らない）
+- 手動で判定し直したいときだけ `graphhopper_route(request)` → `graphhopper_decide(request)` →
+  `graphhopper_route_set(route, reason)`。手動の decide も同じログに記録される
 - **full=フル**（現行通り）/**light=軽量**（thin design＋task列のみ、critic省略、verifier general×1）/
   **direct=直行**（loopなし・goalを作らない。historyに1行のみ残る）/
   **advised=軽量＋第二意見**（light相当＋implementing前にadvisor相談1回）/
   **oracle=多角**（full相当＋開始時にoracle相談1回。stuck時は同session継続）
-- parse失敗・範囲外・未呼び出しは**fullに倒す**（fail-safe。state null＝full）。
+- parse失敗・範囲外・未記録は**fullに倒す**（fail-safe。state null＝full）。
   旧A/B/Cも受理しfull/light/directに写像する
 - **昇格のみ可**（full→light禁止のラチェット）。stuck発火時は `graphhopper_escalate`、
   `router_check` でlight/advised＋大diffなら**自動昇格**（designing巻き戻し＋肉付け＋critic1回＋fan-out×3）。

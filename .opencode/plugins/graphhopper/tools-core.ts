@@ -19,6 +19,7 @@ import {
   selectLenses,
 } from "../../../src/decision";
 import { finishCascade, syncCascade } from "./cascade";
+import { ensureEntryDecision } from "../../../src/entry-decide";
 import * as state from "../../../src/state";
 import { readRun, summarizeRun } from "../../../src/workflow";
 import { noteSession, S, text, type Gh } from "./shared";
@@ -64,6 +65,13 @@ export function registerCoreTools(
             return text(
               `error: goal "${active.goal.title}" is already active. complete or pause it first.`,
             );
+          }
+          /* 入口判定の保険: 直近の decide 行が無ければ goal title を入力に判定して記録だけ残す
+           * （route は変えない。entry_route は route_set / fail-safe に委ねる） */
+          try {
+            await ensureEntryDecision(root, sessionID || null, args.title);
+          } catch {
+            // 判定の失敗で goal start を止めない
           }
           const a = state.startGoal(root, args.title, sessionID);
           try {
@@ -247,13 +255,14 @@ export function registerCoreTools(
 
   editor.add({
     name: "graphhopper_route",
-    description: "入口トリアージの入口。やる内容を渡すと graphhopper_decide の呼び出し手順を返す（判定本体はdecide tool。LLM agentは使わない）",
+    description: "入口トリアージの入口（判定は通常hookが自動で走らせる。これは手動再判定用）。やる内容を渡すと graphhopper_decide の呼び出し手順を返す（判定本体はdecide tool。LLM agentは使わない）",
     input: S.obj({ request: S.str("これからやる内容のテキスト（decideの判定入力）") }, ["request"]),
     execute: async (input: unknown) => {
       const args = input as { request: string };
       return text(
         [
-          "## 入口トリアージ手順",
+          "## 入口トリアージ手順（手動再判定）",
+          "0. 通常の入口判定はhookが自動実行済み。下の判定は手動での再判定。",
           "1. graphhopper_decide(request) を呼ぶ（d1 decision-modelがroute＋confidenceを返す。stateは書かない）:",
           "",
           args.request,
@@ -267,14 +276,15 @@ export function registerCoreTools(
 
   editor.add({
     name: "graphhopper_decide",
-    description: "d1 decision-modelで入口routeを判定する（jev置換）。requestを渡すとroute＋confidenceを返す。stateは書かない",
+    description: "d1 decision-modelで入口routeを判定する（jev置換。通常の入口判定はhookが自動実行する。これは手動用）。requestを渡すとroute＋confidenceを返す。stateは書かない",
     input: S.obj({ request: S.str("これからやる内容のテキスト") }, ["request"]),
     execute: async (input: unknown) => {
       const args = input as { request: string };
       const r = await decideRoute(args.request, fetch, { root });
+      const rawNote = r.rawRoute ? `（d1の生の選択=${r.rawRoute}）` : "";
       return text(
         [
-          `route=${r.route}（confidence=${r.confidence ?? "n/a"}。${r.reason}）`,
+          `route=${r.route}（confidence=${r.confidence ?? "n/a"}。${r.reason}）${rawNote}`,
           `difficulty=${r.difficulty ?? "unknown"}${r.difficultyConfidence !== null ? `（confidence=${r.difficultyConfidence}）` : ""}`,
           r.route === "direct"
             ? "次: loopなしで直接対応せよ。goalは作らない（必要なら graphhopper_route_set(route: 'direct') でhistoryに残す）。"

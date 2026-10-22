@@ -63,7 +63,7 @@ export type DecisionLog = {
   /** decide行のid。outcome行は decision_id で参照する */
   id?: string;
   decision_id?: string | null;
-  kind: "decide" | "select" | "compact" | "compact-skip" | "outcome";
+  kind: "decide" | "decide-skip" | "select" | "compact" | "compact-skip" | "outcome";
   request: string;
   result: string | string[];
   confidence: number | null;
@@ -74,6 +74,11 @@ export type DecisionLog = {
   /** decide時のd1難易度（較正用） */
   difficulty?: string | null;
   difficultyConfidence?: number | null;
+  /** decide行: d1が選んだ生のchoice（fail-safe適用前。較正用）。
+   * route は confidence 下限で full に潰されうるので、判定の意図は raw 才知道る */
+  rawChoice?: string | null;
+  /** 判定を行ったセッション（hook経由の自動判定で発生。null=不明） */
+  sessionID?: string | null;
   /** kind=outcome: goal終了時の実績 */
   outcome?: {
     goal_id: string;
@@ -205,8 +210,15 @@ export const DECISION_ROUTE_CRITERIA: Record<state.EntryRoute, string> = {
 
 export type DecideResult = {
   route: state.EntryRoute;
+  /** d1が選んだ生のchoice文字列（fail-safe適用前）。不正応答ならnull */
+  rawChoice: string | null;
+  /** rawChoiceを正規化したroute（fail-safe適用前）。不正choiceならnull。
+   * route は confidence 下限で full に潰されるので「d1の意図」を見るのはこちら */
+  rawRoute: state.EntryRoute | null;
   confidence: number | null;
   reason: string;
+  /** true＝d1 呼び出しが失敗した（判定不能）。呼び出し側は極性を決める */
+  fallback: boolean;
   /** 難易度（d1判定）。null＝未判定・低confidence・失敗。nullは昇格しない */
   difficulty: Difficulty | null;
   /** difficulty の confidence（較正用） */
@@ -244,30 +256,35 @@ export function mapDecisionAnswer(
   choice: unknown,
   confidence: unknown,
 ): DecideResult {
-  const route =
-    typeof choice === "string" ? state.normalizeEntryRoute(choice) : null;
+  const rawChoice = typeof choice === "string" ? choice : null;
+  const route = rawChoice ? state.normalizeEntryRoute(rawChoice) : null;
   if (!route) {
-    return { route: "full", confidence: null, reason: "d1不正choice→full", difficulty: null, difficultyConfidence: null };
+    return { route: "full", rawChoice, rawRoute: null, confidence: null, reason: "d1不正choice→full", fallback: false, difficulty: null, difficultyConfidence: null };
   }
   const conf = typeof confidence === "number" ? confidence : null;
   if (conf !== null && conf < DECISION_CONFIDENCE_FLOOR) {
     return {
       route: "full",
+      rawChoice,
+      rawRoute: route,
       confidence: conf,
       reason: `d1低confidence(${conf})→full`,
+      fallback: false,
       difficulty: null,
       difficultyConfidence: null,
     };
   }
-  return { route, confidence: conf, reason: `d1判定(${route})`, difficulty: null, difficultyConfidence: null };
+  return { route, rawChoice, rawRoute: route, confidence: conf, reason: `d1判定(${route})`, fallback: false, difficulty: null, difficultyConfidence: null };
 }
 
 /* 入口routeをd1で判定する。失敗は一律full（現行fail-safe極性＝重い側）。
- * opts.root があれば較正ログに追記する（無ければ記録しない。テストは無指定） */
+ * opts.root があれば較正ログに追記する（無ければ記録しない。テストは無指定）
+ * opts.sessionID を渡すと較正ログにセッションを残せる（hook経由の自動判定用）
+ * opts.timeoutMs で timeout を上書きできる（hook経路は短い待ち時間に切る） */
 export async function decideRoute(
   request: string,
   fetchFn: FetchFn = fetch,
-  opts?: { root?: string },
+  opts?: { root?: string; sessionID?: string | null; timeoutMs?: number },
 ): Promise<DecideResult> {
   const t0 = performance.now();
   const finish = async (
@@ -288,6 +305,8 @@ export async function decideRoute(
         reason: d.reason,
         difficulty: d.difficulty,
         difficultyConfidence: d.difficultyConfidence,
+        rawChoice: d.rawChoice,
+        sessionID: opts.sessionID ?? null,
       });
     }
     return d;
@@ -309,13 +328,17 @@ export async function decideRoute(
       },
     },
     fetchFn,
+    opts?.timeoutMs ?? DECISION_TIMEOUT_MS,
   );
   if (!r.ok) {
     return finish(
       {
         route: "full",
+        rawChoice: null,
+        rawRoute: null,
         confidence: null,
         reason: `${r.reason}→full`,
+        fallback: true,
         difficulty: null,
         difficultyConfidence: null,
       },

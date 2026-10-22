@@ -7,6 +7,7 @@
  */
 import { $ } from "bun";
 import { readGraphhopperHash, runGraphhopperEdit } from "../../../src/gate";
+import { INTERNAL_PROMPT_METADATA_KEY } from "../../../src/entry-decide";
 import * as state from "../../../src/state";
 import { knownSessions, noteSession, S, text, type Gh } from "./shared";
 
@@ -372,7 +373,11 @@ export function registerOpsTools(
         .filter(Boolean)
         .join("\n");
 
-      await gh.ctx.session.prompt({ sessionID: args.session_id, text: textBody });
+      await gh.ctx.session.prompt({
+        sessionID: args.session_id,
+        text: textBody,
+        metadata: { [INTERNAL_PROMPT_METADATA_KEY]: true },
+      });
       state.pauseGoal(root);
       state.unbindSession(root, sessionID);
       return text(

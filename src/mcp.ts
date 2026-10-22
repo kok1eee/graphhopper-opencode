@@ -51,6 +51,7 @@ import {
   parseEntryRoute,
 } from "./gate";
 import { readGraphhopperHash, runGraphhopperEdit } from "./gate";
+import { ensureEntryDecision } from "./entry-decide";
 import {
   decideRoute,
   formatSelectorResult,
@@ -206,6 +207,13 @@ async function goalAction(
       const active = state.getActive(root);
       if (active && active.goal.status === "active") {
         return `error: goal "${active.goal.title}" is already active. complete or pause it first.`;
+      }
+      // 入口判定の保険: 直近の decide 行が無ければ goal title を入力に判定して記録だけ残す
+      // （route は変えない。entry_route は route_set / fail-safe に委ねる）
+      try {
+        await ensureEntryDecision(root, sessionID || null, title);
+      } catch {
+        // 判定の失敗で goal start を止めない
       }
       const a = state.startGoal(root, title, sessionID);
       try {
