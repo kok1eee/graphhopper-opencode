@@ -145,6 +145,7 @@ interface ContextEvent {
 /* prompt admission イベント（opencode 2.1 の session.hook("prompt")） */
 interface PromptEvent {
   sessionID?: string;
+  messageID?: string;
   prompt?: { text?: string };
   metadata?: Record<string, unknown>;
 }
@@ -220,7 +221,11 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
       /* 前回の判定は捨てる（1セッション1件だけ保持） */
       entryVerdicts.set(sessionID, {
         at: Date.now(),
-        promise: decideEntry(text, fetch, { root, sessionID }).catch((err) => {
+        promise: decideEntry(text, fetch, {
+          root,
+          sessionID,
+          messageID: e.messageID ?? null,
+        }).catch((err) => {
           console.warn(`graphhopper: 入口判定に失敗: ${String(err)}`);
           return null;
         }),
@@ -361,7 +366,7 @@ async function isChildSession(
   sessionID: string,
 ): Promise<boolean> {
   try {
-    const info = await ctx.session.get({ sessionID } as never);
+    const info = await ctx.session.get({ sessionID });
     return !!info?.parentID;
   } catch {
     return false;

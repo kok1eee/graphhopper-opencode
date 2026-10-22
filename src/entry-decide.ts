@@ -57,6 +57,7 @@ export type EntrySkipReason =
   | "child_session"
   | "active_goal"
   | "no_api_key"
+  | "session_unknown"
   | "empty";
 
 export type EntryDecideInput = {
@@ -122,11 +123,17 @@ export function formatEntryVerdict(v: EntryVerdict): string | null {
 export async function decideEntry(
   request: string,
   fetchFn: FetchFn = fetch,
-  opts?: { root?: string; sessionID?: string | null; timeoutMs?: number },
+  opts?: {
+    root?: string;
+    sessionID?: string | null;
+    messageID?: string | null;
+    timeoutMs?: number;
+  },
 ): Promise<EntryVerdict> {
   return decideRoute(request, fetchFn, {
     root: opts?.root,
     sessionID: opts?.sessionID ?? null,
+    messageID: opts?.messageID ?? null,
     timeoutMs: opts?.timeoutMs ?? ENTRY_DECIDE_TIMEOUT_MS,
   });
 }
@@ -219,8 +226,12 @@ export async function ensureEntryDecision(
 ): Promise<EntryVerdict | null> {
   try {
     /* セッション不明では Recent 判定も紐付けもできない。
-     * 保険 运行すると他セッションの decide と二重計上になるので行わない */
-    if (!sessionID) return null;
+     * 保険を動かすと他セッションの decide と二重計上になるので動かさない。
+     * 動かなかったことは skip 行として残す（較正データで，保险の不发火が見える） */
+    if (!sessionID) {
+      await recordEntrySkip(root, "session_unknown", title, null);
+      return null;
+    }
     if (!process.env.LIQUID_API_KEY?.trim()) {
       await recordEntrySkip(root, "no_api_key", title, sessionID);
       return null;

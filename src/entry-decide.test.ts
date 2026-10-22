@@ -321,7 +321,10 @@ describe("hasRecentEntryDecision / ensureEntryDecision（goal start 時の保険
         { fetchFn: fakeFetch({ route: { choice: "light", confidence: 0.9 } }) },
       );
       expect(v).toBeNull();
-      expect(() => readRows(root)).toThrow();
+      /* decide 行は作らず、動かなかったことだけ skip 行として残す */
+      const rows = readRows(root);
+      expect(rows.some((r) => r.kind === "decide")).toBe(false);
+      expect(rows[0]).toMatchObject({ kind: "decide-skip", result: "session_unknown" });
     });
   });
 

@@ -79,6 +79,9 @@ export type DecisionLog = {
   rawChoice?: string | null;
   /** 判定を行ったセッション（hook経由の自動判定で発生。null=不明） */
   sessionID?: string | null;
+  /** 判定に対応するユーザーメッセージのID（hook経由。null=不明）。
+   * 同じターンの decide 行をまとめる手がかりになる */
+  messageID?: string | null;
   /** kind=outcome: goal終了時の実績 */
   outcome?: {
     goal_id: string;
@@ -312,7 +315,12 @@ export function mapDecisionAnswer(
 export async function decideRoute(
   request: string,
   fetchFn: FetchFn = fetch,
-  opts?: { root?: string; sessionID?: string | null; timeoutMs?: number },
+  opts?: {
+    root?: string;
+    sessionID?: string | null;
+    messageID?: string | null;
+    timeoutMs?: number;
+  },
 ): Promise<DecideResult> {
   const t0 = performance.now();
   const finish = async (
@@ -321,8 +329,9 @@ export async function decideRoute(
   ): Promise<DecideResult> => {
     if (opts?.root) {
       const id = randomUUID().slice(0, 8);
-      /* 失敗した判定は id を持たせない。last decision id を更新すると
-       * 次の goal が偽の decide に紐付き、較正データを汚染する */
+      /* 失敗した判定は last decision id を更新しない。更新すると
+       * 次の goal が偽の decide に紐付き、較正データを汚染する。
+         （行には id を残す。calibrate は outcome 側から引くため一致しない） */
       if (!failed) state.writeLastDecisionId(opts.root, id);
       await logDecision(opts.root, {
         id,
@@ -337,6 +346,7 @@ export async function decideRoute(
         difficultyConfidence: d.difficultyConfidence,
         rawChoice: d.rawChoice,
         sessionID: opts.sessionID ?? null,
+        messageID: opts.messageID ?? null,
       });
     }
     return d;
