@@ -321,7 +321,9 @@ export async function decideRoute(
   ): Promise<DecideResult> => {
     if (opts?.root) {
       const id = randomUUID().slice(0, 8);
-      state.writeLastDecisionId(opts.root, id);
+      /* 失敗した判定は id を持たせない。last decision id を更新すると
+       * 次の goal が偽の decide に紐付き、較正データを汚染する */
+      if (!failed) state.writeLastDecisionId(opts.root, id);
       await logDecision(opts.root, {
         id,
         kind: "decide",

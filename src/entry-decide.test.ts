@@ -120,6 +120,10 @@ describe("isInternalPrompt（plugin 内部 prompt の識別）", () => {
     expect(isInternalPrompt(undefined, "jj diff を確認して")).toBe(false);
     expect(isInternalPrompt({}, "graphhopper について")).toBe(false);
   });
+
+  test("handoff の本文マーカー（## graphhopper）も内部と判定する", () => {
+    expect(isInternalPrompt(undefined, "## graphhopper handoff")).toBe(true);
+  });
 });
 
 describe("formatEntryVerdict（モデルへ渡す注入文）", () => {
@@ -210,10 +214,15 @@ describe("decideEntry（判定と記録）", () => {
 });
 
 describe("recordEntrySkip（判定しなかった記録）", () => {
-  test("内部promptは記録しない（自動継続でログが埋まるため）", async () => {
+  test("除外は全て decide-skip として残す（internal も含む）", async () => {
     const root = mkRoot();
     await recordEntrySkip(root, "internal", "自動継続", "sess-1");
-    expect(() => readRows(root)).toThrow();
+    const [row] = readRows(root);
+    expect(row).toMatchObject({
+      kind: "decide-skip",
+      result: "internal",
+      sessionID: "sess-1",
+    });
   });
 
   test("それ以外は decide-skip として残す", async () => {
@@ -254,6 +263,18 @@ describe("hasRecentEntryDecision / ensureEntryDecision（goal start 時の保険
       const rows = readRows(root);
       expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({ kind: "decide", sessionID: "sess-3" });
+    });
+  });
+
+  test("sessionID が無いときは一致なし（他セッションの decide で代用しない）", async () => {
+    const root = mkRoot();
+    await withKey(async () => {
+      await decideEntry("依頼", fakeFetch({ route: { choice: "full", confidence: 0.9 } }), {
+        root,
+        sessionID: "sess-9",
+      });
+      expect(hasRecentEntryDecision(root, null)).toBe(false);
+      expect(hasRecentEntryDecision(root, "sess-9")).toBe(true);
     });
   });
 

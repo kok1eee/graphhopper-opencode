@@ -30,8 +30,9 @@ export const DECISION_TAIL_BYTES = 64 * 1024;
 /** plugin 内部 prompt の識別子。ctx.session.prompt に付けて渡す */
 export const INTERNAL_PROMPT_METADATA_KEY = "graphhopper_internal";
 
-/** plugin 内部 prompt の本文マーカー（metadata が届かない場合の保険） */
-const INTERNAL_TEXT_PREFIX = "[graphhopper";
+/** plugin 内部 prompt の本文マーカー（metadata が届かない場合の保険）。
+ * "[graphhopper..." は自動継続・eval 失敗通知、"## graphhopper" は handoff 通知 */
+const INTERNAL_TEXT_PREFIXES = ["[graphhopper", "## graphhopper"];
 
 /**
  * plugin 自身が投げた prompt か（自動継続・eval 失敗通知・handoff など）。
@@ -42,7 +43,8 @@ export function isInternalPrompt(
   text: string,
 ): boolean {
   if (metadata?.[INTERNAL_PROMPT_METADATA_KEY] === true) return true;
-  return text.trimStart().startsWith(INTERNAL_TEXT_PREFIX);
+  const t = text.trimStart();
+  return INTERNAL_TEXT_PREFIXES.some((p) => t.startsWith(p));
 }
 
 /** 判定の最終結果（decideRoute の返り値と同じ形） */
@@ -130,7 +132,7 @@ export async function decideEntry(
 
 /**
  * 判定しなかった記録を残す（カバレッジ計測用）。
- * 内部 prompt は自動継続で毎回発生するため記録しない（ログが埋まる）。
+ * 除外は全て記録する（internal も含む。自動継続の回数もカバレッジの一部として数える）。
  */
 export async function recordEntrySkip(
   root: string,
@@ -138,7 +140,6 @@ export async function recordEntrySkip(
   request: string,
   sessionID: string | null,
 ): Promise<void> {
-  if (reason === "internal") return;
   await logDecision(root, {
     kind: "decide-skip",
     request,
@@ -181,17 +182,18 @@ function readDecisionRows(root: string): Array<Record<string, unknown>> {
 }
 
 /** このセッションに直近の decide 行があるか（goal start 時の保険の判定用）。
- * sessionID が null のときは「セッション不明」としてどの decide 行でも eligible とみなす（ワイルドカード） */
+ * sessionID が null のときは「セッション不明」として一致なしとみなす（他セッションの decide で代用しない） */
 export function hasRecentEntryDecision(
   root: string,
   sessionID: string | null,
   now: number = Date.now(),
   windowMs: number = ENTRY_DECIDE_FRESH_MS,
 ): boolean {
+  if (!sessionID) return false;
   const rows = readDecisionRows(root);
   for (const r of rows) {
     if (r.kind !== "decide") continue;
-    if (sessionID && r.sessionID !== sessionID) continue;
+    if (r.sessionID !== sessionID) continue;
     const ts = typeof r.ts === "string" ? Date.parse(r.ts) : NaN;
     if (!Number.isFinite(ts)) continue;
     if (now - ts <= windowMs) return true;

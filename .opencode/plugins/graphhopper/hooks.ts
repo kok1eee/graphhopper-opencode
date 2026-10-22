@@ -73,9 +73,6 @@ const seenPonytails = new Set<string>();
  * セッションごとに 1 件だけ保持し、context hook で消費したら捨てる（1ターン1回）。 */
 const entryVerdicts = new Map<string, { at: number; promise: Promise<EntryVerdict | null> }>();
 
-/* 子セッション（subagent）の一覧。session.created で parentID 付きが来たら登録する */
-const childSessions = new Set<string>();
-
 function resolveFilePath(args: unknown): string | undefined {
   if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
   const a = args as Record<string, unknown>;
@@ -198,8 +195,8 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
   });
 
   /* 入口d1判定: prompt admission で起動し、context（モデル呼び出し直前）で注入する。
-   * prompt hook は await しない（メッセージ受付を遅らせない）。結果は context hook が待つ。 */
-  await ctx.session.hook("prompt", (event: unknown) => {
+   * prompt hook は d1 を await しない（メッセージ受付を遅らせない）。結果は context hook が待つ。 */
+  await ctx.session.hook("prompt", async (event: unknown) => {
     try {
       const e = event as PromptEvent;
       const sessionID = String(e.sessionID ?? "");
@@ -209,7 +206,9 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
       const decision = shouldRunEntryDecide({
         text,
         isInternal: isInternalPrompt(e.metadata, text),
-        isChildSession: childSessions.has(sessionID),
+        /* 子セッション（subagent）は parentID で判定する。session.created イベントに
+         * 依存すると prompt admission が先に走った場合に漏れる（design 判断2-2） */
+        isChildSession: await isChildSession(ctx, sessionID),
         /* paused の goal も対象。loop 進行中（active/paused）は入口判定の対象外 */
         hasActiveGoal: !!active && active.goal.status !== "done",
         hasApiKey: !!process.env.LIQUID_API_KEY?.trim(),
@@ -321,10 +320,6 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
         try {
           if (event.type === "session.created") {
             const created = event.data as Record<string, unknown> | undefined;
-            /* 子セッション（subagent）は入口判定の対象外 */
-            const createdID = typeof created?.sessionID === "string" ? created.sessionID : "";
-            const createdParent = typeof created?.parentID === "string" ? created.parentID : null;
-            if (createdID && createdParent) childSessions.add(createdID);
             if (handleGrandchild(gh, created)) continue;
             handleChildSessionCreated(gh, created);
             continue;
@@ -336,8 +331,6 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
               const activeGoal = state.getActive(root);
               if (activeGoal?.state.session_id === id) await finishCascade(gh);
               state.unbindSession(root, id);
-              /* 子セッション一覧から消す（set が膨らまないように） */
-              childSessions.delete(id);
               entryVerdicts.delete(id);
             }
             try {
@@ -359,6 +352,20 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
   })();
 
   return () => controller.abort();
+}
+
+/** 子セッション（subagent）か。parentID があれば親あり。
+ * 取得失敗時は「判定しない」側に倒さない（子でなくても d1 が走るだけなので安全側） */
+async function isChildSession(
+  ctx: Gh["ctx"],
+  sessionID: string,
+): Promise<boolean> {
+  try {
+    const info = await ctx.session.get({ sessionID } as never);
+    return !!info?.parentID;
+  } catch {
+    return false;
+  }
 }
 
 /** 切替処理中の子セッション（同一 sessionID の二重切替を防ぐ） */
