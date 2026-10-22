@@ -334,7 +334,7 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
       "無ければfindings: []とsummaryに「driftなし」と明記する。",
       "",
       "診断証拠:",
-      "- 型・lint診断は自分で実行しない（bash deny）。呼び出し側添付の診断ファイル（.graphhopper/tmp/diag-<goal>.txt）をReadして裏付け・反証に使え",
+      "- 型・lint診断は自分で実行しない（shell ツールは使えない）。呼び出し側添付の診断ファイル（.graphhopper/tmp/diag-<goal>.txt）をReadして裏付け・反証に使え",
       "- 添付が無ければ「診断未実行（理由）」を明記し、診断不在をcleanの根拠にしない",
       "- 診断クリーンはdriftなしの根拠にならない（挙動driftは診断に出ない）。診断結果は補助証拠として扱う",
       "",

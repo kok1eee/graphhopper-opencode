@@ -14,7 +14,7 @@
 - **designing終了後にdesign.mdを書き直そうとしてエラーになったら**: 仕様変更や見落としがあっても design.md 自体は書き換えない。`.graphhopper/plans/<goal-id>.log.md` に決定の経緯・棄却した代替案を追記する（design.mdはverifierのdrift検出アンカーなので不変を保つ）
 - **critic を呼ばずに implementing に飛ばない**: `graphhopper-critic` は毎goal必ず1回呼ぶ（安価な常設node）。飛ばすと設計段階の要件漏れ・スコープ逸脱が implementing まで持ち越される。critic の指摘は design.md に反映してから遷移する
 - **route=polishなのに「念のため」でverifier fan-outを省略しない**: router_checkの判定はコード側の機械測定。無条件発火だったcouncilの再発防止はここで担保されている
-- **simplify の diff を inline で subagent に渡さない**: main context を汚す。`graphhopper_diff_stash` の返却pathで渡す（verifierと共用。agent は bash deny なので自分で diff は取れない）
+- **simplify の diff を inline で subagent に渡さない**: main context を汚す。`graphhopper_diff_stash` の返却pathで渡す（verifierと共用。agent は shell ツール不可なので自分で diff は取れない）
 - **route=advisor なのに simplify を実行しない**: simplify は route=polish（大diff）のときだけの条件分岐 node。advisor（小diff）ではスキップが正しい。逆に polish で飛ばすのも禁止
 - **1 goal 1 driver**: TUI bind中のgoalをMCP等別sessionから操作すると警告が出る（二重駆動防止）。
   意図的な引き継ぎなら session_id を指定して resume で bind し直す

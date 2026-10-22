@@ -115,7 +115,7 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
   → 返却pathを渡す（inline 展開は main context を汚すので禁止）
 - `task(subagent_type: "graphhopper-simplify")` を**1回**呼ぶ（3レンズ統合の単体 agent）
 - **agent は提案者**: findings を `[severity] file:line — 指摘 (suggestion: ...)` で返すだけ。
-  **適用はメインが行う**（agent は edit/bash deny）
+  **適用はメインが行う**（agent は edit と shell ツールが使えない）
 - **適用ルール**（メイン側）:
   - 各 finding を該当ファイルで Read して裏付け（Iron Law）
   - critical: 挙動不変・局所的なものだけ自動適用（typo / rename / 冗長中間変数削除）。
