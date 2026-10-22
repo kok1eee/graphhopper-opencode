@@ -21,6 +21,30 @@ import { mapDecisionAnswer } from "./decision";
 
 const mkRoot = () => mkdtempSync(join(tmpdir(), "gh-entry-decide-"));
 
+/** LIQUID_API_KEY を差し替えて実行し、後で必ず戻す */
+const withKey = async <T>(fn: () => Promise<T>): Promise<T> => {
+  const saved = process.env.LIQUID_API_KEY;
+  process.env.LIQUID_API_KEY = "liquid_test";
+  try {
+    return await fn();
+  } finally {
+    if (saved === undefined) delete process.env.LIQUID_API_KEY;
+    else process.env.LIQUID_API_KEY = saved;
+  }
+};
+
+/** LIQUID_API_KEY を外した状態で実行し、後で必ず戻す */
+const withoutKey = async <T>(fn: () => Promise<T>): Promise<T> => {
+  const saved = process.env.LIQUID_API_KEY;
+  delete process.env.LIQUID_API_KEY;
+  try {
+    return await fn();
+  } finally {
+    if (saved === undefined) delete process.env.LIQUID_API_KEY;
+    else process.env.LIQUID_API_KEY = saved;
+  }
+};
+
 const readRows = (root: string) => {
   const raw = readFileSync(join(root, ".graphhopper", "decisions.jsonl"), "utf-8");
   return raw.trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
@@ -146,9 +170,7 @@ describe("formatEntryVerdict（モデルへ渡す注入文）", () => {
 describe("decideEntry（判定と記録）", () => {
   test("decide 行に rawChoice と sessionID を残す", async () => {
     const root = mkRoot();
-    const saved = process.env.LIQUID_API_KEY;
-    process.env.LIQUID_API_KEY = "liquid_test";
-    try {
+    await withKey(async () => {
       const v = await decideEntry(
         "重い依頼",
         fakeFetch({
@@ -169,17 +191,12 @@ describe("decideEntry（判定と記録）", () => {
         sessionID: "sess-x",
         fallback: false,
       });
-    } finally {
-      if (saved === undefined) delete process.env.LIQUID_API_KEY;
-      else process.env.LIQUID_API_KEY = saved;
-    }
+    });
   });
 
   test("d1 失敗は fallback として記録し、判定不能を表す", async () => {
     const root = mkRoot();
-    const saved = process.env.LIQUID_API_KEY;
-    process.env.LIQUID_API_KEY = "liquid_test";
-    try {
+    await withKey(async () => {
       const failing = (async () => {
         throw new Error("network down");
       }) as unknown as typeof fetch;
@@ -188,10 +205,7 @@ describe("decideEntry（判定と記録）", () => {
       expect(v.rawRoute).toBeNull();
       const [row] = readRows(root);
       expect(row).toMatchObject({ kind: "decide", fallback: true, sessionID: "sess-y" });
-    } finally {
-      if (saved === undefined) delete process.env.LIQUID_API_KEY;
-      else process.env.LIQUID_API_KEY = saved;
-    }
+    });
   });
 });
 
@@ -217,26 +231,19 @@ describe("recordEntrySkip（判定しなかった記録）", () => {
 describe("hasRecentEntryDecision / ensureEntryDecision（goal start 時の保険）", () => {
   test("直近の decide 行があれば true", async () => {
     const root = mkRoot();
-    const saved = process.env.LIQUID_API_KEY;
-    process.env.LIQUID_API_KEY = "liquid_test";
-    try {
+    await withKey(async () => {
       await decideEntry("依頼", fakeFetch({ route: { choice: "full", confidence: 0.9 } }), {
         root,
         sessionID: "sess-1",
       });
       expect(hasRecentEntryDecision(root, "sess-1")).toBe(true);
       expect(hasRecentEntryDecision(root, "sess-2")).toBe(false);
-    } finally {
-      if (saved === undefined) delete process.env.LIQUID_API_KEY;
-      else process.env.LIQUID_API_KEY = saved;
-    }
+    });
   });
 
   test("直近の decide 行が無ければ title で判定して記録する", async () => {
     const root = mkRoot();
-    const saved = process.env.LIQUID_API_KEY;
-    process.env.LIQUID_API_KEY = "liquid_test";
-    try {
+    await withKey(async () => {
       const v = await ensureEntryDecision(
         root,
         "sess-3",
@@ -247,17 +254,12 @@ describe("hasRecentEntryDecision / ensureEntryDecision（goal start 時の保険
       const rows = readRows(root);
       expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({ kind: "decide", sessionID: "sess-3" });
-    } finally {
-      if (saved === undefined) delete process.env.LIQUID_API_KEY;
-      else process.env.LIQUID_API_KEY = saved;
-    }
+    });
   });
 
   test("直近の decide 行があれば何もしない（二重記録しない）", async () => {
     const root = mkRoot();
-    const saved = process.env.LIQUID_API_KEY;
-    process.env.LIQUID_API_KEY = "liquid_test";
-    try {
+    await withKey(async () => {
       await decideEntry("依頼", fakeFetch({ route: { choice: "full", confidence: 0.9 } }), {
         root,
         sessionID: "sess-4",
@@ -270,9 +272,34 @@ describe("hasRecentEntryDecision / ensureEntryDecision（goal start 時の保険
       );
       expect(v).toBeNull();
       expect(readRows(root)).toHaveLength(1);
-    } finally {
-      if (saved === undefined) delete process.env.LIQUID_API_KEY;
-      else process.env.LIQUID_API_KEY = saved;
-    }
+    });
+  });
+
+  test("APIキー無しの環境では decide 行を残さない（較正データを汚さない）", async () => {
+    const root = mkRoot();
+    await withoutKey(async () => {
+      const v = await ensureEntryDecision(
+        root,
+        "sess-5",
+        "goal の題名",
+        { fetchFn: fakeFetch({ route: { choice: "light", confidence: 0.9 } }) },
+      );
+      expect(v).toBeNull();
+      const rows = readRows(root);
+      expect(rows.every((r) => r.kind !== "decide")).toBe(true);
+    });
+  });
+
+  test("例外を投げない（goal start を止めない）", async () => {
+    const root = mkRoot();
+    await withKey(async () => {
+      const exploding = (async () => {
+        throw new Error("boom");
+      }) as unknown as typeof fetch;
+      const v = await ensureEntryDecision(root, "sess-6", "goal の題名", {
+        fetchFn: exploding,
+      });
+      expect(v).not.toBeUndefined();
+    });
   });
 });

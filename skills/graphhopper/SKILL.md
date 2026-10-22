@@ -50,7 +50,7 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
 - **自動判定が基本**: モデルが `graphhopper_decide` を呼ぶ必要はない。
   判定結果は `.graphhopper/decisions.jsonl` に自動記録される
   （route・confidence・rawChoice・レイテンシ。閾値較正の材料）
-- 判定結果（route が direct 以外）がモデルに渡される。モデル是其に従って
+- 判定結果（route が direct 以外）がモデルに渡される。モデルはそれに従って
   `graphhopper_route_set(route, reason, difficulty)` → `graphhopper_goal(action: "start")` へ進む。
   **d1 の判定は参考値**。明らかに単一ファイルの小修正なら route_set をしない（ループを作らない）
 - 手動で判定し直したいときだけ `graphhopper_route(request)` → `graphhopper_decide(request)` →

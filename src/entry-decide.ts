@@ -9,12 +9,13 @@
  * 純粋ロジック（shouldRunEntryDecide / formatEntryVerdict）はここで、IO は decision.ts に任せる。
  * d1 の HTTP 呼び出しは decision.ts の decideRoute を再利用する（HTTP 部分を複製しない）。
  */
-import { readFileSync } from "node:fs";
+import { closeSync, openSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
   decideRoute,
   logDecision,
   type DecideResult,
+  type FetchFn,
 } from "./decision";
 
 /** hook 経路の d1 待ち時間上限。モデル呼び出しを止めるので短めに切る */
@@ -22,6 +23,9 @@ export const ENTRY_DECIDE_TIMEOUT_MS = 5_000;
 
 /** goal start 時の保険で「直近」とみなす decide 行の窓 */
 export const ENTRY_DECIDE_FRESH_MS = 5 * 60_000;
+
+/** decisions.jsonl を末尾何バイト読むか（先頭からの全走査を避ける） */
+export const DECISION_TAIL_BYTES = 64 * 1024;
 
 /** plugin 内部 prompt の識別子。ctx.session.prompt に付けて渡す */
 export const INTERNAL_PROMPT_METADATA_KEY = "graphhopper_internal";
@@ -114,7 +118,7 @@ export function formatEntryVerdict(v: EntryVerdict): string | null {
 /** 判定を実行して記録する。失敗は fallback（route=full）として返す */
 export async function decideEntry(
   request: string,
-  fetchFn: typeof fetch = fetch,
+  fetchFn: FetchFn = fetch,
   opts?: { root?: string; sessionID?: string | null; timeoutMs?: number },
 ): Promise<EntryVerdict> {
   return decideRoute(request, fetchFn, {
@@ -137,7 +141,7 @@ export async function recordEntrySkip(
   if (reason === "internal") return;
   await logDecision(root, {
     kind: "decide-skip",
-    request: request.slice(0, 200),
+    request,
     result: reason,
     confidence: null,
     latencyMs: 0,
@@ -147,17 +151,27 @@ export async function recordEntrySkip(
   });
 }
 
-/** decisions.jsonl の末尾だけ読んで decide 行を走査する */
+/** decisions.jsonl の末尾だけ読む（先頭から全部走査しない） */
 function readDecisionRows(root: string): Array<Record<string, unknown>> {
+  const path = join(root, ".graphhopper/decisions.jsonl");
   try {
-    const raw = readFileSync(join(root, ".graphhopper/decisions.jsonl"), "utf8");
-    const lines = raw.split("\n").filter(Boolean);
+    const size = statSync(path).size;
+    const start = Math.max(0, size - DECISION_TAIL_BYTES);
+    const len = size - start;
+    const buf = Buffer.alloc(len);
+    const fd = openSync(path, "r");
+    try {
+      readSync(fd, buf, 0, len, start);
+    } finally {
+      closeSync(fd);
+    }
+    /* 先頭が切れた行は JSON.parse が失敗して無視される（1行で全体が落ちない） */
     const rows: Array<Record<string, unknown>> = [];
-    for (const l of lines.slice(-2000)) {
+    for (const l of buf.toString("utf8").split("\n").filter(Boolean)) {
       try {
         rows.push(JSON.parse(l) as Record<string, unknown>);
       } catch {
-        // 壊れた行は無視（1行で全体が落ちない）
+        // 壊れた行は無視
       }
     }
     return rows;
@@ -166,7 +180,8 @@ function readDecisionRows(root: string): Array<Record<string, unknown>> {
   }
 }
 
-/** このセッションに直近の decide 行があるか（goal start 時の保険の判定用） */
+/** このセッションに直近の decide 行があるか（goal start 時の保険の判定用）。
+ * sessionID が null のときは「セッション不明」としてどの decide 行でも eligible とみなす（ワイルドカード） */
 export function hasRecentEntryDecision(
   root: string,
   sessionID: string | null,
@@ -187,19 +202,32 @@ export function hasRecentEntryDecision(
 /**
  * goal start 時の保険: 直近に decide 行が無ければ goal title を入力に判定して**記録だけ**残す。
  * route は変えない（entry_route は既存の route_set / fail-safe に委ねる）。
+ *
+ * - API キーが無い環境では判定しない（失敗した decide 行が goal ごとに残ると
+ *   calibrate の decide×outcome 結合が偽の decide に実績を吸わせる）。
+ * - 例外は投げない（goal start を止めない）。呼び出し側で try/catch しないためのもの。
  */
 export async function ensureEntryDecision(
   root: string,
   sessionID: string | null,
   title: string,
-  opts?: { fetchFn?: typeof fetch; timeoutMs?: number; now?: number },
+  opts?: { fetchFn?: FetchFn; timeoutMs?: number; now?: number },
 ): Promise<EntryVerdict | null> {
-  if (hasRecentEntryDecision(root, sessionID, opts?.now ?? Date.now())) {
+  try {
+    if (!process.env.LIQUID_API_KEY?.trim()) {
+      await recordEntrySkip(root, "no_api_key", title, sessionID);
+      return null;
+    }
+    if (hasRecentEntryDecision(root, sessionID, opts?.now ?? Date.now())) {
+      return null;
+    }
+    return await decideEntry(title, opts?.fetchFn ?? fetch, {
+      root,
+      sessionID,
+      timeoutMs: opts?.timeoutMs ?? ENTRY_DECIDE_TIMEOUT_MS,
+    });
+  } catch {
+    // 判定の失敗で goal start を止めない
     return null;
   }
-  return decideEntry(title, opts?.fetchFn ?? fetch, {
-    root,
-    sessionID,
-    timeoutMs: opts?.timeoutMs ?? ENTRY_DECIDE_TIMEOUT_MS,
-  });
 }

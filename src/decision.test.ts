@@ -454,6 +454,21 @@ describe("logDecision（較正ログ）", () => {
     }
   });
 
+  test("request は先頭200字に切る（単一源泉）", async () => {
+    const root = await mkRoot();
+    await logDecision(root, {
+      kind: "decide",
+      request: "あ".repeat(500),
+      result: "full",
+      confidence: null,
+      latencyMs: 1,
+      fallback: false,
+      reason: "t",
+    });
+    const [line] = await readLines(root);
+    expect((line.request as string).length).toBe(200);
+  });
+
   test("root無指定は記録しない・書込失敗でも結果を返す", async () => {
     const saved = process.env.LIQUID_API_KEY;
     process.env.LIQUID_API_KEY = "liquid_test";

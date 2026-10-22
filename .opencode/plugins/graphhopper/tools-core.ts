@@ -14,6 +14,8 @@ import {
 } from "../../../src/gate";
 import {
   decideRoute,
+  formatDecisionNextStep,
+  formatDecisionSummary,
   formatSelectorResult,
   SELECTOR_TOOL_DESCRIPTION,
   selectLenses,
@@ -67,12 +69,9 @@ export function registerCoreTools(
             );
           }
           /* 入口判定の保険: 直近の decide 行が無ければ goal title を入力に判定して記録だけ残す
-           * （route は変えない。entry_route は route_set / fail-safe に委ねる） */
-          try {
-            await ensureEntryDecision(root, sessionID || null, args.title);
-          } catch {
-            // 判定の失敗で goal start を止めない
-          }
+           * （route は変えない。entry_route は route_set / fail-safe に委ねる。
+           *   ensureEntryDecision は例外を投げない） */
+          await ensureEntryDecision(root, sessionID || null, args.title);
           const a = state.startGoal(root, args.title, sessionID);
           try {
             const rev = await state.captureBaselineRev($, root);
@@ -281,14 +280,10 @@ export function registerCoreTools(
     execute: async (input: unknown) => {
       const args = input as { request: string };
       const r = await decideRoute(args.request, fetch, { root });
-      const rawNote = r.rawRoute ? `（d1の生の選択=${r.rawRoute}）` : "";
       return text(
         [
-          `route=${r.route}（confidence=${r.confidence ?? "n/a"}。${r.reason}）${rawNote}`,
-          `difficulty=${r.difficulty ?? "unknown"}${r.difficultyConfidence !== null ? `（confidence=${r.difficultyConfidence}）` : ""}`,
-          r.route === "direct"
-            ? "次: loopなしで直接対応せよ。goalは作らない（必要なら graphhopper_route_set(route: 'direct') でhistoryに残す）。"
-            : `次: graphhopper_route_set(route, reason${r.difficulty ? `, difficulty: '${r.difficulty}'` : "（difficulty は unknown なので省略。easy/normal/hard 以外は渡せない）"}) で記録する。full/light/advised/oracleなら graphhopper_goal(start)（pending routeが消費される）。`,
+          ...formatDecisionSummary(r),
+          formatDecisionNextStep(r),
         ].join("\n"),
       );
     },

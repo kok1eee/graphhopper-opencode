@@ -28,7 +28,7 @@ import { resolveCompactDb, runCompactGate } from "../../../src/compact";
 import { goalResumeContext } from "../../../src/gate";
 import {
   decideEntry,
-  ENTRY_DECIDE_TIMEOUT_MS,
+  ENTRY_DECIDE_FRESH_MS,
   formatEntryVerdict,
   INTERNAL_PROMPT_METADATA_KEY,
   isInternalPrompt,
@@ -71,22 +71,7 @@ const seenPonytails = new Set<string>();
 /* 入口d1判定: prompt hook で起動し、context hook で注入する。
  * prompt hook では await しない（メッセージ受付を遅らせない）。context hook が結果を待つ。
  * セッションごとに 1 件だけ保持し、context hook で消費したら捨てる（1ターン1回）。 */
-const entryVerdicts = new Map<string, { at: number; promise: Promise<EntryVerdict> }>();
-
-/** 保持している判定が古すぎる（失敗したターンの取り残し）なら注入しない */
-const ENTRY_VERDICT_MAX_AGE_MS = 5 * 60_000;
-
-/** 判定の例外が漏れたときの保険。fallback なので注入はしない */
-const FALLBACK_VERDICT: EntryVerdict = {
-  route: "full",
-  rawChoice: null,
-  rawRoute: null,
-  confidence: null,
-  reason: "entry判定例外",
-  fallback: true,
-  difficulty: null,
-  difficultyConfidence: null,
-};
+const entryVerdicts = new Map<string, { at: number; promise: Promise<EntryVerdict | null> }>();
 
 /* 子セッション（subagent）の一覧。session.created で parentID 付きが来たら登録する */
 const childSessions = new Set<string>();
@@ -225,19 +210,21 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
         text,
         isInternal: isInternalPrompt(e.metadata, text),
         isChildSession: childSessions.has(sessionID),
-        hasActiveGoal: !!active && active.goal.status === "active",
+        /* paused の goal も対象。loop 進行中（active/paused）は入口判定の対象外 */
+        hasActiveGoal: !!active && active.goal.status !== "done",
         hasApiKey: !!process.env.LIQUID_API_KEY?.trim(),
       });
       if (!decision.run) {
-        void recordEntrySkip(root, decision.reason, text, sessionID);
+        void recordEntrySkip(root, decision.reason, text, sessionID).catch(() => {});
         return;
       }
       /* 前回の判定は捨てる（1セッション1件だけ保持） */
       entryVerdicts.set(sessionID, {
         at: Date.now(),
-        promise: decideEntry(text, fetch, { root, sessionID, timeoutMs: ENTRY_DECIDE_TIMEOUT_MS }).catch(
-          () => FALLBACK_VERDICT,
-        ),
+        promise: decideEntry(text, fetch, { root, sessionID }).catch((err) => {
+          console.warn(`graphhopper: 入口判定に失敗: ${String(err)}`);
+          return null;
+        }),
       });
     } catch {
       // 判定の失敗でユーザー入力を止めない
@@ -255,10 +242,11 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
     const pending = sessionID ? entryVerdicts.get(sessionID) : undefined;
     if (pending) {
       entryVerdicts.delete(sessionID);
-      if (Date.now() - pending.at <= ENTRY_VERDICT_MAX_AGE_MS) {
+      /* 保持した判定が古すぎる（失敗したターンの取り残し）なら注入しない */
+      if (Date.now() - pending.at <= ENTRY_DECIDE_FRESH_MS) {
         try {
           const verdict = await pending.promise;
-          const text = formatEntryVerdict(verdict);
+          const text = verdict ? formatEntryVerdict(verdict) : null;
           if (text) push(text);
         } catch {
           // 判定の失敗でモデル呼び出しを止めない
@@ -342,7 +330,8 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
             continue;
           }
           if (event.type === "session.deleted") {
-            const id = event.data?.info?.id;
+            /* SDK の SessionDeleted は data.sessionID（data.info.id ではない） */
+            const id = event.data?.sessionID ?? event.data?.info?.id;
             if (id) {
               const activeGoal = state.getActive(root);
               if (activeGoal?.state.session_id === id) await finishCascade(gh);

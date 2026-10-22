@@ -39,7 +39,7 @@ export const SELECTOR_RETRIES = 2;
 /** selectorのNoul採用閾値（0.5＝公式docの「最大不確実」中点。初期値） */
 export const SELECTOR_NOUL_THRESHOLD = 0.5;
 
-type FetchFn = typeof fetch;
+export type FetchFn = typeof fetch;
 
 /* d1の1問分の定義（公式doc: type=noul|choice|score） */
 export type DecisionQuestion =
@@ -91,6 +91,9 @@ export type DecisionLog = {
   };
 };
 
+/** 較正ログの request は先頭200字だけ残す（単一源泉。呼び出し側で切らない） */
+export const DECISION_REQUEST_MAX = 200;
+
 export async function logDecision(
   root: string,
   entry: Omit<DecisionLog, "ts">,
@@ -98,13 +101,38 @@ export async function logDecision(
   try {
     const dir = join(root, ".graphhopper");
     mkdirSync(dir, { recursive: true });
+    /* request は先頭200字だけ残す（単一源泉。呼び出し側で切らない） */
+    const row = { ...entry, request: entry.request.slice(0, DECISION_REQUEST_MAX) };
     appendFileSync(
       join(dir, "decisions.jsonl"),
-      JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n",
+      JSON.stringify({ ts: new Date().toISOString(), ...row }) + "\n",
     );
   } catch {
     /* 較正ログの書込失敗で本体を止めない */
   }
+}
+
+/** decide/select 結果を 1 行の要約にする（plugin tool・MCP tool・注入文の共通文面） */
+export function formatDecisionSummary(r: DecideResult): string[] {
+  const conf = r.confidence === null ? "n/a" : r.confidence.toFixed(2);
+  const diff = r.difficulty ?? "unknown";
+  const diffConf = r.difficultyConfidence !== null ? `（confidence=${r.difficultyConfidence}）` : "";
+  const rawNote = r.rawRoute ? `（d1の生の選択=${r.rawRoute}）` : "";
+  return [
+    `route=${r.route}（confidence=${conf}。${r.reason}）${rawNote}`,
+    `difficulty=${diff}${diffConf}`,
+  ];
+}
+
+/** decide結果から次に採る行動の指示文（route_set 引数つき） */
+export function formatDecisionNextStep(r: DecideResult): string {
+  if (r.route === "direct") {
+    return "次: loopなしで直接対応せよ。goalは作らない（必要なら graphhopper_route_set(route: 'direct') でhistoryに残す）。";
+  }
+  const diffArg = r.difficulty
+    ? `, difficulty: '${r.difficulty}'`
+    : "（difficulty は unknown なので省略。easy/normal/hard 以外は渡せない）";
+  return `次: graphhopper_route_set(route, reason${diffArg}) で記録する。full/light/advised/oracleなら graphhopper_goal(start)（pending routeが消費される）。`;
 }
 
 /* d1応答からNoul確率を抜く（compact側と共有。応答形変更時の修正点集約） */
@@ -297,7 +325,7 @@ export async function decideRoute(
       await logDecision(opts.root, {
         id,
         kind: "decide",
-        request: request.slice(0, 200),
+        request,
         result: d.route,
         confidence: d.confidence,
         latencyMs: Math.round(performance.now() - t0),

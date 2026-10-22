@@ -54,6 +54,8 @@ import { readGraphhopperHash, runGraphhopperEdit } from "./gate";
 import { ensureEntryDecision } from "./entry-decide";
 import {
   decideRoute,
+  formatDecisionNextStep,
+  formatDecisionSummary,
   formatSelectorResult,
   SELECTOR_TOOL_DESCRIPTION,
   selectLenses,
@@ -209,12 +211,9 @@ async function goalAction(
         return `error: goal "${active.goal.title}" is already active. complete or pause it first.`;
       }
       // 入口判定の保険: 直近の decide 行が無ければ goal title を入力に判定して記録だけ残す
-      // （route は変えない。entry_route は route_set / fail-safe に委ねる）
-      try {
-        await ensureEntryDecision(root, sessionID || null, title);
-      } catch {
-        // 判定の失敗で goal start を止めない
-      }
+      // （route は変えない。entry_route は route_set / fail-safe に委ねる。
+      //   ensureEntryDecision は例外を投げない）
+      await ensureEntryDecision(root, sessionID || null, title);
       const a = state.startGoal(root, title, sessionID);
       try {
         const rev = await state.captureBaselineRev($, root);
@@ -1081,12 +1080,7 @@ const TOOL_DEFS: ToolDef[] = [
       const r = await decideRoute(a.request as string, fetch, {
         root: ctx.root,
       });
-      const text = [
-        `route=${r.route}（confidence=${r.confidence ?? "n/a"}。${r.reason}）`,
-        r.route === "direct"
-          ? "次: loopなしで直接対応せよ。goalは作らない（必要なら graphhopper_route_set(route: 'direct') でhistoryに残す）。"
-          : "次: graphhopper_route_set(route, reason) で記録せよ。full/light/advised/oracleなら graphhopper_goal(start)（pending routeが消費される）。",
-      ].join("\n");
+      const text = [...formatDecisionSummary(r), formatDecisionNextStep(r)].join("\n");
       return {
         text,
         data: { route: r.route, confidence: r.confidence, reason: r.reason },
