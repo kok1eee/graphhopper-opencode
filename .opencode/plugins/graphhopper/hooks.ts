@@ -343,11 +343,14 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
             /* SDK の SessionDeleted は data.sessionID（data.info.id ではない） */
             const id = event.data?.sessionID ?? event.data?.info?.id;
             if (id) {
-              /* セッション削除: cascade の復元先は消えたセッションを指すので落とす。
-               * level/children は goal 完了時の outcome 記録のために残す
+              /* セッション削除: 復元先が消えたセッションを指している時だけ restore を落とす。
+               * 無関係なセッション削除で復元を潰さない。level/children は outcome 記録のため残す
                * （restore が無ければ endCascade は何もしない＝別セッションへ持ち越さない） */
+              const active = state.getActive(root);
               const cascade = state.readState(root).cascade;
-              if (cascade) state.setCascade(root, { ...cascade, restore: null });
+              if (cascade && active?.state.session_id === id) {
+                state.setCascade(root, { ...cascade, restore: null });
+              }
               state.unbindSession(root, id);
               entryVerdicts.delete(id);
             }

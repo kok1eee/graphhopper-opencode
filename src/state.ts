@@ -1599,7 +1599,7 @@ export function readLastDecisionId(root: string): string | null {
   }
 }
 
-/** セッションの直近の成功 decide 行の id（fallback は除く。10分窓）。
+/** セッションの直近の成功 decide 行の id（fallback は除く。5分窓＝ENTRY_DECIDE_FRESH_MS と同値）。
  * goal の decision_id を「そのセッションの依頼」に結ぶために使う。
  * d1 障害中は null を返す＝誤った decide に紐付けない。 */
 export function readSessionDecisionId(
