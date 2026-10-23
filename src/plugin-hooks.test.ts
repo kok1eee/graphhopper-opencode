@@ -282,4 +282,36 @@ describe("plugin hook: 入口d1判定の context hook（注入）", () => {
       restore();
     }
   });
+
+  test("保持上限を超えると最古の判定が捨てられる（eviction）", async () => {
+    const root = tmpRoot();
+    const restore = patchFetch("light");
+    try {
+      await withKey(async () => {
+        const { ctx, hooks } = fakeCtx();
+        await registerHooks({ ctx: ctx as never, root });
+        const promptHook = hooks.get("prompt")?.[0];
+        const contextHook = hooks.get("context")?.[0];
+        if (!promptHook || !contextHook) throw new Error("hook が登録されていない");
+
+        /* 上限(128)を超えるまで別セッションの prompt を積む */
+        for (let i = 0; i < 129; i++) {
+          await promptHook({
+            sessionID: `s-${i}`,
+            prompt: { text: `依頼 ${i}` },
+          });
+        }
+        /* 最初のセッションは追い出されているので注入されない */
+        const first: Array<{ type: string; text?: string }> = [];
+        await contextHook({ sessionID: "s-0", system: first });
+        expect(first.map((s) => s.text ?? "").join("\n")).not.toContain(INJECT_HEADER);
+        /* 最後のセッションは残っているので注入される */
+        const last: Array<{ type: string; text?: string }> = [];
+        await contextHook({ sessionID: "s-128", system: last });
+        expect(last.map((s) => s.text ?? "").join("\n")).toContain(INJECT_HEADER);
+      });
+    } finally {
+      restore();
+    }
+  });
 });

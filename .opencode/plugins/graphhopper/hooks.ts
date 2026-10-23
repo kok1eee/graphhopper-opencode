@@ -47,7 +47,7 @@ const SYSTEM_GUIDE = `## graphhopper（designing/implementing/polishループ）
 
 この環境には graphhopper プラグインが常駐している。複数ファイルにまたがる変更・設計判断を含む実装を依頼されたら、手を付ける前に graphhopper_goal(action: "start", title: ...) でループを開始せよ。
 
-入口の route 判定（d1）はプラグインが自動実行し、判定結果はこのプロンプトの「graphhopper 入口判定」として渡される（direct の場合は渡されない）。その判定に従って graphhopper_route_set → graphhopper_goal(start) へ進むこと。判定は参考値であり、明らかに単一ファイルの小修正ならループを作らず直接対応してよい。
+入口の route 判定（d1）はプラグインが自動実行し、判定結果はこのプロンプトの「graphhopper 入口判定」として渡されることがある（direct・判定不能・内部/子セッション/goal進行中は渡されない）。渡された場合はその判定に従って graphhopper_route_set → graphhopper_goal(start) へ進むこと。判定は参考値であり、明らかに単一ファイルの小修正ならループを作らず直接対応してよい。
 
 designing フェーズでは source ファイルの edit/write は物理的にブロックされる（許可されるのは .graphhopper/plans/ 配下の design ドキュメントのみ）。まず design ドキュメントを書き、graphhopper-critic で1回敵対レビューしてから implementing フェーズに遷移して実装せよ。
 
@@ -74,8 +74,9 @@ const seenPonytails = new Set<string>();
  * 判定結果は context hook が待って注入し、消費したら捨てる（1ターン1回）。 */
 const entryVerdicts = new Map<string, { at: number; promise: Promise<EntryVerdict | null> }>();
 
-/** 保持する判定の最大件数（context hook に到達しないセッションの取り残し対策） */
-const ENTRY_VERDICT_MAX_ENTRIES = 32;
+/** 保持する判定の最大件数（context hook に到達しないセッションの取り残し対策。
+ * 同時多セッションでも他セッションの pending を捨てないよう余裕を持たせる） */
+const ENTRY_VERDICT_MAX_ENTRIES = 128;
 
 function resolveFilePath(args: unknown): string | undefined {
   if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
@@ -342,9 +343,11 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
             /* SDK の SessionDeleted は data.sessionID（data.info.id ではない） */
             const id = event.data?.sessionID ?? event.data?.info?.id;
             if (id) {
-              /* セッション削除では cascade を復元しない（消えたセッションに switchModel
-               * しても無意味で、event ループを塞ぐ）。cascade 状態は goal 完了時の
-               * outcome 記録のために残す（次の goal start が state を上書きする） */
+              /* セッション削除: cascade の復元先は消えたセッションを指すので落とす。
+               * level/children は goal 完了時の outcome 記録のために残す
+               * （restore が無ければ endCascade は何もしない＝別セッションへ持ち越さない） */
+              const cascade = state.readState(root).cascade;
+              if (cascade) state.setCascade(root, { ...cascade, restore: null });
               state.unbindSession(root, id);
               entryVerdicts.delete(id);
             }
@@ -376,7 +379,11 @@ async function isChildSession(
   sessionID: string,
 ): Promise<boolean> {
   try {
-    const info = await ctx.session.get({ sessionID });
+    /* admission 経路なので応答が詰まるとユーザー入力が止まる。短く切る */
+    const info = await ctx.session.get(
+      { sessionID },
+      { signal: AbortSignal.timeout(1000) },
+    );
     return !!info?.parentID;
   } catch {
     return false;

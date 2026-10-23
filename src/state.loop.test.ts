@@ -74,7 +74,7 @@ const CFG: GraphhopperConfig = {
   require_critic: false,
   cascade: {
     enabled: false,
-    baseline: "opencode-go/minimax-m3.1-flash-free",
+    baseline: "minimax/MiniMax-M3.1-Flash",
     escalate: "claude-oauth/claude-sonnet-5-5",
     escalate_on: ["hard"],
     fail_threshold: 2,
@@ -2299,6 +2299,7 @@ import { mkdtempSync as _mk } from "node:fs";
 import { tmpdir as _tmp } from "node:os";
 import { join as _join } from "node:path";
 import { readLastDecisionId, writeLastDecisionId } from "./state";
+import { logDecision } from "./decision";
 
 describe("last_decision id（decide→goal の橋渡し）", () => {
   test("書いた id を読める・無ければ null", () => {
@@ -2306,5 +2307,34 @@ describe("last_decision id（decide→goal の橋渡し）", () => {
     expect(readLastDecisionId(root)).toBeNull();
     writeLastDecisionId(root, "abc12345");
     expect(readLastDecisionId(root)).toBe("abc12345");
+  });
+});
+
+describe("goal の decision_id（セッション限定）", () => {
+  const decide = (id: string, sessionID: string, fallback = false) => ({
+    id,
+    kind: "decide" as const,
+    request: "依頼",
+    result: "full",
+    confidence: 0.9,
+    latencyMs: 1,
+    fallback,
+    reason: "t",
+    sessionID,
+  });
+
+  test("同じセッションの成功 decide に紐付く（他セッションは拾わない）", async () => {
+    const root = _mk(_join(_tmp(), "gh-sess-dec-"));
+    await logDecision(root, decide("aaaa1111", "sess-A"));
+    await logDecision(root, decide("bbbb2222", "sess-B"));
+    const a = startGoal(root, "goal A", "sess-A");
+    expect(a.state.decision_id).toBe("aaaa1111");
+  });
+
+  test("fallback 行は採らない（誤結合より未紐付けを選ぶ）", async () => {
+    const root = _mk(_join(_tmp(), "gh-sess-dec-fb-"));
+    await logDecision(root, decide("cccc3333", "sess-C", true));
+    const c = startGoal(root, "goal C", "sess-C");
+    expect(c.state.decision_id).toBeNull();
   });
 });

@@ -124,8 +124,16 @@ export async function finishCascade(gh: Gh): Promise<string | null> {
   const active = state.getActive(gh.root);
   if (active) {
     const run = readRun(gh.root, active.goal.id);
+    /* decision_id は「このセッションの最後の成功 decide」を優先する。
+     * goal start の保険は非同期で decide 行を書くため、start 時点の id では
+     * 保険行に紐付かない。goal 中は hook が active_goal で skip するので、
+     * 完了時点の最後の成功 decide は入口の判定行になる */
+    const decisionId =
+      state.readSessionDecisionId(gh.root, active.state.session_id ?? "") ??
+      active.state.decision_id ??
+      null;
     await logDecision(gh.root, {
-      decision_id: active.state.decision_id ?? null,
+      decision_id: decisionId,
       kind: "outcome",
       request: active.goal.title.slice(0, 200),
       result: active.state.cascade?.level ?? "none",

@@ -50,7 +50,7 @@ const CFG: GraphhopperConfig = {
   require_critic: false,
   cascade: {
     enabled: false,
-    baseline: "opencode-go/minimax-m3.1-flash-free",
+    baseline: "minimax/MiniMax-M3.1-Flash",
     escalate: "claude-oauth/claude-sonnet-5-5",
     escalate_on: ["hard"],
     fail_threshold: 2,

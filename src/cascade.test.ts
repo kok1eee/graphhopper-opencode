@@ -21,7 +21,7 @@ import type { CascadeConfig } from "./state";
 
 const config: CascadeConfig = {
   enabled: true,
-  baseline: "opencode-go/minimax-m3.1-flash-free",
+  baseline: "minimax/MiniMax-M3.1-Flash",
   escalate: "claude-oauth/claude-sonnet-5-5",
   escalate_on: ["hard"],
   fail_threshold: 2,
@@ -145,7 +145,7 @@ describe("applyCascade", () => {
       config,
       previous: null,
     });
-    expect(calls.switched).toEqual([{ providerID: "opencode-go", id: "minimax-m3.1-flash-free" }]);
+    expect(calls.switched).toEqual([{ providerID: "minimax", id: "MiniMax-M3.1-Flash" }]);
     expect(state?.level).toBe("baseline");
   });
 

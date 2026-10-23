@@ -383,7 +383,7 @@ export const DEFAULT_CONFIG: GraphhopperConfig = {
   require_critic: false,
   cascade: {
     enabled: false,
-    baseline: "opencode-go/minimax-m3.1-flash-free",
+    baseline: "minimax/MiniMax-M3.1-Flash",
     escalate: "claude-oauth/claude-sonnet-5-5",
     second: "opencode-go/deepseek-v4.1-flash",
     expert: "claude-oauth/claude-opus-5-5",
@@ -1619,7 +1619,7 @@ export function readSessionDecisionId(
     } finally {
       closeSync(fd);
     }
-    const cutoff = Date.now() - 10 * 60_000;
+    const cutoff = Date.now() - 5 * 60_000; // entry-decide の ENTRY_DECIDE_FRESH_MS と揃える
     let found: string | null = null;
     for (const l of buf.toString("utf8").split("\n")) {
       if (!l) continue;
