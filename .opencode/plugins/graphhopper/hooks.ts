@@ -5,7 +5,7 @@
  * H3 対応: context() は全文のみ (limit 無し) のためローカルで tail slice する。
  */
 import { $ } from "bun";
-import { finishCascade, flushOrphanCascade, syncCascade } from "./cascade";
+import { flushOrphanCascade, syncCascade } from "./cascade";
 import {
   type ChildHost,
   escalateChildSession,
@@ -342,12 +342,9 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
             /* SDK の SessionDeleted は data.sessionID（data.info.id ではない） */
             const id = event.data?.sessionID ?? event.data?.info?.id;
             if (id) {
-              const activeGoal = state.getActive(root);
-              /* セッション削除は goal の終了ではない。モデルは戻すが outcome 行は書かない
-               * （走行中 goal の実績を確定させず、complete 時の二重計上も避ける） */
-              if (activeGoal?.state.session_id === id) {
-                await finishCascade(gh, { logOutcome: false });
-              }
+              /* セッション削除では cascade を復元しない（消えたセッションに switchModel
+               * しても無意味で、event ループを塞ぐ）。cascade 状態は goal 完了時の
+               * outcome 記録のために残す（次の goal start が state を上書きする） */
               state.unbindSession(root, id);
               entryVerdicts.delete(id);
             }

@@ -70,8 +70,8 @@ export function registerCoreTools(
           }
           /* 入口判定の保険: 直近の decide 行が無ければ goal title を入力に判定して記録だけ残す
            * （route は変えない。entry_route は route_set / fail-safe に委ねる。
-           *   ensureEntryDecision は例外を投げない） */
-          await ensureEntryDecision(root, sessionID || null, args.title);
+           *   d1 の待ち時間を goal start に載せないので await しない。記録は best-effort） */
+          void ensureEntryDecision(root, sessionID || null, args.title);
           const a = state.startGoal(root, args.title, sessionID);
           try {
             const rev = await state.captureBaselineRev($, root);

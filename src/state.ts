@@ -17,11 +17,15 @@
  */
 import {
   appendFileSync,
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -1129,7 +1133,11 @@ export function startGoal(
   // pending entry_route（route_set先行）の消費。無ければnull＝full。
   // directはpendingを書かない（historyのみ）ため消費集合に入れない
   const pending = readPendingRoute(root);
-  next.decision_id = readLastDecisionId(root);
+  /* decision_id は「このセッションの成功 decide」に結ぶ。グローバルな last_decision は
+   * 他セッションの依頼を拾うことがあり、d1 障害中は特に誤結合になる */
+  next.decision_id = sessionID
+    ? readSessionDecisionId(root, sessionID)
+    : readLastDecisionId(root);
   if (
     pending &&
     (pending.route === "full" ||
@@ -1586,6 +1594,48 @@ export function readLastDecisionId(root: string): string | null {
     const p = JSON.parse(readFileSync(join(dir(root), "last_decision.json"), "utf8")) as { id?: string; at?: number };
     if (typeof p.id !== "string" || typeof p.at !== "number") return null;
     return Date.now() - p.at <= 10 * 60_000 ? p.id : null;
+  } catch {
+    return null;
+  }
+}
+
+/** セッションの直近の成功 decide 行の id（fallback は除く。10分窓）。
+ * goal の decision_id を「そのセッションの依頼」に結ぶために使う。
+ * d1 障害中は null を返す＝誤った decide に紐付けない。 */
+export function readSessionDecisionId(
+  root: string,
+  sessionID: string,
+): string | null {
+  if (!sessionID) return null;
+  const path = join(dir(root), "decisions.jsonl");
+  try {
+    const size = statSync(path).size;
+    const start = Math.max(0, size - 256 * 1024);
+    const len = size - start;
+    const buf = Buffer.alloc(len);
+    const fd = openSync(path, "r");
+    try {
+      readSync(fd, buf, 0, len, start);
+    } finally {
+      closeSync(fd);
+    }
+    const cutoff = Date.now() - 10 * 60_000;
+    let found: string | null = null;
+    for (const l of buf.toString("utf8").split("\n")) {
+      if (!l) continue;
+      let r: { kind?: string; id?: string; sessionID?: string; ts?: string; fallback?: boolean };
+      try {
+        r = JSON.parse(l) as typeof r;
+      } catch {
+        continue; // 先頭が切れた行は無視
+      }
+      if (r.kind !== "decide" || !r.id || r.fallback === true) continue;
+      if (r.sessionID !== sessionID) continue;
+      const ts = typeof r.ts === "string" ? Date.parse(r.ts) : NaN;
+      if (!Number.isFinite(ts) || ts < cutoff) continue;
+      found = r.id;
+    }
+    return found;
   } catch {
     return null;
   }
