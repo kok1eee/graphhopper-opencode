@@ -201,6 +201,9 @@ export function hasRecentEntryDecision(
   const rows = readDecisionRows(root);
   for (const r of rows) {
     if (r.kind !== "decide") continue;
+    /* fallback（d1 失敗）は「判定できた」ことにならない。数えると保険が走らず、
+     * goal が古い別 decide に紐付く（decision.ts は失敗時に last id を更新しない） */
+    if (r.fallback === true) continue;
     if (r.sessionID !== sessionID) continue;
     const ts = typeof r.ts === "string" ? Date.parse(r.ts) : NaN;
     if (!Number.isFinite(ts)) continue;

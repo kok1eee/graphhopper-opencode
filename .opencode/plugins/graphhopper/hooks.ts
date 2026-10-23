@@ -69,9 +69,13 @@ const seenPhaseGuides = new Set<string>();
 const seenPonytails = new Set<string>();
 
 /* 入口d1判定: prompt hook で起動し、context hook で注入する。
- * prompt hook では await しない（メッセージ受付を遅らせない）。context hook が結果を待つ。
- * セッションごとに 1 件だけ保持し、context hook で消費したら捨てる（1ターン1回）。 */
+ * prompt hook は d1 を await しない（判定の待ち時間をメッセージ受付に載せない）。
+ * ただし子セッション判定の 1 read だけは admission 経路で待つ（数msのローカル呼び出し）。
+ * 判定結果は context hook が待って注入し、消費したら捨てる（1ターン1回）。 */
 const entryVerdicts = new Map<string, { at: number; promise: Promise<EntryVerdict | null> }>();
+
+/** 保持する判定の最大件数（context hook に到達しないセッションの取り残し対策） */
+const ENTRY_VERDICT_MAX_ENTRIES = 32;
 
 function resolveFilePath(args: unknown): string | undefined {
   if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
@@ -219,6 +223,11 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
         return;
       }
       /* 前回の判定は捨てる（1セッション1件だけ保持） */
+      if (entryVerdicts.size >= ENTRY_VERDICT_MAX_ENTRIES) {
+        /* 最も古い entry を1件捨てる（context hook に到達しないセッションの取り残し対策） */
+        const oldest = [...entryVerdicts.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+        if (oldest) entryVerdicts.delete(oldest[0]);
+      }
       entryVerdicts.set(sessionID, {
         at: Date.now(),
         promise: decideEntry(text, fetch, {
@@ -334,7 +343,11 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
             const id = event.data?.sessionID ?? event.data?.info?.id;
             if (id) {
               const activeGoal = state.getActive(root);
-              if (activeGoal?.state.session_id === id) await finishCascade(gh);
+              /* セッション削除は goal の終了ではない。モデルは戻すが outcome 行は書かない
+               * （走行中 goal の実績を確定させず、complete 時の二重計上も避ける） */
+              if (activeGoal?.state.session_id === id) {
+                await finishCascade(gh, { logOutcome: false });
+              }
               state.unbindSession(root, id);
               entryVerdicts.delete(id);
             }

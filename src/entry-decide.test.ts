@@ -278,6 +278,17 @@ describe("hasRecentEntryDecision / ensureEntryDecision（goal start 時の保険
     });
   });
 
+  test("fallback 行は「判定済み」に数えない（古い decide への紐付けを防ぐ）", async () => {
+    const root = mkRoot();
+    await withKey(async () => {
+      const failing = (async () => {
+        throw new Error("network down");
+      }) as unknown as typeof fetch;
+      await decideEntry("依頼", failing, { root, sessionID: "sess-f" });
+      expect(hasRecentEntryDecision(root, "sess-f")).toBe(false);
+    });
+  });
+
   test("直近の decide 行があれば何もしない（二重記録しない）", async () => {
     const root = mkRoot();
     await withKey(async () => {

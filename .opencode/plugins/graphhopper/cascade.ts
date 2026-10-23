@@ -119,10 +119,16 @@ export async function flushOrphanCascade(gh: Gh): Promise<string | null> {
   return ok ? `cascade: 孤児を復元 → ${cascade.restore?.providerID}/${cascade.restore?.id}` : null;
 }
 
-/** goal 終了時に goal 開始前のモデルへ戻す。active が消える前に呼ぶこと */
-export async function finishCascade(gh: Gh): Promise<string | null> {
+/** goal 終了時に goal 開始前のモデルへ戻す。active が消える前に呼ぶこと。
+ * opts.logOutcome=false は「セッション削除」など goal がまだ終わっていない経路用。
+ * 走行中 goal に outcome 行を書くと calibrate が未確定実績を数え、complete 時の
+ * 2本目と二重計上になる */
+export async function finishCascade(
+  gh: Gh,
+  opts?: { logOutcome?: boolean },
+): Promise<string | null> {
   const active = state.getActive(gh.root);
-  if (active) {
+  if (active && opts?.logOutcome !== false) {
     const run = readRun(gh.root, active.goal.id);
     await logDecision(gh.root, {
       decision_id: active.state.decision_id ?? null,
