@@ -3,7 +3,7 @@
 global `~/.config/opencode/AGENTS.md` (CodeGraph / graft-first / rg制限) を継承。
 以下はこの repo 固有の追加分のみ。
 
-- バイナリは mise 管理の `opencode` (2.1.2 pin, repo の `mise.toml`) を使うこと。
+- バイナリは mise 管理の `opencode` (2.1.3 pin, repo の `mise.toml`) を使うこと。
   opencode v1 (1.18.x) でこのディレクトリを開かない
   (v1 global plugin が `.graphhopper/` を誤ランタイムで駆動する)。
 - eval: `bun test && npx tsc --noEmit` (green を維持)。
