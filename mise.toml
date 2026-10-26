@@ -4,4 +4,4 @@
 # allow_builds: @opencode/cli は postinstall で実バイナリを配置するため、
 # mise (embedded aube) の既定「依存の lifecycle script は実行しない」を明示的に解除する。
 [tools]
-"npm:@opencode/cli" = { version = "2.1.3", allow_builds = ["@opencode/cli"] }
+"npm:@opencode/cli" = { version = "2.1.4", allow_builds = ["@opencode/cli"] }
