@@ -298,9 +298,15 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
             [
               "## graphhopper handoff メモ",
               "",
-              `.graphhopper/HANDOFF.md に未読の handoff メモがある（goal: "${memo.meta.goal_title}" ${memo.meta.goal_id} / phase: ${memo.meta.phase}）。`,
-              "続きから作業するなら、まずメモを Read し、`graphhopper_handoff` (action: \"load\") を呼んで goal をこのセッションに復元せよ。",
-              "別の作業をするなら無視してよい（メモは state の写像であり、state は変わらない）。",
+              memo.meta.kind === "session"
+                ? ".graphhopper/HANDOFF.md に未読の handoff メモがある（goal なしの作業メモ＋会話の要約）。"
+                : `.graphhopper/HANDOFF.md に未読の handoff メモがある（goal: "${memo.meta.goal_title}" ${memo.meta.goal_id} / phase: ${memo.meta.phase}）。`,
+              memo.meta.kind === "session"
+                ? "続きから作業するなら、まずメモを Read し、必要なら `graphhopper_handoff` (action: \"load\") で内容を確認せよ（goal は再開しない）。"
+                : "続きから作業するなら、まずメモを Read し、`graphhopper_handoff` (action: \"load\") を呼んで goal をこのセッションに復元せよ。",
+              memo.meta.kind === "session"
+                ? "別の作業をするなら無視してよい（メモは書いた時点の参考情報で、正は VCS とファイル）。"
+                : "別の作業をするなら無視してよい（メモは state の写像であり、state は変わらない）。",
             ].join("\n"),
           );
         }
