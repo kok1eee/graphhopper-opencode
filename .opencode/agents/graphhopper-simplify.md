@@ -1,7 +1,7 @@
 ---
 description: "polishのsimplify用。route=polish（大diff）のときだけ呼ぶ単体agent。3レンズ（再利用・品質・効率）を1回のパスで見てコード整理の提案を出す。適用はメインが行う（モデルは .graphhopper/config.json の agents で設定）"
 mode: all
-model: "claude-oauth/claude-sonnet-5-5"
+model: "opencode-go/deepseek-v4.1-flash"
 permissions:
   - { action: "edit", resource: "*", effect: "deny" }
   - { action: "shell", resource: "*", effect: "deny" }

@@ -1,7 +1,7 @@
 ---
 description: "外部公式ドキュメント・仕様調査専用の安価エージェント。公式doc・仕様・横断的意味質問の事実収集。判断は含まない（モデルは .graphhopper/config.json の agents で設定）"
 mode: all
-model: "claude-oauth/claude-sonnet-5-5"
+model: "opencode-go/beam-free"
 permissions:
   - { action: "edit", resource: "*", effect: "deny" }
   - { action: "shell", resource: "*", effect: "deny" }
