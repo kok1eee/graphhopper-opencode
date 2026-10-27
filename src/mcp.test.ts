@@ -578,6 +578,7 @@ describe("graphhopper-mcp structured output / elicitation", () => {
     const st0 = await client.callTool({ name: "graphhopper_status", arguments: { root } });
     expect((st0 as { structuredContent?: unknown }).structuredContent).toEqual({
       active: false,
+      text: "no active goal",
     });
     const started = await client.callTool({
       name: "graphhopper_goal",
@@ -1065,7 +1066,7 @@ describe("graphhopper-mcp route系tool（統合）", () => {
 });
 
 describe("graphhopper_invoke structuredContent", () => {
-  test("本文(output)が structuredContent にも入る（Code Mode は content を捨てるため）", async () => {
+  test("本文(text)が structuredContent にも入る（Code Mode は content を捨てるため）", async () => {
     const dir = freshRoot();
     const bin = join(dir, "fake-opencode");
     writeFileSync(bin, "#!/bin/sh\necho 'critic says OK'\n", { mode: 0o755 });
@@ -1077,13 +1078,31 @@ describe("graphhopper_invoke structuredContent", () => {
         name: "graphhopper_invoke",
         arguments: { agent: "graphhopper-critic", prompt: "x", root: dir },
       });
-      const sc = r.structuredContent as { output?: string; timedOut?: boolean };
-      expect(sc.output).toContain("critic says OK");
+      const sc = r.structuredContent as { text?: string; timedOut?: boolean };
+      expect(sc.text).toContain("critic says OK");
       expect(sc.timedOut).toBe(false);
       await client.close();
     } finally {
       if (prev === undefined) delete process.env["GH_OPENCODE_BIN"];
       else process.env["GH_OPENCODE_BIN"] = prev;
     }
+  });
+});
+
+describe("structuredContent に text を同梱", () => {
+  test("data を返す全 tool で text が入り、outputSchema にも宣言される", async () => {
+    const client = await linked();
+    const root = freshRoot();
+    const r = await client.callTool({ name: "graphhopper_goal", arguments: { action: "start", title: "t", root } });
+    const sc = r.structuredContent as { text?: string; goalId?: string };
+    expect(sc.goalId).toBeTruthy();
+    expect(sc.text).toContain("次:");
+    const { tools } = await client.listTools();
+    for (const tool of tools) {
+      if (!tool.outputSchema) continue;
+      expect(tool.outputSchema.properties?.["text"]).toBeDefined();
+      expect(tool.outputSchema.required).toContain("text");
+    }
+    await client.close();
   });
 });

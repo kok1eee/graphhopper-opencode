@@ -607,6 +607,15 @@ interface ToolOut {
   data?: Record<string, unknown>;
 }
 
+/** outputSchema に本文 text を足す（structuredContent に同梱するため） */
+function withTextProp(schema: NonNullable<Tool["outputSchema"]>): NonNullable<Tool["outputSchema"]> {
+  return {
+    ...schema,
+    properties: { ...(schema.properties ?? {}), text: { type: "string", description: "人間向け本文（content と同一）" } },
+    required: [...new Set([...(schema.required ?? []), "text"])],
+  };
+}
+
 interface ToolDef {
   name: string;
   description: string;
@@ -1630,12 +1639,11 @@ const TOOL_DEFS: ToolDef[] = [
     outputSchema: {
       type: "object",
       properties: {
-        output: { type: "string", description: "子の返答本文（stdout）" },
         timedOut: { type: "boolean" },
         fallbackWarning: { type: "boolean" },
         cancelled: { type: "boolean" },
       },
-      required: ["output", "timedOut", "fallbackWarning", "cancelled"],
+      required: ["timedOut", "fallbackWarning", "cancelled"],
     },
     run: async (a, ctx) => {
       const r = await invokeStructured(
@@ -1670,8 +1678,7 @@ const TOOL_DEFS: ToolDef[] = [
       );
       return {
         text: r.output,
-        /* Code Mode 等の client は structuredContent があると content を捨てるため、本文も入れる */
-        data: { output: r.output, timedOut: r.timedOut, fallbackWarning: r.fallbackWarning, cancelled: r.cancelled },
+        data: { timedOut: r.timedOut, fallbackWarning: r.fallbackWarning, cancelled: r.cancelled },
       };
     },
   },
@@ -1936,7 +1943,7 @@ export function createServer(): Server {
       name: d.name,
       description: d.description,
       inputSchema: d.inputSchema,
-      ...(d.outputSchema ? { outputSchema: d.outputSchema } : {}),
+      ...(d.outputSchema ? { outputSchema: withTextProp(d.outputSchema) } : {}),
       ...(ANNOTATIONS[d.name] ? { annotations: ANNOTATIONS[d.name] } : {}),
     })),
   }));
@@ -1963,7 +1970,9 @@ export function createServer(): Server {
         content: { type: "text"; text: string }[];
         structuredContent?: Record<string, unknown>;
       } = { content: [{ type: "text", text: out.text }] };
-      if (out.data !== undefined) res.structuredContent = out.data;
+      /* Code Mode 等の client は structuredContent があると content(text) を捨てる。
+       * 次の手順・エラー文が消えないよう text も同梱する */
+      if (out.data !== undefined) res.structuredContent = { ...out.data, text: out.text };
       // logging 転送（watchdog 系 client が state 遷移をリアルタイムに追える）。
       // client 未対応でも例外で tool 結果を壊さない。
       try {
