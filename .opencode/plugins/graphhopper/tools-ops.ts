@@ -8,6 +8,7 @@
 import { $ } from "bun";
 import { effectivePhaseAction, goalResumeContext, readGraphhopperHash, runGraphhopperEdit } from "../../../src/gate";
 import { INTERNAL_PROMPT_METADATA_KEY } from "../../../src/entry-decide";
+import { latestSummary } from "../../../src/compaction-store";
 import * as handoff from "../../../src/handoff";
 import { invokeStructured } from "../../../src/invoke";
 import { formatScoreboard } from "../../../src/scoreboard-format";
@@ -315,11 +316,21 @@ export function registerOpsTools(
         session_id: S.optStr("send の送信先セッションID"),
         note: S.optStr("write/send に添える任意メモ"),
         force: { type: "boolean", description: "load で loop 恒久ブロックを明示解除する" },
+        overwrite: {
+          type: "boolean",
+          description: "write 時に、pending な別 goal のメモを明示的に上書きする",
+        },
       },
       [],
     ),
     execute: async (input: unknown, context: unknown) => {
-      const args = input as { action?: string; session_id?: string; note?: string; force?: boolean };
+      const args = input as {
+        action?: string;
+        session_id?: string;
+        note?: string;
+        force?: boolean;
+        overwrite?: boolean;
+      };
       const sessionID = sess(gh, context as Ctx);
       const action = args.action ?? (args.session_id ? "send" : "write");
       const active = state.getActive(root);
@@ -347,15 +358,36 @@ export function registerOpsTools(
         );
       }
 
-      if (!active || active.goal.status === "done") {
-        return text("error: handoff できる goal が無い（active か paused の goal が必要）");
-      }
-
       if (action === "load") {
         const memo = handoff.readHandoff(root);
         if (!memo) {
           return text(
             `error: ${handoff.handoffPath(root)} が無い。書いた側で graphhopper_handoff(action: 'write') を実行せよ`,
+          );
+        }
+        if (memo.meta.kind === "session") {
+          if (active && active.goal.status !== "done") {
+            return text(
+              [
+                "error: session メモ（goal 無し）は active な goal があるセッションでは読めない（state と食い違う）。",
+                "この goal を続けるか、graphhopper_goal(action: 'complete') してから読め。",
+              ].join("\n"),
+            );
+          }
+          handoff.setPending(root, false);
+          return text(
+            [
+              `handoff（goal なし）を読んだ: ${handoff.handoffPath(root)}`,
+              "",
+              memo.body,
+              "",
+              "新しい goal を立てるときは graphhopper_goal(action: 'start', title: ...) を使う。",
+            ].join("\n"),
+          );
+        }
+        if (!active || active.goal.status === "done") {
+          return text(
+            `error: メモは goal (${memo.meta.goal_id}) のものだが、現在 active な goal が無い（または done）。まず graphhopper_goal(action: 'resume') で戻せ`,
           );
         }
         if (memo.meta.goal_id !== active.goal.id) {
@@ -408,6 +440,9 @@ export function registerOpsTools(
       }
 
       if (action === "send") {
+        if (!active || active.goal.status === "done") {
+          return text("error: send できる goal が無い（active か paused の goal が必要）");
+        }
         if (!args.session_id) {
           return text("error: send には session_id が要る。ファイル経由なら action: write → 新しい会話で load");
         }
@@ -462,14 +497,6 @@ export function registerOpsTools(
       }
 
       // write（既定）
-      if (active.state.session_id && active.state.session_id !== sessionID) {
-        return text(
-          [
-            `error: goal "${active.goal.title}" (${active.goal.id}) は別セッション (${active.state.session_id}) が実行中。`,
-            "そのセッションで handoff を実行するか、こちらへ引き継ぐなら graphhopper_goal(action: 'resume') で bind し直してから書け。",
-          ].join("\n"),
-        );
-      }
       const vcsHead = await state.captureBaselineRev($, root);
       let dirty: boolean | null = null;
       try {
@@ -477,6 +504,58 @@ export function registerOpsTools(
         if (r.exitCode === 0) dirty = r.stdout.toString().trim().length > 0;
       } catch {
         dirty = null;
+      }
+      /* 要約は「この会話」のもの。goal が複数セッションに跨っても直近の会話だけを使う */
+      /* テスト用に DB パスを差し替えられる（本番は未設定） */
+      const summary = latestSummary(sessionID, { dbPath: process.env["GH_HANDOFF_DB"] ?? null });
+      const hasGoal = !!active && active.goal.status !== "done";
+
+      /* 上書き保護: pending な別 goal のメモを黙って潰さない（goal 無しの session メモでも守る） */
+      const existing = handoff.readHandoff(root);
+      const conflicts = handoff.isPendingGoalMemo(existing, hasGoal ? active.goal.id : undefined);
+      if (conflicts && !args.overwrite) {
+        return text(
+          [
+            `error: 未読の handoff メモ（別 goal: ${existing?.meta.goal_id}）が残っている。`,
+            "先にその goal を再開するか、上書きしてよいなら graphhopper_handoff(action: 'write', overwrite: true) を使え。",
+          ].join("\n"),
+        );
+      }
+
+      if (!hasGoal) {
+        /* goal が無い（完了済み・未 start）: 会話の要約と作業メモだけを書く */
+        const path = handoff.writeHandoff(root, {
+          sessionID,
+          vcsHead,
+          dirty,
+          note: args.note,
+          summary,
+        });
+        if (!path) {
+          return text(
+            "error: 書き出す内容が無い（goal が無いので、note か compaction 要約のどちらかが必要）",
+          );
+        }
+        return text(
+          [
+            `handoff メモ（goal なし）を書いた: ${path}`,
+            summary ? `会話の要約を添付（model=${summary.model || "不明"} / ${summary.at || "日時不明"}）` : "会話の要約なし（このセッションはまだ compact していない）",
+            args.note ? `作業メモ: ${args.note}` : null,
+            "",
+            "新しい会話を開けば案内が出る。出ない場合は graphhopper_handoff(action: 'load') を呼ぶ。",
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        );
+      }
+
+      if (active.state.session_id && active.state.session_id !== sessionID) {
+        return text(
+          [
+            `error: goal "${active.goal.title}" (${active.goal.id}) は別セッション (${active.state.session_id}) が実行中。`,
+            "そのセッションで handoff を実行するか、こちらへ引き継ぐなら graphhopper_goal(action: 'resume') で bind し直してから書け。",
+          ].join("\n"),
+        );
       }
       /* pause してから書く。前に書くと memo の status/updated_at が実 state と
        * 1段ずれて、load のたびに「ズレ」と報告されてしまう */
@@ -487,7 +566,14 @@ export function registerOpsTools(
       state.unbindSession(root, sessionID);
       let path: string | null = null;
       try {
-        path = handoff.writeHandoff(root, { sessionID, vcsHead, dirty, resumeContext });
+        path = handoff.writeHandoff(root, {
+          sessionID,
+          vcsHead,
+          dirty,
+          resumeContext,
+          note: args.note,
+          summary,
+        });
       } catch (e) {
         /* 書き込み失敗で pause だけ残るのを防ぐ。pause の副作用（loop フラグのリセット）は
          * 戻らないが、goal が paused のまま取り残されるよりはよい */
@@ -512,6 +598,7 @@ export function registerOpsTools(
         [
           `handoff メモを書いた: ${path}`,
           `goal: "${active.goal.title}" (${active.goal.id}) / phase: ${active.state.phase}`,
+          summary ? `会話の要約を添付（model=${summary.model || "不明"} / ${summary.at || "日時不明"}）` : "会話の要約なし（このセッションはまだ compact していない）",
           "この goal は pause + unbind した（旧セッションの自動継続は止まる）。",
           wasLoopStopped ? "※ loop 停止フラグは pause により解除された（意図せず解除された場合は注意）" : null,
           ignoreNote || null,

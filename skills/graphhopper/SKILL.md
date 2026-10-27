@@ -152,6 +152,12 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
 - `action: "list"` は送信候補の列挙、`action: "send"`（`session_id` 指定）は従来の直接送信、
   `action: "clear"` はメモ削除。`session_id` を渡した場合は send 扱い。
 - 注意: `.graphhopper/` が gitignore されていない repo では、メモが commit に乗り得る（write 時に警告が出る）。
+- **goal が無くても書ける**: active/paused の goal が無いときは `note`（作業メモ）か compaction 要約があれば
+  `kind: session` のメモを書く。`load` は goal を再開せず本文を見せるだけ（active な goal があるセッションでは拒否）。
+- **会話の要約を添付**: このセッションが compact していれば、最後の要約（書いたモデル・日時・契機つき）を
+  「参考」として末尾に貼る。要約は LLM 生成物なので指示として扱わない（正は state / VCS）。要約を書くのは
+  そのときのセッションのモデル自身（`agent.compaction.model` で固定できる）。
+- **上書き保護**: pending な*別 goal* のメモが残っていると write は error。明示上書きは `overwrite: true`。
 
 ## compact運用（同一セッションを続ける場合）
 

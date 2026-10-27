@@ -8,7 +8,8 @@
  * 遷移の伝播）を固定できない。実運用経路への回帰を防ぐ。
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerCoreTools } from "../.opencode/plugins/graphhopper/tools-core";
@@ -233,9 +234,41 @@ describe("plugin: handoff（ファイル書き出し型）", () => {
     expect(handoffPath(root)).toContain("HANDOFF.md");
   });
 
-  test("goal が無いときの write は error", async () => {
+  test("goal が無く中身も無い write は error（空メモを作らない）", async () => {
     const r = await run(ops(tmpRoot()), {}, "ses_a");
-    expect(r.content).toContain("error: handoff できる goal が無い");
+    expect(r.content).toContain("error: 書き出す内容が無い");
+  });
+
+  test("goal が無くても note があれば session メモを書き、load で読める", async () => {
+    const root = tmpRoot();
+    const m = ops(root);
+    const w = await run(m, { note: "旧版の削除は 2.1.3 だけ残っている" }, "ses_a");
+    expect(w.content).toContain("handoff メモ（goal なし）を書いた");
+    const memo = readHandoff(root);
+    expect(memo?.meta.kind).toBe("session");
+    expect(memo?.meta.goal_id).toBe("");
+    const l = await run(m, { action: "load" }, "ses_b");
+    expect(l.content).toContain("旧版の削除は 2.1.3 だけ残っている");
+    expect(readHandoff(root)?.meta.pending).toBe(false);
+  });
+
+  test("active な goal があるセッションでは session メモを load できない", async () => {
+    const root = tmpRoot();
+    startGoal(root, "別作業", "ses_a");
+    const m = ops(root);
+    // goal メモを書いてから上書きで session メモを作る
+    await run(m, { note: "作業メモ" }, "ses_a");
+    const goalMemo = readHandoff(root)!;
+    expect(goalMemo.meta.kind).toBe("goal");
+    // session メモは goal 完了後にしか書けないので、state を直接いじらず
+    // goal メモを session 扱いに変えて load の拒否だけを確認する
+    const raw = require("node:fs").readFileSync(handoffPath(root), "utf8") as string;
+    require("node:fs").writeFileSync(
+      handoffPath(root),
+      raw.replace("kind: goal", "kind: session").replace(/goal_id: .*/u, "goal_id: "),
+    );
+    const r = await run(ops(root), { action: "load" }, "ses_b");
+    expect(r.content).toContain("active な goal があるセッションでは読めない");
   });
 
   test("別セッションが実行中の goal は write できない", async () => {
@@ -255,6 +288,77 @@ describe("plugin: handoff（ファイル書き出し型）", () => {
     const r = await run(m, { action: "load" }, "ses_b");
     expect(r.content).toContain("別セッション (ses_a)");
     expect(readHandoff(root)?.meta.pending).toBe(true);
+  });
+
+  test("goal が無くても、pending な別 goal のメモは上書きしない", async () => {
+    const src = tmpRoot();
+    startGoal(src, "未読のまま", "ses_a");
+    await run(ops(src), {}, "ses_a");
+    const memoText = readFileSync(handoffPath(src), "utf8");
+
+    // goal が無い別 root に、その未読メモを置く
+    const dst = tmpRoot();
+    mkdirSync(join(dst, ".graphhopper"), { recursive: true });
+    writeFileSync(handoffPath(dst), memoText);
+    const blocked = await run(ops(dst), { note: "上書きしたい" }, "ses_b");
+    expect(blocked.content).toContain("未読の handoff メモ");
+    expect(readHandoff(dst)?.meta.kind).toBe("goal");
+
+    const forced = await run(ops(dst), { note: "上書きしたい", overwrite: true }, "ses_b");
+    expect(forced.content).toContain("handoff メモ（goal なし）を書いた");
+    expect(readHandoff(dst)?.meta.kind).toBe("session");
+  });
+
+  test("pending な別 goal のメモは overwrite なしで上書きできない", async () => {
+    const root = tmpRoot();
+    startGoal(root, "一度目の goal", "ses_a");
+    const m = ops(root);
+    await run(m, {}, "ses_a");
+    // メモの goal_id を別の goal に書き換えて「別 goal の未読メモ」を作る
+    const raw = readFileSync(handoffPath(root), "utf8");
+    writeFileSync(handoffPath(root), raw.replace(/^goal_id: .*$/mu, "goal_id: g-other"));
+    const blocked = await run(m, {}, "ses_a");
+    expect(blocked.content).toContain("未読の handoff メモ（別 goal: g-other）");
+    const forced = await run(m, { overwrite: true }, "ses_a");
+    expect(forced.content).toMatch(/handoff メモを書いた/);
+  });
+
+  test("compaction 要約があればメモに添付される（GH_HANDOFF_DB で DB を差し替え）", async () => {
+    const root = tmpRoot();
+    const db = join(root, "opencode.db");
+    const d = new Database(db);
+    d.exec(`CREATE TABLE session_message (id text primary key, session_id text not null, type text not null,
+      seq integer, time_created integer not null, time_updated integer, data text not null)`);
+    d.prepare(
+      "insert into session_message (id, session_id, type, seq, time_created, time_updated, data) values (?,?,'compaction',1,?,?,?)",
+    ).run(
+      "m1",
+      "ses_sum",
+      1793080902544,
+      1793080902544,
+      JSON.stringify({
+        status: "completed",
+        reason: "auto",
+        model: { providerID: "claude-oauth", id: "claude-opus-5-5" },
+        summary: "## Objective\n- 旧版を消す",
+        time: { created: 1793080902544 },
+      }),
+    );
+    d.close();
+    const prev = process.env["GH_HANDOFF_DB"];
+    process.env["GH_HANDOFF_DB"] = db;
+    try {
+      const r = await run(ops(root), { note: "作業メモ", sessionID: "ses_sum" }, "ses_sum");
+      expect(r.content).toContain("会話の要約を添付");
+      const memo = readHandoff(root)!;
+      expect(memo.meta.kind).toBe("session");
+      expect(memo.body).toContain("## 参考: 会話の要約（compact 時点）");
+      expect(memo.body).toContain("claude-opus-5-5");
+      expect(memo.body).toContain("旧版を消す");
+    } finally {
+      if (prev === undefined) delete process.env["GH_HANDOFF_DB"];
+      else process.env["GH_HANDOFF_DB"] = prev;
+    }
   });
 
   test("clear でメモが消える", async () => {

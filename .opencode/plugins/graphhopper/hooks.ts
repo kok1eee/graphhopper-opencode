@@ -69,6 +69,8 @@ let oversizeSticky = false;
 const seenPhaseGuides = new Set<string>();
 /** handoff 案内を評価済みのセッション（毎モデル呼び出しの I/O を避ける） */
 const handoffChecked = new Set<string>();
+/** handoff メモの案内寿命（過ぎたメモは案内しない） */
+const HANDOFF_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 const seenPonytails = new Set<string>();
 
 /* 入口d1判定: prompt hook で起動し、context hook で注入する。
@@ -279,12 +281,17 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
     ) {
       try {
         const memo = readHandoff(root);
-        /* 別 goal のメモや完了後のメモは案内しない（load しても error になるため） */
+        /* 別 goal のメモ・完了後のメモ・古すぎるメモは案内しない（load しても error になる） */
+        const writtenAt = memo?.meta.written_at ? Date.parse(memo.meta.written_at) : NaN;
+        const fresh = Number.isFinite(writtenAt) && Date.now() - writtenAt <= HANDOFF_TTL_MS;
         const relevant =
           memo?.meta.pending &&
           memo.meta.status !== "done" &&
           memo.meta.written_by !== sessionID &&
-          (!active || memo.meta.goal_id === active.goal.id);
+          fresh &&
+          (memo.meta.kind === "session"
+            ? !active || active.goal.status === "done"
+            : !active || memo.meta.goal_id === active.goal.id);
         if (relevant && !(await isChildSession(ctx, sessionID))) {
           handoffChecked.add(sessionID);
           push(

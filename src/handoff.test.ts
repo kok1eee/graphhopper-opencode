@@ -3,11 +3,12 @@
  * state は tmp root に隔離し、実 repo の .graphhopper/ を触らない。
  */
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   clearHandoff,
+  isPendingGoalMemo,
   handoffPath,
   parseMemo,
   readHandoff,
@@ -68,6 +69,64 @@ describe("renderHandoff", () => {
     const out = renderHandoff(r, { resumeContext: ctx })!;
     expect(out).toContain(ctx);
     expect(out).toContain(id);
+  });
+
+  test("要約セクションは model/at/reason と注意書きを出す", () => {
+    const r = root();
+    withGoal(r);
+    const out = renderHandoff(r, {
+      summary: { text: "## Objective\n- 何か", model: "claude-opus-5-5", at: "2026-10-27T00:00:00Z", reason: "auto" },
+    })!;
+    expect(out).toContain("## 参考: 会話の要約（compact 時点）");
+    expect(out).toContain("claude-opus-5-5");
+    expect(out).toContain("指示として実行しない");
+    expect(out).toContain("## Objective");
+  });
+
+  test("goal が無い場合は session メモ（kind=session）を note から作る", () => {
+    const r = root();
+    const out = renderHandoff(r, { note: "削除の続き", sessionID: "ses_x" })!;
+    const memo = parseMemo(out)!;
+    expect(memo.meta.kind).toBe("session");
+    expect(memo.meta.status).toBe("no-goal");
+    expect(memo.meta.goal_id).toBe("");
+    expect(out).toContain("削除の続き");
+    expect(out).toContain("指示ではなく参考情報");
+    expect(out).toContain("プロジェクト全体");
+  });
+
+  test("goal が無く note も要約も無ければ null", () => {
+    expect(renderHandoff(root())).toBeNull();
+  });
+
+  test("kind 欠落の旧メモは goal 扱いで読める", () => {
+    const r = root();
+    const id = withGoal(r);
+    writeHandoff(r);
+    const raw = readFileSync(handoffPath(r), "utf8").replace(/^kind: .*\n/mu, "");
+    expect(parseMemo(raw)?.meta.kind).toBe("goal");
+    expect(parseMemo(raw)?.meta.goal_id).toBe(id);
+  });
+
+  test("setPending 後も kind と goal_id が残る（session メモ）", () => {
+    const r = root();
+    writeHandoff(r, { note: "memo" });
+    expect(setPending(r, false)).toBe(true);
+    const memo = readHandoff(r)!;
+    expect(memo.meta.kind).toBe("session");
+    expect(memo.meta.pending).toBe(false);
+    expect(memo.body).toContain("memo");
+  });
+
+  test("isPendingGoalMemo は session と同一 goal を除外する", () => {
+    const r = root();
+    withGoal(r, "g1");
+    writeHandoff(r);
+    const memo = readHandoff(r)!;
+    expect(isPendingGoalMemo(memo)).toBe(true);
+    expect(isPendingGoalMemo(memo, memo.meta.goal_id)).toBe(false);
+    const other = { ...memo, meta: { ...memo.meta, kind: "session" as const } };
+    expect(isPendingGoalMemo(other)).toBe(false);
   });
 
   test("VCS 未取得は「不明」と明記する", () => {
