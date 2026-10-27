@@ -8,6 +8,8 @@
 import { $ } from "bun";
 import { readGraphhopperHash, runGraphhopperEdit } from "../../../src/gate";
 import { INTERNAL_PROMPT_METADATA_KEY } from "../../../src/entry-decide";
+import { invokeStructured } from "../../../src/invoke";
+import { formatScoreboard } from "../../../src/scoreboard-format";
 import * as state from "../../../src/state";
 import { knownSessions, noteSession, S, text, type Gh } from "./shared";
 
@@ -386,6 +388,58 @@ export function registerOpsTools(
           "送信側の goal は解放された（pause + unbind）。受け手が graphhopper_resume で引き継ぐ。",
         ].join("\n"),
       );
+    },
+  });
+
+  editor.add({
+    name: "graphhopper_scoreboard",
+    description:
+      "評価機能（成績表）: モデル×役割の成績表（verdict集計）とgoal転帰（巻き戻し・eval・採点）。マッピング判断の素材",
+    input: S.obj({}, []),
+    execute: async () => text(formatScoreboard(state.buildScoreboard(root))),
+  });
+
+  editor.add({
+    name: "graphhopper_invoke",
+    description:
+      "別モデルでsubagent相当を実行する。opencode run をspawnし stdout を返す。入れ子禁止・prompt上限12000文字・timeout既定120s・上限300s。並列fan-out可。delayMsで起動ずらし可（429 herd回避）",
+    input: S.obj(
+      {
+        agent: S.str("graphhopper-* agent名（例: graphhopper-critic）"),
+        model: S.optStr("provider/model形式。省略時はconfig既定"),
+        prompt: S.str("charter＋渡し物全文（12000文字まで）"),
+        timeoutMs: S.num("タイムアウトms（既定120000・上限300000）"),
+        delayMs: S.num("起動前の待機ms（並列herd回避用。既定0・上限60000）"),
+      },
+      ["agent", "prompt"],
+    ),
+    execute: async (input: unknown, context: unknown) => {
+      const a = input as {
+        agent: string;
+        model?: string;
+        prompt: string;
+        timeoutMs?: number;
+        delayMs?: number;
+      };
+      const signal = (context as { signal?: AbortSignal } | undefined)?.signal;
+      const r = await invokeStructured(
+        {
+          agent: a.agent,
+          model: a.model,
+          prompt: a.prompt,
+          root,
+          timeoutMs: a.timeoutMs,
+          delayMs: a.delayMs,
+        },
+        undefined,
+        { signal },
+      );
+      const flags = [
+        r.timedOut ? "timedOut" : null,
+        r.cancelled ? "cancelled" : null,
+        r.fallbackWarning ? "fallbackWarning" : null,
+      ].filter(Boolean);
+      return text(flags.length ? `${r.output}\n[invoke: ${flags.join(", ")}]` : r.output);
     },
   });
 }

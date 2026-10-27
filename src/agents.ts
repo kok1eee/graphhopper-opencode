@@ -175,7 +175,7 @@ export const VERIFIER_BASH: Record<string, "allow" | "deny" | "ask"> = {
 export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
   /* modeは "all"（design g-mu5d6avj A1）。
    * `opencode run --agent` はsubagent modeを拒否してdefault agentにフォールバックするため、
-   * MCP経由invoke（graphhopper_invoke）で --agent 指定できるよう "all" にする。
+   * graphhopper_invoke で --agent 指定できるよう "all" にする。
    * Task経路のsubagent利用・read-only権限は不変。副作用: TUIのTab切替候補に載る。 */
   "graphhopper-researcher": {
     description:

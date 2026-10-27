@@ -12,6 +12,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerCoreTools } from "../.opencode/plugins/graphhopper/tools-core";
+import { registerOpsTools } from "../.opencode/plugins/graphhopper/tools-ops";
+import { formatScoreboard } from "./scoreboard-format";
 import { planPath, readTodos, startGoal } from "./state";
 
 interface ToolDef {
@@ -120,5 +122,74 @@ describe("plugin tool: graphhopper_phase の進捗ゲート", () => {
     await todo!.execute({ action: "cancel", id: "t2", reason: "不要" }, ctx);
     const out = textOf(await phase!.execute({ phase: "polish" }, ctx));
     expect(out).toContain("phase -> polish");
+  });
+});
+
+describe("plugin: invoke / scoreboard（MCP一本化）", () => {
+  function opsTools(root: string): Map<string, ToolDef> {
+    const map = new Map<string, ToolDef>();
+    registerOpsTools({ add: (t: Record<string, unknown>) => void map.set(t.name as string, t as unknown as ToolDef) } as never, {
+      ctx: {} as never,
+      root,
+    });
+    return map;
+  }
+
+  test("invoke と scoreboard が登録される", () => {
+    const m = opsTools(tmpRoot());
+    expect(m.has("graphhopper_invoke")).toBe(true);
+    expect(m.has("graphhopper_scoreboard")).toBe(true);
+  });
+
+  test("invoke は fake binary の本文を返す", async () => {
+    const dir = tmpRoot();
+    const bin = join(dir, "fake-opencode");
+    writeFileSync(bin, "#!/bin/sh\necho 'critic says OK'\n", { mode: 0o755 });
+    const prev = process.env["GH_OPENCODE_BIN"];
+    process.env["GH_OPENCODE_BIN"] = bin;
+    try {
+      const r = (await opsTools(dir).get("graphhopper_invoke")!.execute(
+        { agent: "graphhopper-critic", prompt: "x" },
+        {},
+      )) as { content: string };
+      expect(r.content).toContain("critic says OK");
+      expect(r.content).not.toContain("[invoke:");
+    } finally {
+      if (prev === undefined) delete process.env["GH_OPENCODE_BIN"];
+      else process.env["GH_OPENCODE_BIN"] = prev;
+    }
+  });
+
+  test("invoke は signal を伝播し cancelled を末尾に付記する", async () => {
+    const dir = tmpRoot();
+    const bin = join(dir, "fake-opencode");
+    writeFileSync(bin, "#!/bin/sh\necho never\n", { mode: 0o755 });
+    const prev = process.env["GH_OPENCODE_BIN"];
+    process.env["GH_OPENCODE_BIN"] = bin;
+    try {
+      const ac = new AbortController();
+      ac.abort();
+      const r = (await opsTools(dir).get("graphhopper_invoke")!.execute(
+        { agent: "graphhopper-critic", prompt: "x" },
+        { signal: ac.signal },
+      )) as { content: string };
+      expect(r.content).toContain("[invoke:");
+      expect(r.content).toContain("cancelled");
+    } finally {
+      if (prev === undefined) delete process.env["GH_OPENCODE_BIN"];
+      else process.env["GH_OPENCODE_BIN"] = prev;
+    }
+  });
+
+  test("scoreboard は見出し3つを返す / formatScoreboard", async () => {
+    const r = (await opsTools(tmpRoot()).get("graphhopper_scoreboard")!.execute({})) as { content: string };
+    expect(r.content).toBe("## models\n## goals\n## hints");
+    expect(
+      formatScoreboard({
+        models: [{ model: "m", role: "verifier", verdicts: 2, clean: 1, drift: 1, mixed: 0 }],
+        goals: [],
+        hints: ["h"],
+      }),
+    ).toContain("- verifier m: 2件 (clean 1 / drift 1)");
   });
 });

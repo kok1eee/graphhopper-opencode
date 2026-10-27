@@ -62,6 +62,7 @@ import {
 } from "./decision";
 import * as state from "./state";
 import { invokeStructured } from "./invoke";
+import { formatScoreboard } from "./scoreboard-format";
 import { PROMPT_DEFS } from "./prompts";
 import { type TodoItem } from "./todos";
 
@@ -773,21 +774,8 @@ const TOOL_DEFS: ToolDef[] = [
     },
     run: (a, ctx) => {
       const sb = state.buildScoreboard(ctx.root);
-      const lines = [
-        "## models",
-        ...sb.models.map(
-          (m) => `- ${m.role} ${m.model}: ${m.verdicts}件 (clean ${m.clean} / drift ${m.drift}${m.mixed > 0 ? ` / mixed ${m.mixed}` : ""})`,
-        ),
-        "## goals",
-        ...sb.goals.map(
-          (g) =>
-            `- ${g.id} "${g.title}" [${g.status}] rewinds=${g.rewinds} eval=${g.evalPass}/${g.evalFail} score=${g.score ?? "-"}`,
-        ),
-        "## hints",
-        ...sb.hints.map((h) => `- ${h}`),
-      ];
       return {
-        text: lines.join("\n"),
+        text: formatScoreboard(sb),
         data: {
           models: sb.models,
           goals: sb.goals.map((g) => ({ ...g, score: g.score ?? undefined })),
