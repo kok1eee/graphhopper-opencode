@@ -6,8 +6,9 @@
  * handoff の候補列挙は known-sessions sidecar を使う (H2。session.list は v2 plugin API に無い)。
  */
 import { $ } from "bun";
-import { readGraphhopperHash, runGraphhopperEdit } from "../../../src/gate";
+import { effectivePhaseAction, goalResumeContext, readGraphhopperHash, runGraphhopperEdit } from "../../../src/gate";
 import { INTERNAL_PROMPT_METADATA_KEY } from "../../../src/entry-decide";
+import * as handoff from "../../../src/handoff";
 import { invokeStructured } from "../../../src/invoke";
 import { formatScoreboard } from "../../../src/scoreboard-format";
 import * as state from "../../../src/state";
@@ -307,86 +308,219 @@ export function registerOpsTools(
   editor.add({
     name: "graphhopper_handoff",
     description:
-      "現在の active goal の状態を要約して、別の opencode セッションへ引き継ぎとして送信する（Claude Code の cross-session messaging / SendMessage 相当）。送信後は送信側が goal から解放される（pause + unbind）。session_id 未指定ならknownセッションを列挙する（送信しない）。受け手は内容を読んで graphhopper_resume で引き継ぐ運用",
+      "goal の進捗を .graphhopper/HANDOFF.md に書き出す（action: write=既定 / load=新セッションで復元 / list=送信候補 / send=別セッションへ直接送信 / clear=削除）。write は state から機械生成し、pause+bind解除して旧セッションの自動継続を止める。新しい会話では案内が自動で出るので load を呼ぶだけで続きから再開できる（compact の代わり）",
     input: S.obj(
       {
-        session_id: S.optStr("送信先セッションID。送信時は必須。省略時は候補一覧のみ返す"),
-        note: S.optStr("送信メッセージに追記する任意の補足"),
+        action: S.enumOf(["write", "load", "list", "send", "clear"], "既定 write。session_id 指定時は send 扱い"),
+        session_id: S.optStr("send の送信先セッションID"),
+        note: S.optStr("write/send に添える任意メモ"),
+        force: { type: "boolean", description: "load で loop 恒久ブロックを明示解除する" },
       },
       [],
     ),
     execute: async (input: unknown, context: unknown) => {
-      const args = input as { session_id?: string; note?: string };
+      const args = input as { action?: string; session_id?: string; note?: string; force?: boolean };
       const sessionID = sess(gh, context as Ctx);
+      const action = args.action ?? (args.session_id ? "send" : "write");
       const active = state.getActive(root);
-      if (!active) return text("error: no active goal");
 
-      if (!args.session_id) {
+      if (action === "clear") {
+        return text(handoff.clearHandoff(root) ? "handoff メモを削除した" : "handoff メモは無い");
+      }
+
+      if (action === "list") {
         const candidates = knownSessions(root).filter((s) => s.id !== sessionID);
         if (candidates.length === 0) {
           return text(
-            "error: 候補セッションなし（このディレクトリで graphhopper_* tool を使った他セッションが無い）。known-sessions に記録されるのは tool 使用済みセッションのみ。",
+            "error: 候補セッションなし（このディレクトリで graphhopper_* tool を使った他セッションが無い）。通常は action: write でファイルに書き出し、新しい会話で action: load する。",
           );
         }
         return text(
           [
             "handoff 候補セッション（known-sessions・新しい順）:",
-            "※ 一覧には exit 済み（TUI を閉じた）セッションも含まれる。受け手が「開いている」ものへ送ること。",
+            "※ exit 済み（TUI を閉じた）セッションも含まれる。",
             "",
             ...candidates.map((s) => `- ${s.id} | seen: ${new Date(s.seen).toISOString()}`),
             "",
-            "送信するには graphhopper_handoff(session_id: '<ID>') を呼べ。送信後はこのセッションの goal が解放される（pause + unbind）。",
+            "ファイル経由なら action: write → 新しい会話で action: load。直接送るなら action: send（session_id 必須）。",
           ].join("\n"),
         );
       }
 
-      if (args.session_id === sessionID) {
-        return text("error: 自分自身への handoff は禁止（ループ防止）");
+      if (!active || active.goal.status === "done") {
+        return text("error: handoff できる goal が無い（active か paused の goal が必要）");
       }
-      let target: { parentID?: string | null } | null;
+
+      if (action === "load") {
+        const memo = handoff.readHandoff(root);
+        if (!memo) {
+          return text(
+            `error: ${handoff.handoffPath(root)} が無い。書いた側で graphhopper_handoff(action: 'write') を実行せよ`,
+          );
+        }
+        if (memo.meta.goal_id !== active.goal.id) {
+          return text(
+            [
+              `error: メモの goal (${memo.meta.goal_id}) と state の active goal (${active.goal.id}) が違う。`,
+              "メモが古い可能性がある。state を正として扱い、必要なら書き直せ（write）。",
+            ].join("\n"),
+          );
+        }
+        const liveHead = await state.captureBaselineRev($, root);
+        const drift = handoff.staleness(root, memo, { vcsHead: liveHead }).filter((i) => !i.same);
+        let resumeNote = "";
+        if (active.goal.status === "paused") {
+          const r = state.resumeGoal(root, sessionID, args.force === true);
+          if (!r) {
+            return text(
+              [
+                "error: resume が拒否された（loop 停止が上限に達している）。",
+                "内容を確認のうえ graphhopper_handoff(action: 'load', force: true) か graphhopper_goal(action: 'resume', force: true) を使え。",
+              ].join("\n"),
+            );
+          }
+          resumeNote = `resumed: "${r.goal.title}" (${r.goal.id}) / phase: ${r.state.phase}`;
+        } else if (active.state.session_id && active.state.session_id !== sessionID) {
+          /* 別セッションが実行中の goal を、このセッションが横取りしない（pending も据え置く） */
+          return text(
+            [
+              `error: goal "${active.goal.title}" (${active.goal.id}) は別セッション (${active.state.session_id}) が実行中。`,
+              "そのセッションで続けるか、こちらで引き継ぐなら graphhopper_goal(action: 'resume') で明示的に bind し直せ。",
+            ].join("\n"),
+          );
+        } else {
+          resumeNote = `already active: "${active.goal.title}" (${active.goal.id}) / phase: ${active.state.phase}`;
+        }
+        handoff.setPending(root, false);
+        const a2 = state.getActive(root);
+        return text(
+          [
+            resumeNote,
+            drift.length
+              ? `メモとのズレ（state を正とする）: ${drift.map((d) => `${d.key} memo=${d.memo || "-"} live=${d.live}`).join(" / ")}`
+              : "メモと state は一致（ズレなし）",
+            "",
+            `次のアクション: ${a2 ? effectivePhaseAction(a2.state.phase, a2.state.entry_route) : "-"}`,
+            "",
+            "続行せよ。design は designing 終了後は不変（変更は .log.md に追記）。",
+          ].join("\n"),
+        );
+      }
+
+      if (action === "send") {
+        if (!args.session_id) {
+          return text("error: send には session_id が要る。ファイル経由なら action: write → 新しい会話で load");
+        }
+        if (args.session_id === sessionID) {
+          return text("error: 自分自身への handoff は禁止（ループ防止）");
+        }
+        let target: { parentID?: string | null } | null;
+        try {
+          const got = (await gh.ctx.session.get({ sessionID: args.session_id })) as unknown as {
+            parentID?: string | null;
+          } | null;
+          target = got;
+        } catch (e) {
+          return text(`error: session get failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        if (!target) return text(`error: session ${args.session_id} not found`);
+        if (target.parentID) {
+          return text(`error: session ${args.session_id} は subagent なので handoff 先にできない`);
+        }
+        const textBody = [
+          "## graphhopper handoff",
+          "",
+          "受け取った goal を引き継いで続行せよ。",
+          "これは1回限りの handoff であり、さらに他セッションへ転送しないこと。",
+          "続行には graphhopper_goal(action: 'resume') で goal を再バインドしてから実施せよ。",
+          "",
+          goalResumeContext(root, { includeLoop: true }),
+          `- 送信元 session: ${sessionID} | state updated: ${active.state.updated_at}`,
+          args.note ? `- 補足: ${args.note}` : null,
+          "",
+          `引き継いだら「handoff received: ${active.goal.id}」と返信せよ。`,
+        ]
+          .filter(Boolean)
+          .join("\n");
+        await gh.ctx.session.prompt({
+          sessionID: args.session_id,
+          text: textBody,
+          metadata: { [INTERNAL_PROMPT_METADATA_KEY]: true },
+        });
+        state.pauseGoal(root);
+        state.unbindSession(root, sessionID);
+        return text(
+          [
+            `handoff sent to ${args.session_id}: "${active.goal.title}" (${active.goal.id})`,
+            "送信側の goal は解放された（pause + unbind）。",
+          ].join("\n"),
+        );
+      }
+
+      if (action !== "write") {
+        return text(`error: unknown action: ${action}（write/load/list/send/clear）`);
+      }
+
+      // write（既定）
+      if (active.state.session_id && active.state.session_id !== sessionID) {
+        return text(
+          [
+            `error: goal "${active.goal.title}" (${active.goal.id}) は別セッション (${active.state.session_id}) が実行中。`,
+            "そのセッションで handoff を実行するか、こちらへ引き継ぐなら graphhopper_goal(action: 'resume') で bind し直してから書け。",
+          ].join("\n"),
+        );
+      }
+      const vcsHead = await state.captureBaselineRev($, root);
+      let dirty: boolean | null = null;
       try {
-        const got = (await gh.ctx.session.get({ sessionID: args.session_id })) as unknown as {
-          parentID?: string | null;
-        } | null;
-        target = got;
-      } catch (e) {
-        return text(`error: session get failed: ${e instanceof Error ? e.message : String(e)}`);
+        const r = await $`git status --porcelain`.cwd(root).nothrow().quiet();
+        if (r.exitCode === 0) dirty = r.stdout.toString().trim().length > 0;
+      } catch {
+        dirty = null;
       }
-      if (!target) return text(`error: session ${args.session_id} not found`);
-      if (target.parentID) {
-        return text(`error: session ${args.session_id} は subagent なので handoff 先にできない`);
-      }
-
-      const { goalResumeContext } = await import("../../../src/gate");
-      const s = active.state;
-      const textBody = [
-        "## graphhopper handoff",
-        "",
-        "受け取った goal を引き継いで続行せよ。",
-        "これは1回限りの handoff であり、さらに他セッションへ転送しないこと。",
-        "続行には graphhopper_resume で goal を再バインドしてから実施せよ。",
-        "",
-        goalResumeContext(root, { includeLoop: true }),
-        `- 送信元 session: ${sessionID} | state updated: ${s.updated_at}`,
-        args.note ? `- 補足: ${args.note}` : null,
-        "",
-        `引き継いだら「handoff received: ${active.goal.id}」と返信せよ。`,
-      ]
-        .filter(Boolean)
-        .join("\n");
-
-      await gh.ctx.session.prompt({
-        sessionID: args.session_id,
-        text: textBody,
-        metadata: { [INTERNAL_PROMPT_METADATA_KEY]: true },
-      });
+      /* pause してから書く。前に書くと memo の status/updated_at が実 state と
+       * 1段ずれて、load のたびに「ズレ」と報告されてしまう */
+      const wasLoopStopped = active.state.loop_stopped;
+      /* pause 後は goalResumeContext が null になるため、先に取得して render に渡す */
+      const resumeContext = goalResumeContext(root, { includeLoop: true });
       state.pauseGoal(root);
       state.unbindSession(root, sessionID);
+      let path: string | null = null;
+      try {
+        path = handoff.writeHandoff(root, { sessionID, vcsHead, dirty, resumeContext });
+      } catch (e) {
+        /* 書き込み失敗で pause だけ残るのを防ぐ。pause の副作用（loop フラグのリセット）は
+         * 戻らないが、goal が paused のまま取り残されるよりはよい */
+        state.resumeGoal(root, sessionID, true);
+        return text(`error: handoff メモの書き込みに失敗した: ${e instanceof Error ? e.message : String(e)}（goal は resume で戻した）`);
+      }
+      if (!path) {
+        state.resumeGoal(root, sessionID, true);
+        return text("error: handoff メモの生成に失敗した（goal が無い）");
+      }
+      let ignoreNote = "";
+      try {
+        const r = await $`git check-ignore -q .graphhopper/HANDOFF.md`.cwd(root).nothrow().quiet();
+        if (r.exitCode !== 0) {
+          ignoreNote =
+            "注意: この repo では .graphhopper/HANDOFF.md が gitignore されていない（commit に乗り得る）";
+        }
+      } catch {
+        // VCS 無しは警告不要
+      }
       return text(
         [
-          `handoff sent to ${args.session_id}: "${active.goal.title}" (${active.goal.id})`,
-          "送信側の goal は解放された（pause + unbind）。受け手が graphhopper_resume で引き継ぐ。",
-        ].join("\n"),
+          `handoff メモを書いた: ${path}`,
+          `goal: "${active.goal.title}" (${active.goal.id}) / phase: ${active.state.phase}`,
+          "この goal は pause + unbind した（旧セッションの自動継続は止まる）。",
+          wasLoopStopped ? "※ loop 停止フラグは pause により解除された（意図せず解除された場合は注意）" : null,
+          ignoreNote || null,
+          args.note ? `補足: ${args.note}` : null,
+          "",
+          "新しい会話を開けば案内が出る。出ない場合は graphhopper_handoff(action: 'load') を呼ぶ。",
+        ]
+          .filter(Boolean)
+          .join("\n"),
       );
     },
   });

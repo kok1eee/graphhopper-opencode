@@ -13,6 +13,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerCoreTools } from "../.opencode/plugins/graphhopper/tools-core";
 import { registerOpsTools } from "../.opencode/plugins/graphhopper/tools-ops";
+import { readHandoff, handoffPath } from "./handoff";
+import { resumeGoal } from "./state";
 import { formatScoreboard } from "./scoreboard-format";
 import { planPath, readTodos, startGoal } from "./state";
 
@@ -191,5 +193,76 @@ describe("plugin: invoke / scoreboard（MCP一本化）", () => {
         hints: ["h"],
       }),
     ).toContain("- verifier m: 2件 (clean 1 / drift 1)");
+  });
+});
+
+describe("plugin: handoff（ファイル書き出し型）", () => {
+  function ops(root: string): Map<string, ToolDef> {
+    const map = new Map<string, ToolDef>();
+    registerOpsTools({ add: (t: Record<string, unknown>) => void map.set(t.name as string, t as unknown as ToolDef) } as never, {
+      ctx: {} as never,
+      root,
+    });
+    return map;
+  }
+  const run = async (m: Map<string, ToolDef>, input: Record<string, unknown>, sid: string) =>
+    (await m.get("graphhopper_handoff")!.execute(input, { sessionID: sid })) as { content: string };
+
+  test("write → load の往復で phase と goal が引き継がれ、ズレ報告が出ない", async () => {
+    const root = tmpRoot();
+    const g = startGoal(root, "handoff 往復", "ses_old");
+    const m = ops(root);
+    const w = await run(m, {}, "ses_old");
+    expect(w.content).toContain("handoff メモを書いた");
+    const memo = readHandoff(root);
+    expect(memo?.meta.pending).toBe(true);
+    // pause してから書くので status は paused（load 時の偽のズレを作らない）
+    expect(memo?.meta.status).toBe("paused");
+    const l = await run(m, { action: "load" }, "ses_new");
+    expect(l.content).toContain("resumed:");
+    expect(l.content).toContain("ズレなし");
+    expect(l.content).toContain(g.goal.id);
+    expect(readHandoff(root)?.meta.pending).toBe(false);
+  });
+
+  test("メモが無いときの load は error", async () => {
+    const root = tmpRoot();
+    startGoal(root, "handoff なし", "ses_a");
+    const r = await run(ops(root), { action: "load" }, "ses_b");
+    expect(r.content).toContain("error:");
+    expect(handoffPath(root)).toContain("HANDOFF.md");
+  });
+
+  test("goal が無いときの write は error", async () => {
+    const r = await run(ops(tmpRoot()), {}, "ses_a");
+    expect(r.content).toContain("error: handoff できる goal が無い");
+  });
+
+  test("別セッションが実行中の goal は write できない", async () => {
+    const root = tmpRoot();
+    startGoal(root, "bind 済み", "ses_a");
+    const r = await run(ops(root), {}, "ses_b");
+    expect(r.content).toContain("別セッション (ses_a)");
+    expect(readHandoff(root)).toBeNull();
+  });
+
+  test("別セッションが実行中の goal は load で横取りできず pending も据え置く", async () => {
+    const root = tmpRoot();
+    startGoal(root, "bind 済み load", "ses_a");
+    const m = ops(root);
+    await run(m, {}, "ses_a");
+    resumeGoal(root, "ses_a");
+    const r = await run(m, { action: "load" }, "ses_b");
+    expect(r.content).toContain("別セッション (ses_a)");
+    expect(readHandoff(root)?.meta.pending).toBe(true);
+  });
+
+  test("clear でメモが消える", async () => {
+    const root = tmpRoot();
+    startGoal(root, "handoff clear", "ses_a");
+    const m = ops(root);
+    await run(m, {}, "ses_a");
+    expect((await run(m, { action: "clear" }, "ses_a")).content).toContain("削除");
+    expect(readHandoff(root)).toBeNull();
   });
 });

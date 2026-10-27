@@ -138,15 +138,22 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
 - `集約 clean` が記録されていれば `graphhopper_phase(phase: "done")` → `graphhopper_goal(action: "complete")`
 - self-graded完了は禁止（`graphhopper_goal(complete)` は直近verifierがcleanでないとエラーを返す）
 
-## handoff（別セッションへの引き継ぎ）
+## handoff（進捗メモで新しい会話へ引き継ぐ）
 
-- 会話が大きくなった等、必要に応じて明示的に `graphhopper_handoff(session_id: "<ID>")` を呼ぶ
-  （`session_id`未指定なら候補セッション列挙のみ、送信しない）。信頼できるセッション
-  同士でのみ使う（opencodeにはClaude Codeの`crossSessionInbound`相当の受信制御が無く、
-  受け手は許可なしで自動処理するため）
-- 受け手は `graphhopper_resume` → `graphhopper_status` で引き継ぐ
+会話が長くなる前に、`graphhopper_handoff` で進捗をファイルに書き出して新しい会話へ移る。
+**compact より確実**（state から機械生成するので要約の劣化が無い）。
 
-## compact運用（handoffの代替・推奨）
+- `graphhopper_handoff()`（= `action: "write"`）: `.graphhopper/HANDOFF.md` に
+  goal・phase・次アクション・未完了タスク・レビュー結果・VCS 状態を書き出し、goal を pause + unbind する
+  （旧セッションの自動継続が止まる）。goal が無い/done ならエラー。
+- 新しい会話では plugin が「handoff メモがある」と自動で案内する。案内に従い
+  `graphhopper_handoff(action: "load")` を呼ぶと、メモの goal を検証したうえで resume し、
+  メモと state のズレ（phase・タスク・history 件数など）を報告する。**正は常に state**。
+- `action: "list"` は送信候補の列挙、`action: "send"`（`session_id` 指定）は従来の直接送信、
+  `action: "clear"` はメモ削除。`session_id` を渡した場合は send 扱い。
+- 注意: `.graphhopper/` が gitignore されていない repo では、メモが commit に乗り得る（write 時に警告が出る）。
+
+## compact運用（同一セッションを続ける場合）
 
 別セッションを作らず `/compact` で回す場合、handoffは不要。compactは同一セッションの
 圧縮でありsessionIDは維持されるため、goalのbindは継続する。復帰手順:

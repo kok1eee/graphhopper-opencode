@@ -37,6 +37,7 @@ import {
   type EntryVerdict,
 } from "../../../src/entry-decide";
 import { isFailedEvent, isInterruptedEvent, isTurnEndEvent } from "../../../src/events";
+import { readHandoff } from "../../../src/handoff";
 import * as state from "../../../src/state";
 import { isDesignDocLocked, isDesignGateBlocked } from "../../../src/state";
 import { LSPServerManager } from "../../../src/lsp/client";
@@ -66,6 +67,8 @@ let oversizeSticky = false;
 
 /* system注入節約用の記憶 (v1 と同型。再起動・compact後は消失しfull再送) */
 const seenPhaseGuides = new Set<string>();
+/** handoff 案内を評価済みのセッション（毎モデル呼び出しの I/O を避ける） */
+const handoffChecked = new Set<string>();
 const seenPonytails = new Set<string>();
 
 /* 入口d1判定: prompt hook で起動し、context hook で注入する。
@@ -265,6 +268,37 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
         } catch {
           // 判定の失敗でモデル呼び出しを止めない
         }
+      }
+    }
+    /* handoff メモの案内（design g-mvq907g4）。pending かつ write 元でない新セッションに1回だけ。
+     * 自動 load はしない（bind は人間の意思で）。subagent には出さない。 */
+    if (
+      sessionID &&
+      !handoffChecked.has(sessionID) &&
+      !(active && active.state.session_id === sessionID)
+    ) {
+      try {
+        const memo = readHandoff(root);
+        /* 別 goal のメモや完了後のメモは案内しない（load しても error になるため） */
+        const relevant =
+          memo?.meta.pending &&
+          memo.meta.status !== "done" &&
+          memo.meta.written_by !== sessionID &&
+          (!active || memo.meta.goal_id === active.goal.id);
+        if (relevant && !(await isChildSession(ctx, sessionID))) {
+          handoffChecked.add(sessionID);
+          push(
+            [
+              "## graphhopper handoff メモ",
+              "",
+              `.graphhopper/HANDOFF.md に未読の handoff メモがある（goal: "${memo.meta.goal_title}" ${memo.meta.goal_id} / phase: ${memo.meta.phase}）。`,
+              "続きから作業するなら、まずメモを Read し、`graphhopper_handoff` (action: \"load\") を呼んで goal をこのセッションに復元せよ。",
+              "別の作業をするなら無視してよい（メモは state の写像であり、state は変わらない）。",
+            ].join("\n"),
+          );
+        }
+      } catch {
+        // 案内の失敗でモデル呼び出しを止めない
       }
     }
     if (
