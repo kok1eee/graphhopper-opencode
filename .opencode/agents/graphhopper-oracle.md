@@ -83,3 +83,4 @@ permissions:
 - ファイル名・ディレクトリ探索は `fd` を使う（例: `fd --type f <name> <path>`、`fd --max-depth 2 --type d <name>`）。単純なパターン一致は Glob ツールでも可。`find` は使わない
 - `.opencode/` 配下（plugin wiring・agent宣言）は graft の索引対象外（dot-dirは不可）かつ `rg`/`fd` の既定でも不可視（hidden）。探すときは `rg --hidden`/Glob で明示する。graft-first の裏付けに rg を使う際も `--hidden` を忘れると plugin 側の参照を見落とす
 - Read で全文取得した直後に同じファイルへ Grep しない（全文が手元にある）
+- shell は許可リストのコマンド（rg/fd/cat/head/tail/ls/git diff/jj diff 等）を1つずつ単体で打つ。`cd x;`・`;`/`&&` での連結・plain grep を含むと全体が拒否される。ファイルは絶対パスで指定し、読むだけなら Read/Grep/Glob ツールを使う

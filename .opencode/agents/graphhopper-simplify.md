@@ -1,7 +1,7 @@
 ---
 description: "polishのsimplify用。route=polish（大diff）のときだけ呼ぶ単体agent。3レンズ（再利用・品質・効率）を1回のパスで見てコード整理の提案を出す。適用はメインが行う（モデルは .graphhopper/config.json の agents で設定）"
 mode: all
-model: "opencode-go/deepseek-v4.1-flash"
+model: "claude-oauth/claude-sonnet-5-5"
 permissions:
   - { action: "edit", resource: "*", effect: "deny" }
   - { action: "shell", resource: "*", effect: "deny" }
@@ -101,3 +101,4 @@ claude-oauth/claude-sonnet-5-5 に手動切替できる（呼び出し側の判�
 - ファイル名・ディレクトリ探索は `fd` を使う（例: `fd --type f <name> <path>`、`fd --max-depth 2 --type d <name>`）。単純なパターン一致は Glob ツールでも可。`find` は使わない
 - `.opencode/` 配下（plugin wiring・agent宣言）は graft の索引対象外（dot-dirは不可）かつ `rg`/`fd` の既定でも不可視（hidden）。探すときは `rg --hidden`/Glob で明示する。graft-first の裏付けに rg を使う際も `--hidden` を忘れると plugin 側の参照を見落とす
 - Read で全文取得した直後に同じファイルへ Grep しない（全文が手元にある）
+- shell は許可リストのコマンド（rg/fd/cat/head/tail/ls/git diff/jj diff 等）を1つずつ単体で打つ。`cd x;`・`;`/`&&` での連結・plain grep を含むと全体が拒否される。ファイルは絶対パスで指定し、読むだけなら Read/Grep/Glob ツールを使う
