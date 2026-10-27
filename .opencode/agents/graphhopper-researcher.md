@@ -1,7 +1,7 @@
 ---
 description: "コードベース事実収集エージェント（graft-first）。ファイル検索・構造把握・呼び出し関係の特定。高頻度に呼ばれるためコストティア最下層で使う（モデルは .graphhopper/config.json の agents で設定）。外部公式ドキュメント調査は graphhopper-librarian に委ねる"
 mode: all
-model: "opencode-go/beam-free"
+model: "claude-oauth/claude-haiku-5-5"
 permissions:
   - { action: "edit", resource: "*", effect: "deny" }
   - { action: "shell", resource: "*", effect: "deny" }
