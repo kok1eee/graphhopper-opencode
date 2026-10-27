@@ -1630,11 +1630,12 @@ const TOOL_DEFS: ToolDef[] = [
     outputSchema: {
       type: "object",
       properties: {
+        output: { type: "string", description: "子の返答本文（stdout）" },
         timedOut: { type: "boolean" },
         fallbackWarning: { type: "boolean" },
         cancelled: { type: "boolean" },
       },
-      required: ["timedOut", "fallbackWarning", "cancelled"],
+      required: ["output", "timedOut", "fallbackWarning", "cancelled"],
     },
     run: async (a, ctx) => {
       const r = await invokeStructured(
@@ -1669,7 +1670,8 @@ const TOOL_DEFS: ToolDef[] = [
       );
       return {
         text: r.output,
-        data: { timedOut: r.timedOut, fallbackWarning: r.fallbackWarning, cancelled: r.cancelled },
+        /* Code Mode 等の client は structuredContent があると content を捨てるため、本文も入れる */
+        data: { output: r.output, timedOut: r.timedOut, fallbackWarning: r.fallbackWarning, cancelled: r.cancelled },
       };
     },
   },

@@ -1063,3 +1063,27 @@ describe("graphhopper-mcp route系tool（統合）", () => {
     await client3.close();
   });
 });
+
+describe("graphhopper_invoke structuredContent", () => {
+  test("本文(output)が structuredContent にも入る（Code Mode は content を捨てるため）", async () => {
+    const dir = freshRoot();
+    const bin = join(dir, "fake-opencode");
+    writeFileSync(bin, "#!/bin/sh\necho 'critic says OK'\n", { mode: 0o755 });
+    const prev = process.env["GH_OPENCODE_BIN"];
+    process.env["GH_OPENCODE_BIN"] = bin;
+    try {
+      const client = await linked();
+      const r = await client.callTool({
+        name: "graphhopper_invoke",
+        arguments: { agent: "graphhopper-critic", prompt: "x", root: dir },
+      });
+      const sc = r.structuredContent as { output?: string; timedOut?: boolean };
+      expect(sc.output).toContain("critic says OK");
+      expect(sc.timedOut).toBe(false);
+      await client.close();
+    } finally {
+      if (prev === undefined) delete process.env["GH_OPENCODE_BIN"];
+      else process.env["GH_OPENCODE_BIN"] = prev;
+    }
+  });
+});
