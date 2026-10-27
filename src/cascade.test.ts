@@ -13,6 +13,7 @@ import {
   parseCascadeModel,
   resolveChildModel,
   resolveLevel,
+  resolveTargetModel,
   shouldFlushOrphan,
   shouldSwitchChild,
   applyCascade,
@@ -366,5 +367,44 @@ describe("escalateChildSession", () => {
       target: "claude-oauth/claude-sonnet-5-5",
     });
     expect(r?.readback_match).toBe(false);
+  });
+});
+
+describe("resolveTargetModel（phase 連動）", () => {
+  const withPhase: CascadeConfig = {
+    ...config,
+    phase_models: { designing: "claude-oauth/claude-opus-5-5", polish: "bad" },
+  };
+
+  test("phase 指定が level より優先される", () => {
+    const r = resolveTargetModel({ phase: "designing", level: "baseline", config: withPhase });
+    expect(r.source).toBe("phase");
+    expect(r.ref?.id).toBe("claude-opus-5-5");
+  });
+
+  test("指定が無い phase は level のモデル", () => {
+    const r = resolveTargetModel({ phase: "implementing", level: "escalated", config: withPhase });
+    expect(r.source).toBe("level");
+    expect(r.ref?.id).toBe("claude-sonnet-5-5");
+  });
+
+  test("不正な phase 指定は level にフォールバック", () => {
+    const r = resolveTargetModel({ phase: "polish", level: "baseline", config: withPhase });
+    expect(r.source).toBe("level");
+    expect(r.ref?.providerID).toBe("minimax");
+  });
+
+  test("applyCascade は phase 指定のモデルへ切り替える", async () => {
+    const { host, calls } = fakeHost();
+    const next = await applyCascade(host, {
+      sessionID: "s",
+      level: "baseline",
+      reason: "r",
+      config: withPhase,
+      previous: null,
+      phase: "designing",
+    });
+    expect(calls.switched[0]?.id).toBe("claude-opus-5-5");
+    expect(next?.model).toBe("claude-oauth/claude-opus-5-5");
   });
 });

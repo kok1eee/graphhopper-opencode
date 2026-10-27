@@ -710,6 +710,18 @@ describe("config 2層解決（グローバル既定 → プロジェクト上書
     );
   }
 
+  test("cascade.phase_models は global と project をキー単位でマージし、空文字は捨てる", () => {
+    withGlobal(
+      { cascade: { phase_models: { designing: "g/opus", polish: "g/sonnet" } } },
+      () => {
+        const root = tmpRoot();
+        withProject(root, { cascade: { enabled: true, phase_models: { polish: "p/x", implementing: " " } } });
+        const pm = readConfig(root).cascade.phase_models;
+        expect(pm).toEqual({ designing: "g/opus", polish: "p/x" });
+      },
+    );
+  });
+
   test("プロジェクト設定が無ければグローバル既定が効く", () => {
     withGlobal({ agents: { "graphhopper-verifier": "zai/glm" }, stuck_threshold: 9 }, () => {
       const cfg = readConfig(tmpRoot());

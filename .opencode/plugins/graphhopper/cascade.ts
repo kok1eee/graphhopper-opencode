@@ -16,6 +16,7 @@ import {
   formatModel,
   parseCascadeModel,
   resolveLevel,
+  resolveTargetModel,
   shouldFlushOrphan,
 } from "../../../src/cascade";
 import * as state from "../../../src/state";
@@ -66,10 +67,11 @@ export async function syncCascade(gh: Gh): Promise<string | null> {
     config: config.cascade,
   });
 
-  const target = level === "escalated" ? config.cascade.escalate : config.cascade.baseline;
-  const targetRef = parseCascadeModel(target);
+  const phase = active.state.phase;
+  const resolved = resolveTargetModel({ phase, level, config: config.cascade });
+  const targetRef = resolved.ref;
   if (!targetRef) {
-    return `cascade: モデル指定が不正（${target}）— このgoalでは切替しない`;
+    return `cascade: モデル指定が不正（${resolved.raw}）— このgoalでは切替しない`;
   }
   const targetKey = formatModel(targetRef);
   const current = active.state.cascade;
@@ -84,8 +86,19 @@ export async function syncCascade(gh: Gh): Promise<string | null> {
     reason,
     config: config.cascade,
     previous: current,
+    phase,
   });
   if (!next) return "cascade: モデル不明のため切替せず";
+  const fromModel =
+    current?.model ?? (next.restore ? `${next.restore.providerID}/${next.restore.id}` : "(不明)");
+  state.recordEvent(gh.root, {
+    type: "cascade_switch",
+    goal: active.goal.id,
+    from: fromModel,
+    to: next.model ?? targetKey ?? "(不明)",
+    phase,
+    reason: `${resolved.source === "phase" ? `phase ${phase}` : reason}`,
+  });
   // await 中に detached な子セッション記録が追記され得るため、現在値を読み直してマージする
   const latest = state.readState(gh.root).cascade?.children ?? [];
   state.setCascade(gh.root, { ...next, children: mergeChildren(next.children, latest) });

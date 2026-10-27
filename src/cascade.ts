@@ -81,6 +81,22 @@ export function resolveLevel(input: {
 }
 
 /**
+ * 切替先モデルの決定。phase_models[phase] が有効ならそれを優先し、
+ * 無い・不正なら level のモデル（baseline / escalated）へフォールバックする。
+ */
+export function resolveTargetModel(input: {
+  phase?: string | null;
+  level: CascadeLevel;
+  config: CascadeConfig;
+}): { ref: ModelRef | null; raw: string; source: "phase" | "level" } {
+  const phaseRaw = input.phase ? input.config.phase_models?.[input.phase] : undefined;
+  const phaseRef = parseCascadeModel(phaseRaw);
+  if (phaseRaw && phaseRef) return { ref: phaseRef, raw: phaseRaw, source: "phase" };
+  const raw = input.level === "escalated" ? input.config.escalate : input.config.baseline;
+  return { ref: parseCascadeModel(raw), raw, source: "level" };
+}
+
+/**
  * レベルの適用。restore（goal開始前のモデル）は previous から引き継ぎ、
  * 無ければ現在のモデルを保存する。モデルが取れない場合は何もせず null を返す。
  */
@@ -92,11 +108,14 @@ export async function applyCascade(
     reason: string;
     config: CascadeConfig;
     previous: CascadeState | null;
+    phase?: string | null;
   },
 ): Promise<CascadeState | null> {
-  const target = parseCascadeModel(
-    input.level === "escalated" ? input.config.escalate : input.config.baseline,
-  );
+  const target = resolveTargetModel({
+    phase: input.phase,
+    level: input.level,
+    config: input.config,
+  }).ref;
   if (!target) return null;
 
   const restore = input.previous?.restore ?? (await host.getModel(input.sessionID));

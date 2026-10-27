@@ -222,7 +222,10 @@ export function registerCoreTools(
       if (!mv.ok) return text(`error: ${mv.error ?? "遷移に失敗"}`);
       const a = mv.active;
       if (!a) return text("error: no active goal or invalid phase");
-      return text(`phase -> ${a.state.phase}\n次: ${effectivePhaseAction(a.state.phase, a.state.entry_route)}`);
+      const cascadeNote = await syncCascade(gh);
+      return text(
+        `phase -> ${a.state.phase}${cascadeNote ? `\n${cascadeNote}` : ""}\n次: ${effectivePhaseAction(a.state.phase, a.state.entry_route)}`,
+      );
     },
   });
 

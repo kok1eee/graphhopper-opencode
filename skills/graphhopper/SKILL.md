@@ -174,3 +174,9 @@ compaction時はd1 keep-listが自動注入される（要約落ち防止の制�
 
 > 詳細は [refs/gotchas.md](refs/gotchas.md) を読め（該当時に参照）
 
+
+## phase 連動のモデル切替
+
+`cascade.phase_models`（例: `{"designing":"claude-oauth/claude-opus-5-5","polish":"claude-oauth/claude-sonnet-5-5"}`）を置くと、
+`graphhopper_phase` で phase が変わるたびにメインのモデルを切り替え、`history.jsonl` に `cascade_switch` を記録する。
+未指定の phase は従来の baseline/escalated。implementing には置かない（fail 昇格を殺さないため）。

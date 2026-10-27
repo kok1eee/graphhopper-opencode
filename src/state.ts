@@ -310,6 +310,9 @@ export interface CascadeConfig {
   escalate_on: Difficulty[];
   /** 連続失敗がこの数に達したら難易度に関係なく昇格（0以下で無効） */
   fail_threshold: number;
+  /** phase ごとのメインモデル（level より優先）。例: designing=Opus。
+   * implementing には置かない運用を推奨（fail 昇格を殺さないため） */
+  phase_models?: { [phase: string]: string };
   /** 常に昇格モデルで回す判定用 agent（goal の段には依存しない） */
   agents: {
     /** always: 段に関係なく切替 / escalated: メインが escalated のときだけ切替 */
@@ -751,6 +754,7 @@ export type HistoryEvent =
   | { type: "goal_start"; goal: string; title: string }
   | { type: "goal_pause"; goal: string }
   | { type: "goal_resume"; goal: string }
+  | { type: "cascade_switch"; goal: string; from: string; to: string; phase: Phase; reason: string }
   | { type: "goal_complete"; goal: string; score?: number | null }
   | { type: "phase"; goal: string; from: Phase; to: Phase; notes?: string }
   | {
@@ -999,6 +1003,12 @@ export function readConfig(root: string): GraphhopperConfig {
     cascade: {
       ...DEFAULT_CONFIG.cascade,
       ...(raw.cascade ?? {}),
+      phase_models: Object.fromEntries(
+        Object.entries({
+          ...(global.cascade?.phase_models ?? {}),
+          ...(project.cascade?.phase_models ?? {}),
+        }).filter(([, v]) => typeof v === "string" && v.trim()),
+      ),
       agents: {
         apply:
           (project.cascade?.agents?.apply ?? global.cascade?.agents?.apply) === "escalated"
