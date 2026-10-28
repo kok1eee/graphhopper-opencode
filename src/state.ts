@@ -110,7 +110,7 @@ export interface GoalScore {
 export type VerdictLevel = "clean" | "drift";
 /** drift 巻き戻し先。implementing 以外は人間の hand-back 待ち（flywheelのmonitor相当） */
 export type DriftTarget = "implementing" | "design" | "requirements";
-/** general: route=advisor の単発呼び出し（3レンズを1つにまとめた統合charter） */
+/** general: route=advisor の単発呼び出し（3レンズを1つにまとめた統合lens） */
 export type VerifierLens = "requirement" | "behavior" | "progress" | "general";
 
 /* 入口トリアージのroute。null＝full（未呼び出し・legacyの機械定義）。
@@ -2358,7 +2358,7 @@ export function checkVerifierResults(
   opts?: { entryRoute?: EntryRoute | null; escalated?: boolean },
 ): string | null {
   if (!Array.isArray(results) || results.length === 0) {
-    return "error: results が空です。graphhopper_verifier_set は task(subagent_type: 'graphhopper-verifier') を実際に呼んだ後にしか記録できません（self-graded完了を防ぐための機械的ゲート）。route=advisorでも最低1回、'general'charterで呼んでください。";
+    return "error: results が空です。graphhopper_verifier_set は task(subagent_type: 'graphhopper-verifier') を実際に呼んだ後にしか記録できません（self-graded完了を防ぐための機械的ゲート）。route=advisorでも最低1回、'general' lens で呼んでください。";
   }
   const known: VerifierLens[] = [
     "requirement",

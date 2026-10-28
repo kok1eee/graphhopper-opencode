@@ -535,8 +535,8 @@ async function routerCheck(root: string): Promise<ToolOut> {
         ? `deep: ${recorded.router.deep_reason} — behavior lens（polish時）／general lens（advisor時）は休止中（verifier既定モデルの上書きは不要。詳細はSKILL refs/verifier.md）`
         : null,
       route === "polish"
-        ? "次: task(subagent_type: 'graphhopper-verifier') をrequirement/behavior/progressの3charterで呼び、graphhopper_verifier_setで記録する"
-        : "次: task(subagent_type: 'graphhopper-verifier') を1回、'general'charter（3観点を統合したレビュー）で呼び、graphhopper_verifier_set(results: [{lens: 'general', level}])で記録する（自己レビューだけでの完了は不可）",
+        ? "次: task(subagent_type: 'graphhopper-verifier') をrequirement/behavior/progressの3lensで呼び、graphhopper_verifier_setで記録する"
+        : "次: task(subagent_type: 'graphhopper-verifier') を1回、'general' lens（3観点を統合したレビュー）で呼び、graphhopper_verifier_set(results: [{lens: 'general', level}])で記録する（自己レビューだけでの完了は不可）",
     ]
       .filter(Boolean)
       .join("\n"),
@@ -966,7 +966,7 @@ const TOOL_DEFS: ToolDef[] = [
   {
     name: "graphhopper_router_check",
     description:
-      "diffサイズを機械測定してrouteを決める（advisor=小diff・verifier1回 / polish=大diff・3charter fan-out）",
+      "diffサイズを機械測定してrouteを決める（advisor=小diff・verifier1回 / polish=大diff・3lens fan-out）",
     inputSchema: { type: "object", properties: { root: ROOT_PROP } },
     schema: z.object({ root: rootZ }),
     outputSchema: {
@@ -1205,7 +1205,7 @@ const TOOL_DEFS: ToolDef[] = [
   {
     name: "graphhopper_verifier_set",
     description:
-      "polish/advisorのverifier結果を記録する。results空（verifier未実行）はエラー",
+      'polish/advisorのverifier結果を記録する。results空（verifier未実行）はエラー。呼び出し例: {"results":[{"lens":"general","level":"clean"}],"reason":"要約1〜3文"}（キーは results[].lens / results[].level / results[].target / reason / model のみ。charter・verdict・note は無い）',
     inputSchema: {
       type: "object",
       properties: {
@@ -1380,7 +1380,7 @@ const TOOL_DEFS: ToolDef[] = [
       return {
         text: [
           `discover started: target="${s.target}" scope="${s.scope}"`,
-          "次: 3charterで探索し、結果を graphhopper_discover_tick に渡す。stopped_reasonがnullの間、繰り返す。",
+          "次: 3lensで探索し、結果を graphhopper_discover_tick に渡す。stopped_reasonがnullの間、繰り返す。",
         ].join("\n"),
         data: { target: s.target, scope: s.scope, round: s.round },
       };
@@ -1609,7 +1609,7 @@ const TOOL_DEFS: ToolDef[] = [
       properties: {
         agent: { type: "string", description: "graphhopper-* agent名（例: graphhopper-critic）" },
         model: { type: "string", description: "provider/model形式。省略時はconfig既定" },
-        prompt: { type: "string", description: "charter＋渡し物全文（12000文字まで）" },
+        prompt: { type: "string", description: "lens指示＋渡し物全文（12000文字まで）" },
         timeoutMs: { type: "number", description: "タイムアウトms（既定120000・上限300000）" },
         delayMs: { type: "number", description: "起動前の待機ms（並列herd回避用。既定0・上限60000）" },
         root: ROOT_PROP,

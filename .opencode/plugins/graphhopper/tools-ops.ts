@@ -32,7 +32,7 @@ export function registerOpsTools(
   editor.add({
     name: "graphhopper_router_check",
     description:
-      "diffサイズを機械測定してrouteを決める。route=advisor（小diff・graphhopper-verifierを1回だけ呼ぶ）/ route=polish（大diff・3charterでverifier fan-out）。implementing完了時、polishフェーズに入る前に呼ぶ。self-graded完了防止のため、advisorでも第三者チェック（verifier呼び出し）は省略できない",
+      "diffサイズを機械測定してrouteを決める。route=advisor（小diff・graphhopper-verifierを1回だけ呼ぶ）/ route=polish（大diff・3lensでverifier fan-out）。implementing完了時、polishフェーズに入る前に呼ぶ。self-graded完了防止のため、advisorでも第三者チェック（verifier呼び出し）は省略できない",
     input: S.obj({}, []),
     execute: async () => {
       const active = state.getActive(root);
@@ -66,8 +66,8 @@ export function registerOpsTools(
             ? `deep: ${recorded.router.deep_reason} — behavior lens（polish時）／general lens（advisor時）は休止中（verifier既定モデルの上書きは不要。詳細はSKILL refs/verifier.md）`
             : null,
           route === "polish"
-            ? "次: task(subagent_type: 'graphhopper-verifier') をrequirement/behavior/progressの3charterで呼び、graphhopper_verifier_setで記録する"
-            : "次: task(subagent_type: 'graphhopper-verifier') を1回、'general'charter（3観点を統合したレビュー）で呼び、graphhopper_verifier_set(results: [{lens: 'general', level}], reason: '要約1〜3文')で記録する（reason必須。自己レビューだけでの完了は不可）",
+            ? "次: task(subagent_type: 'graphhopper-verifier') をrequirement/behavior/progressの3lensで呼び、graphhopper_verifier_setで記録する"
+            : "次: task(subagent_type: 'graphhopper-verifier') を1回、'general' lens（3観点を統合したレビュー）で呼び、graphhopper_verifier_set(results: [{lens: 'general', level}], reason: '要約1〜3文')で記録する（reason必須。自己レビューだけでの完了は不可）",
         ]
           .filter(Boolean)
           .join("\n"),
@@ -98,7 +98,7 @@ export function registerOpsTools(
   editor.add({
     name: "graphhopper_verifier_set",
     description:
-      "polish/advisorのverifier結果を記録する。各charterの結果をresultsに詰めるとlevel/targetは機械集約される（drift かつ target=implementing なら implementing に巻き戻し可能。target=design/requirementsは人間のhand-back待ち）。self-graded完了防止のため、resultsが空（=task(graphhopper-verifier)を一度も呼んでいない）場合はエラーになる",
+      'polish/advisorのverifier結果を記録する。各lensの結果をresultsに詰めるとlevel/targetは機械集約される（drift かつ target=implementing なら implementing に巻き戻し可能。target=design/requirementsは人間のhand-back待ち）。self-graded完了防止のため、resultsが空（=task(graphhopper-verifier)を一度も呼んでいない）場合はエラーになる。呼び出し例: {"results":[{"lens":"general","level":"clean"}],"reason":"要約1〜3文"}（キーは results[].lens / results[].level / results[].target / reason / model のみ。charter・verdict・note というキーは無い）',
     input: S.obj(
       {
         results: S.arrOf(
@@ -111,7 +111,7 @@ export function registerOpsTools(
             },
             ["lens", "level"],
           ),
-          "実際にtask(graphhopper-verifier)を呼んで得た各charterの結果。route=advisorならgeneral 1件、route=polishならrequirement/behavior/progressの3件。level/targetの最終決定は機械集約（state.aggregateVerdicts）で行う",
+          "実際にtask(graphhopper-verifier)を呼んで得た各lensの結果。route=advisorならgeneral 1件、route=polishならrequirement/behavior/progressの3件。level/targetの最終決定は機械集約（state.aggregateVerdicts）で行う",
         ),
         reason: S.str("集約結果の要約（1〜3文。監査証跡のため必須）。採用基準自体は機械集約される"),
         model: S.optStr("判定を実行したモデル（例: x/provider-model。省略時はconfig既定で補完。成績表の帰属に使う）"),
@@ -250,7 +250,7 @@ export function registerOpsTools(
       return text(
         [
           `discover started: target="${s.target}" scope="${s.scope}"`,
-          "次: task(subagent_type: 'graphhopper-researcher') を broad-scan/semantic-read/edge-case の3charterで並列に呼び、",
+          "次: task(subagent_type: 'graphhopper-researcher') を broad-scan/semantic-read/edge-case の3lensで並列に呼び、",
           "結果を graphhopper_discover_tick に渡す。stopped_reasonがnullの間、繰り返す。",
         ].join("\n"),
       );
@@ -628,7 +628,7 @@ export function registerOpsTools(
       {
         agent: S.str("graphhopper-* agent名（例: graphhopper-critic）"),
         model: S.optStr("provider/model形式。省略時はconfig既定"),
-        prompt: S.str("charter＋渡し物全文（12000文字まで）"),
+        prompt: S.str("lens指示＋渡し物全文（12000文字まで）"),
         timeoutMs: S.num("タイムアウトms（既定120000・上限300000）"),
         delayMs: S.num("起動前の待機ms（並列herd回避用。既定0・上限60000）"),
       },

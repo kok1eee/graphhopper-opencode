@@ -16,7 +16,7 @@ polish前にlens編成の助言が欲しい場合のみ使う（現行routerは�
 自己レビューだけでのclean記録は不可能。level/targetの最終決定は機械集約される）:
 
 - **route=advisor**（小diff）: `task(subagent_type: "graphhopper-verifier")` を**1回だけ**、
-  `general`charterで呼ぶ。「実装がdesign.mdの意図から外れていないか・テストが実際のユーザーパスを
+  `general` lens で呼ぶ。「実装がdesign.mdの意図から外れていないか・テストが実際のユーザーパスを
   検証しているか・変更がgoalに収束しているか、3観点をまとめてレビューせよ」と渡す。
   診断はメインが事前に1回実行し `.graphhopper/tmp/diag-<goal>.txt` に保存してpathを渡す
   （verifierの個別実行はbash denyで禁止。inline添付は3重トークン再発のため禁止）。
@@ -30,7 +30,7 @@ polish前にlens編成の助言が欲しい場合のみ使う（現行routerは�
    結果を `graphhopper_verifier_set(results: [{lens: "general", level}], reason: ...)` で記録
    （実行モデルがconfig既定と違う場合は `model` に明示。成績表の帰属に使う）
 - **route=polish**（大diff・閾値超）: adversarial verifier fan-out を行う
-  1. `task(subagent_type: "graphhopper-verifier")` を3回呼ぶ。それぞれ以下のcharterをプロンプトに含める:
+  1. `task(subagent_type: "graphhopper-verifier")` を3回呼ぶ。それぞれ以下の lens 指示をプロンプトに含める:
      - requirement: 「実装がdesign.mdの意図から外れていないか（実装漏れ・解釈ズレ・スコープ逸脱）を検証せよ」
      - behavior: 「テストが実際のユーザーパスを検証しているか（モック過多・ハッピーパスのみ・エラー握り潰し）を疑え」
      - progress: 「変更がgoalに収束しているか（堂々巡り・残骸・goal無関係な混入）を見よ。未完了タスクが残っていないか、cancelled の理由が妥当かも見よ」
@@ -38,10 +38,10 @@ polish前にlens編成の助言が欲しい場合のみ使う（現行routerは�
      goalId は `.graphhopper/state.json` の `goal_id`、または `.graphhopper/todos/` 配下の唯一のファイル名から解決せよ。
      埋め込みは **MCP prompt 経路**（graphhopper-verifier-progress / -general がタスク一覧を直接埋め込む）。
      **plugin 経路**（task 直呼び）は一覧を埋め込まず、verifier agent の preamble が
-     「progress lens / general charter では必ずこのストアを読む」と指示するので、
+     「progress / general lens では必ずこのストアを読む」と指示するので、
      lens 自身が `.graphhopper/todos/<goalId>.json` を読む。
      時間短縮のため3体は**並列**に投げてよい（MCP駆動では graphhopper_invoke を3連並列。入れ子のみ禁止）。
-     charter定型文は MCP prompts（graphhopper-verifier-requirement/behavior/progress）にもある。
+     lens 指示文は MCP prompts（graphhopper-verifier-requirement/behavior/progress）にもある。
      並列時の注意: 各invokeは独立 `opencode run`（自前server＋MCP付きの重い処理）のため、
      同一モデル3連はprovider側rate limitのリトライ待ちになり得る。気になる場合は
      `delayMs` で数秒ずつ起動をずらす。実行中はheartbeatログが出る。キャンセルは子に
@@ -82,9 +82,9 @@ polish前にlens編成の助言が欲しい場合のみ使う（現行routerは�
       読むのは `goal` / `.graphhopper/plans/<goal-id>.md` の内容 / 退避diffの差分範囲＋疑義点のみ。
       周辺探索はgraft-first（漁り読み禁止）。診断はメインが事前に1回実行し
       `.graphhopper/tmp/diag-<goal>.txt` に保存してpathを渡す（verifier個別実行は禁止）。
-      behavior charterでは添付診断を証拠に使う
+      behavior lens では添付診断を証拠に使う
   3. drift（乖離）を検出したら**全件報告させる**（閾値カットしない。「重大なものだけ報告」のような保守的指示は書かない——過少報告を招く）
-  4. 3体の結果（各charterの level。drift には target 必須）を `results` に詰め、
+  4. 3体の結果（各lens の `level`。drift には `target` 必須）を `results` に詰め、
      `graphhopper_verifier_set(results: [...], reason: ...)` で1回記録する。
      level/target の最終決定は機械集約（いずれか drift → drift、target は
      implementing 優先）であり、メインの裁量で「重大なものだけ採用」といった

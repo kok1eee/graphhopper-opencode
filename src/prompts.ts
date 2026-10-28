@@ -1,8 +1,8 @@
 /**
- * prompts — graphhopper reviewer/調査役の charter 定型文（MCP prompts）。
+ * prompts — graphhopper reviewer/調査役の lens 指示文（MCP prompts）。
  *
  * 背景: API 経由セッションの task には opencode 側 subagent が配膳されず、
- * charter は応答文・SKILL.md に散っていた。MCP prompts として公開すれば
+ * 指示文は応答文・SKILL.md に散っていた。MCP prompts として公開すれば
  * どの client でも同品質の指示で回せて、graphhopper_invoke と組で loop が閉じる。
  * TUI 側の task(subagent_type: ...) 運用とは文面を合わせる（両対応）。
  */
@@ -23,7 +23,7 @@ export const VERSION_GUARD_RULE = [
 export const PARALLEL_NOTE =
   "3 lens は graphhopper_invoke で並列に投げてよい（invoke は多重起動可・入れ子のみ禁止）。結果を集めて graphhopper_verifier_set に記録する。";
 
-/* verifier調査効率則（graft-first＋診断添付）。4 charter共通。
+/* verifier調査効率則（graft-first＋診断添付）。4 lens共通。
  * SKILL.md polish節・agents.ts verifier promptと一対で維持すること */
 export const VERIFIER_EFFICIENCY_RULE = [
   "調査効率則: 周辺コード探索は graft MCP / ast-grep / rg を優先し、ファイル横断の漁り読みをしない。",
@@ -62,7 +62,7 @@ function readDesignDoc(root: string, goalId: string): string {
 }
 
 /**
- * 進捗タスク一覧（charter に渡す）。
+ * 進捗タスク一覧（lens に渡す）。
  * design.md は planning 終端で immutable なので進捗の source of truth は
  * .graphhopper/todos/<goalId>.json のほう。タスク 0 件なら空文字を返す。
  * ストアを読めなかった場合は空文字ではなく「読めなかった」を明示する
@@ -136,7 +136,7 @@ export const PROMPT_DEFS: PromptDef[] = [
   {
     name: "graphhopper-critic",
     description:
-      "design.md の敵対レビュー用 charter（designing→implementing 遷移前に1回）。design doc を埋め込んで返す",
+      "design.md の敵対レビュー用の指示文（designing→implementing 遷移前に1回）。design doc を埋め込んで返す",
     arguments: [
       { name: "root", description: "対象プロジェクト（省略時は client roots→cwd）" },
       { name: "goalId", description: "対象 goal（省略時は active）" },
@@ -160,7 +160,7 @@ export const PROMPT_DEFS: PromptDef[] = [
   },
   {
     name: "graphhopper-verifier-requirement",
-    description: "polish verifier の requirement lens charter（done の定義に直結）",
+    description: "polish verifier の requirement lens 用指示文（done の定義に直結）",
     arguments: [
       { name: "root", description: "対象プロジェクト（省略時は client roots→cwd）" },
       { name: "goalId", description: "対象 goal（省略時は active）" },
@@ -183,7 +183,7 @@ export const PROMPT_DEFS: PromptDef[] = [
   },
   {
     name: "graphhopper-verifier-behavior",
-    description: "polish verifier の behavior lens charter（挙動の正しさ）",
+    description: "polish verifier の behavior lens 用指示文（挙動の正しさ）",
     arguments: [
       { name: "root", description: "対象プロジェクト（省略時は client roots→cwd）" },
       { name: "goalId", description: "対象 goal（省略時は active）" },
@@ -206,7 +206,7 @@ export const PROMPT_DEFS: PromptDef[] = [
   },
   {
     name: "graphhopper-verifier-progress",
-    description: "polish verifier の progress lens charter（goal への収束）",
+    description: "polish verifier の progress lens 用指示文（goal への収束）",
     arguments: [
       { name: "root", description: "対象プロジェクト（省略時は client roots→cwd）" },
       { name: "goalId", description: "対象 goal（省略時は active）" },
@@ -229,7 +229,7 @@ export const PROMPT_DEFS: PromptDef[] = [
   },
   {
     name: "graphhopper-verifier-general",
-    description: "advisor route 用の統合 verifier charter（3観点を1回で）",
+    description: "advisor route 用の統合 verifier 指示文（3観点を1回で）",
     arguments: [
       { name: "root", description: "対象プロジェクト（省略時は client roots→cwd）" },
       { name: "goalId", description: "対象 goal（省略時は active）" },
@@ -238,7 +238,7 @@ export const PROMPT_DEFS: PromptDef[] = [
       const id = activeGoalId(root, args["goalId"]);
       const todos = todoSection(root, id);
       return [
-        "あなたは graphhopper の verifier（general charter）である。",
+        "あなたは graphhopper の verifier（general lens）である。",
         "「実装が design.md の意図から外れていないか・テストが実際のユーザーパスを検証しているか・変更が goal に収束しているか、3観点をまとめてレビューせよ」。",
         VERIFIER_EFFICIENCY_RULE,
         "findingsには証拠状態を必ず付ける: 裏付けあり / 証拠不足 / 診断未実行 / 実行失敗。",
@@ -252,7 +252,7 @@ export const PROMPT_DEFS: PromptDef[] = [
   },
   {
     name: "graphhopper-oracle",
-    description: "手詰まり時の相談役 charter。直近の失敗記録を埋め込んで返す",
+    description: "手詰まり時の相談役の指示文。直近の失敗記録を埋め込んで返す",
     arguments: [
       { name: "root", description: "対象プロジェクト（省略時は client roots→cwd）" },
       { name: "goalId", description: "対象 goal（省略時は active）" },
@@ -273,7 +273,7 @@ export const PROMPT_DEFS: PromptDef[] = [
   },
   {
     name: "graphhopper-researcher",
-    description: "repo内事実収集の調査 charter（graft-first・判断なし）",
+    description: "repo内事実収集の調査指示（graft-first・判断なし）",
     arguments: [
       { name: "root", description: "対象プロジェクト（省略時は client roots→cwd）" },
       { name: "query", description: "調査クエリ", required: true },
@@ -295,7 +295,7 @@ export const PROMPT_DEFS: PromptDef[] = [
   },
   {
     name: "graphhopper-librarian",
-    description: "repo外公式doc調査 charter（URL・引用付き・判断なし）",
+    description: "repo外公式doc調査の指示（URL・引用付き・判断なし）",
     arguments: [
       { name: "query", description: "調査クエリ（対象ライブラリ・版を含む）", required: true },
     ],

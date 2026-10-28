@@ -15,7 +15,7 @@ opencodeにはClaude CodeのWorkflowツール（agent()+parallel()のJSをその
 
 1. `graphhopper_discover_start(target, scope)` で開始
 2. 以下を1ラウンドとして繰り返す:
-   - `task(subagent_type: "graphhopper-researcher")` を3回、以下のcharterで呼ぶ
+   - `task(subagent_type: "graphhopper-researcher")` を3回、以下の観点で呼ぶ
      - broad-scan: 「targetに関連するパターンをscope全体で広く探せ。網羅性重視、grep的な構造探索」
      - semantic-read: 「targetについて、scopeの該当箇所を実際に読んで論理的な妥当性を検証せよ。表面パターンではなく意味を見る」
      - edge-case: 「targetの境界値・異常系（null/空/負数/範囲外/並行性/前ゼロ等）を疑って探せ」
