@@ -8,6 +8,14 @@ import {
   logDecision,
   DECISION_CONFIDENCE_FLOOR,
   decideRoute,
+  decisionAvailable,
+  JEV_API_URL,
+  JEV_DEFAULT_MODEL,
+  JEV_PAID_MODEL,
+  pendingShadows,
+  primaryProviderName,
+  PROVIDERS,
+  shadowProviderName,
   mapDecisionAnswer,
   mapDifficultyAnswer,
   SELECTOR_NOUL_THRESHOLD,
@@ -551,6 +559,312 @@ describe("chooseWorkflow", () => {
       expect(await chooseWorkflow("t")).toBe("none");
     } finally {
       restore();
+    }
+  });
+});
+
+/* ───────── プロバイダ切替（d1 / jev）と shadow ─────────
+ * 新 env の既定は preload（src/test-setup.ts）で固定済み。各テストで set → finally で戻す */
+describe("プロバイダ選択（d1 / jev）", () => {
+  const ENVS = [
+    "GRAPHHOPPER_DECISION_PROVIDER",
+    "GRAPHHOPPER_DECISION_SHADOW",
+    "GRAPHHOPPER_JEV_MODEL",
+    "OPENCODE_API_KEY",
+  ] as const;
+  const saved = Object.fromEntries(ENVS.map((k) => [k, process.env[k]])) as Record<string, string | undefined>;
+  const setEnv = (k: string, v: string | undefined) => {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  };
+  const restoreEnvs = () => {
+    for (const k of ENVS) setEnv(k, saved[k]);
+    process.env.GRAPHHOPPER_DECISION_SHADOW = "off";
+  };
+  const Q = { q: { type: "noul", instructions: "?" } } as const;
+
+  const seen: { url: string; auth: string | undefined; model: unknown; body: unknown }[] = [];
+  const recordingFetch = (respond: (n: number) => Response) =>
+    (async (url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { model?: unknown };
+      seen.push({
+        url: String(url),
+        auth: (init.headers as Record<string, string> | undefined)?.Authorization,
+        model: body.model,
+        body,
+      });
+      return respond(seen.length);
+    }) as unknown as typeof fetch;
+
+  test("決定論的な既定: primary=d1 / shadow=jev / キー要否", () => {
+    try {
+      for (const k of ENVS) setEnv(k, undefined);
+      expect(primaryProviderName()).toBe("d1");
+      expect(shadowProviderName("d1")).toBe("jev");
+      expect(shadowProviderName("jev")).toBeNull();
+      setEnv("GRAPHHOPPER_DECISION_SHADOW", "off");
+      expect(shadowProviderName("d1")).toBeNull();
+      setEnv("GRAPHHOPPER_DECISION_PROVIDER", "OPCODE");
+      expect(primaryProviderName()).toBe("d1");
+      setEnv("GRAPHHOPPER_DECISION_PROVIDER", "JEV");
+      expect(primaryProviderName()).toBe("jev");
+      setEnv("LIQUID_API_KEY", undefined);
+      expect(decisionAvailable("d1")).toBe(false);
+      expect(decisionAvailable("jev")).toBe(true);
+    } finally {
+      restoreEnvs();
+      restore();
+    }
+  });
+
+  test("jev: キー無しでもヘッダ無しで叩ける（既定モデルは free）", async () => {
+    const savedKey = process.env.LIQUID_API_KEY;
+    delete process.env.LIQUID_API_KEY;
+    seen.length = 0;
+    try {
+      const r = await callDecision(
+        "s",
+        Q,
+        recordingFetch(() => ({ ok: true, json: async () => ({ answers: { q: { noul: 0.7 } } }) }) as Response),
+        1000,
+        PROVIDERS.jev,
+      );
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        expect(r.provider).toBe("jev");
+        expect(r.model).toBe(JEV_DEFAULT_MODEL);
+      }
+      expect(seen[0]?.url).toBe(JEV_API_URL);
+      expect(seen[0]?.auth).toBeUndefined();
+      expect(seen[0]?.model).toBe(JEV_DEFAULT_MODEL);
+    } finally {
+      if (savedKey !== undefined) process.env.LIQUID_API_KEY = savedKey;
+    }
+  });
+
+  test("jev: free が402→OPENCODE_API_KEY があれば有料モデルへ落ちる", async () => {
+    try {
+      setEnv("OPENCODE_API_KEY", "zen_test");
+      seen.length = 0;
+      const r = await callDecision(
+        "s",
+        Q,
+        recordingFetch((n) =>
+          n === 1
+            ? ({ ok: false, status: 402 } as Response)
+            : ({ ok: true, json: async () => ({ answers: { q: { noul: 0.8 } } }) } as Response),
+        ),
+        2000,
+        PROVIDERS.jev,
+      );
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.model).toBe(JEV_PAID_MODEL);
+      expect(seen.map((s) => s.model)).toEqual([JEV_DEFAULT_MODEL, JEV_PAID_MODEL]);
+      expect(seen[1]?.auth).toBe("Bearer zen_test");
+    } finally {
+      restoreEnvs();
+    }
+  });
+
+  test("jev: 402でもキーが無ければ有料は叩かない（課金ゲート）", async () => {
+    try {
+      setEnv("OPENCODE_API_KEY", undefined);
+      seen.length = 0;
+      const r = await callDecision("s", Q, recordingFetch(() => ({ ok: false, status: 402 }) as Response), 2000, PROVIDERS.jev);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).toContain("402");
+      expect(seen).toHaveLength(1);
+    } finally {
+      restoreEnvs();
+    }
+  });
+
+  test("jev: 400（リクエスト不正）では有料へ落とさない", async () => {
+    try {
+      setEnv("OPENCODE_API_KEY", "zen_test");
+      seen.length = 0;
+      await callDecision("s", Q, recordingFetch(() => ({ ok: false, status: 400 }) as Response), 2000, PROVIDERS.jev);
+      expect(seen).toHaveLength(1);
+    } finally {
+      restoreEnvs();
+    }
+  });
+
+  test("jev: timeout は次モデルへ落とさない（待ち時間を倍にしない）", async () => {
+    const hang = ((_u: string, init: RequestInit) =>
+      new Promise((_res, rej) => {
+        init.signal?.addEventListener("abort", () => rej(new Error("aborted")));
+      })) as unknown as typeof fetch;
+    try {
+      setEnv("OPENCODE_API_KEY", "zen_test");
+      const t = performance.now();
+      const r = await callDecision("s", Q, hang, 60, PROVIDERS.jev);
+      expect(r.ok).toBe(false);
+      expect(performance.now() - t).toBeLessThan(1000);
+    } finally {
+      restoreEnvs();
+    }
+  });
+
+  test("予算はモデル間で共有（free の消費分を差し引いて有料を打つ）", async () => {
+    /* 1回目は 60ms かけて 402、2回目は残り予算で打ち切られる。
+     * 逐次 timeout(100ms) を2回使う実装なら 200ms 近くかかる＝ここで落ちる */
+    const slow402 = ((_u: string, init: RequestInit) =>
+      new Promise((res, rej) => {
+        const timer = setTimeout(() => res({ ok: false, status: 402 }), 60);
+        init.signal?.addEventListener("abort", () => {
+          clearTimeout(timer);
+          rej(new Error("aborted"));
+        });
+      })) as unknown as typeof fetch;
+    try {
+      setEnv("OPENCODE_API_KEY", "zen_test");
+      const t = performance.now();
+      const r = await callDecision("s", Q, slow402, 100, PROVIDERS.jev);
+      expect(r.ok).toBe(false);
+      expect(performance.now() - t).toBeLessThan(180);
+    } finally {
+      restoreEnvs();
+    }
+  });
+});
+
+describe("decideRoute の shadow（並走比較）", () => {
+  const ENVS = ["GRAPHHOPPER_DECISION_SHADOW", "GRAPHHOPPER_DECISION_PROVIDER", "LIQUID_API_KEY"] as const;
+  const saved = Object.fromEntries(ENVS.map((k) => [k, process.env[k]])) as Record<string, string | undefined>;
+  const restoreEnvs = () => {
+    for (const k of ENVS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    process.env.GRAPHHOPPER_DECISION_SHADOW = "off";
+  };
+  const tmpRoot = async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    return mkdtempSync(`${tmpdir()}/gh-shadow-`);
+  };
+  const lines = async (root: string) => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    return readFileSync(join(root, ".graphhopper", "decisions.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+  };
+  /* url で d1 と jev を撃ち分ける（d1=light, jev=full） */
+  const splitFetch = (calls: string[]) =>
+    (async (url: string) => {
+      const isJev = String(url).includes("opencode.ai");
+      calls.push(isJev ? "jev" : "d1");
+      return {
+        ok: true,
+        json: async () => ({
+          answers: {
+            route: { choice: isJev ? "full" : "light", confidence: isJev ? 0.9 : 0.8 },
+            difficulty: { choice: "normal", confidence: 0.7 },
+          },
+        }),
+      };
+    }) as unknown as typeof fetch;
+
+  test("shadow行がdecision_idで紐付き、primaryの結果を変えない", async () => {
+    const root = await tmpRoot();
+    process.env.LIQUID_API_KEY = "liquid_test";
+    process.env.GRAPHHOPPER_DECISION_SHADOW = "jev";
+    try {
+      const calls: string[] = [];
+      const r = await decideRoute("typoを直す", splitFetch(calls), { root });
+      expect(r.route).toBe("light");
+      await Promise.all(pendingShadows());
+      const rows = await lines(root);
+      const decide = rows.find((x) => x.kind === "decide");
+      const shadow = rows.find((x) => x.kind === "shadow");
+      expect(decide).toMatchObject({ result: "light", provider: "d1" });
+      expect(shadow).toMatchObject({
+        provider: "jev",
+        result: "full",
+        rawChoice: "full",
+        fallback: false,
+      });
+      expect(shadow?.decision_id).toBe(decide?.id);
+      expect(calls).toEqual(["d1", "jev"]);
+    } finally {
+      restoreEnvs();
+    }
+  });
+
+  test("shadow失敗でもprimaryは成功し、shadow行はfallback:true", async () => {
+    const root = await tmpRoot();
+    process.env.LIQUID_API_KEY = "liquid_test";
+    process.env.GRAPHHOPPER_DECISION_SHADOW = "jev";
+    try {
+      const fake = (async (url: string) => {
+        if (String(url).includes("opencode.ai")) throw new Error("shadow down");
+        return {
+          ok: true,
+          json: async () => ({ answers: { route: { choice: "direct", confidence: 0.9 } } }),
+        };
+      }) as unknown as typeof fetch;
+      const r = await decideRoute("質問", fake, { root });
+      expect(r.route).toBe("direct");
+      await Promise.all(pendingShadows());
+      const rows = await lines(root);
+      expect(rows.find((x) => x.kind === "shadow")).toMatchObject({
+        result: "error",
+        fallback: true,
+      });
+    } finally {
+      restoreEnvs();
+    }
+  });
+
+  test("shadow=off なら呼ばない（root指定でも1行だけ）", async () => {
+    const root = await tmpRoot();
+    process.env.LIQUID_API_KEY = "liquid_test";
+    process.env.GRAPHHOPPER_DECISION_SHADOW = "off";
+    try {
+      const calls: string[] = [];
+      await decideRoute("何か", splitFetch(calls), { root });
+      await Promise.all(pendingShadows());
+      const rows = await lines(root);
+      expect(rows).toHaveLength(1);
+      expect(calls).toEqual(["d1"]);
+    } finally {
+      restoreEnvs();
+    }
+  });
+
+  test("root無指定ならshadowも走らない（テスト・単発呼び出しを汚さない）", async () => {
+    process.env.LIQUID_API_KEY = "liquid_test";
+    process.env.GRAPHHOPPER_DECISION_SHADOW = "jev";
+    try {
+      const calls: string[] = [];
+      await decideRoute("何か", splitFetch(calls));
+      await Promise.all(pendingShadows());
+      expect(calls).toEqual(["d1"]);
+    } finally {
+      restoreEnvs();
+    }
+  });
+
+  test("primary=jev なら shadow は既定で走らない", async () => {
+    const root = await tmpRoot();
+    const savedProv = process.env.GRAPHHOPPER_DECISION_PROVIDER;
+    delete process.env.GRAPHHOPPER_DECISION_SHADOW;
+    process.env.GRAPHHOPPER_DECISION_PROVIDER = "jev";
+    delete process.env.LIQUID_API_KEY;
+    try {
+      const calls: string[] = [];
+      const r = await decideRoute("何か", splitFetch(calls), { root });
+      expect(r.route).toBe("full");
+      await Promise.all(pendingShadows());
+      expect(calls).toEqual(["jev"]);
+    } finally {
+      if (savedProv === undefined) delete process.env.GRAPHHOPPER_DECISION_PROVIDER;
+      else process.env.GRAPHHOPPER_DECISION_PROVIDER = savedProv;
+      delete process.env.LIQUID_API_KEY;
+      restoreEnvs();
     }
   });
 });

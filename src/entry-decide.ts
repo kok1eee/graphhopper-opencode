@@ -13,6 +13,7 @@ import { closeSync, openSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
   decideRoute,
+  decisionAvailable,
   logDecision,
   type DecideResult,
   type FetchFn,
@@ -69,7 +70,7 @@ export type EntryDecideInput = {
   isChildSession: boolean;
   /** 実行中の goal があるか */
   hasActiveGoal: boolean;
-  /** LIQUID_API_KEY があるか */
+  /** 判定モデルを実行できるか（decisionAvailable。jev はキー不要で true） */
   hasApiKey: boolean;
 };
 
@@ -235,7 +236,7 @@ export async function ensureEntryDecision(
       await recordEntrySkip(root, "session_unknown", title, null);
       return null;
     }
-    if (!process.env.LIQUID_API_KEY?.trim()) {
+    if (!decisionAvailable()) {
       await recordEntrySkip(root, "no_api_key", title, sessionID);
       return null;
     }

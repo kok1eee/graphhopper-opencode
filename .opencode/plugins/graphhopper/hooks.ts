@@ -36,6 +36,7 @@ import {
   shouldRunEntryDecide,
   type EntryVerdict,
 } from "../../../src/entry-decide";
+import { decisionAvailable } from "../../../src/decision";
 import { isFailedEvent, isInterruptedEvent, isTurnEndEvent } from "../../../src/events";
 import { readHandoff } from "../../../src/handoff";
 import * as state from "../../../src/state";
@@ -222,7 +223,7 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
         isChildSession: await isChildSession(ctx, sessionID),
         /* paused の goal も対象。loop 進行中（active/paused）は入口判定の対象外 */
         hasActiveGoal: !!active && active.goal.status !== "done",
-        hasApiKey: !!process.env.LIQUID_API_KEY?.trim(),
+        hasApiKey: decisionAvailable(),
       });
       if (!decision.run) {
         void recordEntrySkip(root, decision.reason, text, sessionID).catch(() => {});

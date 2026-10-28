@@ -1,13 +1,20 @@
 /**
- * decision — d1 decision-model 共通基盤（入口route・selector等の利用元が共有）。
+ * decision — decision-model 共通基盤（入口route・selector等の利用元が共有）。
  *
- * Liquid decisions API専用。d1はchat LLMではなくテキストを生成しないため
- * opencode modelとしては配線できない。plugin/MCP toolから直接HTTPSで叩く。
- * POST https://api.liquid.ai/decisions/v1/systemone（model d1）。
+ * chat LLMではなくテキストを生成しないため opencode modelとしては配線できず、
+ * plugin/MCP toolから直接HTTPSで叩く。プロバイダは2つ（同じ System One 形式）:
+ *  - d1: POST https://api.liquid.ai/decisions/v1/systemone（LIQUID_API_KEY 必須）
+ *  - jev: POST https://opencode.ai/inference/systemone/v1/systemone
+ *         （既定 jev-1.13-free。APIキー無しでも叩ける。有料 jev-1.13 は OPENCODE_API_KEY がある時だけ）
  *
  * 構成: callDecision（HTTP・認証・timeout・例外握りの唯一の窓口）の上に
  * 用途別の関数（decideRoute／selectLenses）を載せる。新しい利用場所を足す時は
  * callDecisionを再利用し、HTTP部分をコピーしないこと。
+ *
+ * プロバイダ切替は入口判定（decideRoute）だけに適用する。selector/compact/recovery/
+ * workflow は d1 固定（既定が無言で変わるのを避ける）。
+ * 入口判定は primary とは別プロバイダへ shadow 呼び出しを投げ、較正ログに並べて残す
+ * （shadow は route 判定・state に一切影響しない）。
  *
  * 失敗は呼び出し側が極性を決める（routeはfull、selectorはfallback=true）。
  * 本モジュールはstateを書かない。
@@ -21,6 +28,16 @@ import { RECOVERY_KINDS } from "./workflow";
 export const DECISION_API_URL =
   "https://api.liquid.ai/decisions/v1/systemone";
 export const DECISION_MODEL = "d1";
+/** jev は d1 と同じ System One 形式。質問定義・応答の読み方は共通 */
+export const JEV_API_URL =
+  "https://opencode.ai/inference/systemone/v1/systemone";
+/** 期間限定の無料枠。APIキー不要（2026-10 実測） */
+export const JEV_DEFAULT_MODEL = "jev-1.13-free";
+/** free枠が課金・権限系で落ちた時だけ試す有料モデル（OPENCODE_API_KEY が必要） */
+export const JEV_PAID_MODEL = "jev-1.13";
+/** 次のモデルへ落としてよいHTTP status（課金・権限・未知モデル・レート制限のみ）。
+ * 400/422（リクエスト不正）で有料を叩かない＝無駄な課金を避ける */
+const FALLBACK_STATUSES = new Set([402, 403, 404, 429]);
 /** routeのconfidenceがこれ未満ならfullに倒す（初期値。scoreboardで調整） */
 export const DECISION_CONFIDENCE_FLOOR = 0.6;
 /** 回復手選択専用のconfidence下限。d1の「次の手」判断は routing より本質的に曖昧で、
@@ -41,7 +58,70 @@ export const SELECTOR_NOUL_THRESHOLD = 0.5;
 
 export type FetchFn = typeof fetch;
 
-/* d1の1問分の定義（公式doc: type=noul|choice|score） */
+/* ───────── プロバイダ定義 ───────── */
+
+export type DecisionProviderName = "d1" | "jev";
+
+export type DecisionProvider = {
+  name: DecisionProviderName;
+  url: string;
+  /** 順に試すモデル（先頭が既定。2つ目以降は FALLBACK_STATUSES の時だけ） */
+  models: () => string[];
+  /** ヘッダに載せるキー（無ければヘッダ無し） */
+  apiKey: () => string | undefined;
+};
+
+function jevModels(): string[] {
+  const first = process.env.GRAPHHOPPER_JEV_MODEL?.trim() || JEV_DEFAULT_MODEL;
+  return first === JEV_PAID_MODEL ? [first] : [first, JEV_PAID_MODEL];
+}
+
+export const PROVIDERS: Record<DecisionProviderName, DecisionProvider> = {
+  d1: {
+    name: "d1",
+    url: DECISION_API_URL,
+    models: () => [DECISION_MODEL],
+    apiKey: () => process.env.LIQUID_API_KEY,
+  },
+  jev: {
+    name: "jev",
+    url: JEV_API_URL,
+    models: jevModels,
+    /* 無料枠はキー不要。有料フォールバックと課金上限のゲートを兼ねる */
+    apiKey: () => process.env.OPENCODE_API_KEY,
+  },
+};
+
+/** 入口判定の primary（既定 d1。大小不問、不正値は d1） */
+export function primaryProviderName(): DecisionProviderName {
+  return process.env.GRAPHHOPPER_DECISION_PROVIDER?.trim().toLowerCase() === "jev"
+    ? "jev"
+    : "d1";
+}
+
+/** primary と別のプロバイダへ shadow を投げるか。
+ * 既定: primary=d1 なら jev、primary=jev なら off。
+ * GRAPHHOPPER_DECISION_SHADOW=off で明示的に止められる（外部送信を止めたい時） */
+export function shadowProviderName(
+  primary: DecisionProviderName,
+): DecisionProviderName | null {
+  const v = process.env.GRAPHHOPPER_DECISION_SHADOW?.trim().toLowerCase();
+  if (v === "off") return null;
+  /* 未指定の既定: d1 で判定しつつ jev を並走。primary が jev なら並走しない */
+  const name: DecisionProviderName | null =
+    v === "jev" || v === "d1" ? v : primary === "d1" ? "jev" : null;
+  return name === primary ? null : name;
+}
+
+/** 入口判定を実行できるか（primary がキー必須ならキー有無）。
+ * jev は無料枠がキー不要なので常に true */
+export function decisionAvailable(
+  name: DecisionProviderName = primaryProviderName(),
+): boolean {
+  return name === "jev" || !!process.env.LIQUID_API_KEY?.trim();
+}
+
+/* 1問分の定義（d1/jev 共通。公式doc: type=noul|choice|score） */
 export type DecisionQuestion =
   | { type: "noul"; instructions: string }
   | {
@@ -63,7 +143,10 @@ export type DecisionLog = {
   /** decide行のid。outcome行は decision_id で参照する */
   id?: string;
   decision_id?: string | null;
-  kind: "decide" | "decide-skip" | "select" | "compact" | "compact-skip" | "outcome";
+  kind: "decide" | "decide-skip" | "select" | "compact" | "compact-skip" | "outcome" | "shadow";
+  /** 判定を行ったプロバイダ／実際に答えたモデル（shadow 行は shadow 側） */
+  provider?: DecisionProviderName;
+  model?: string | null;
   request: string;
   result: string | string[];
   confidence: number | null;
@@ -152,31 +235,37 @@ export function extractNoulProbs(
 }
 
 export type CallResult =
-  | { ok: true; answers: DecisionAnswers }
+  | {
+      ok: true;
+      answers: DecisionAnswers;
+      /** 実際に答えたプロバイダ／モデル（較正ログ用） */
+      provider: DecisionProviderName;
+      model: string;
+    }
   /** retryable=true: 再試行で直りうる一過性の失敗（timeout/429/5xx/ネットワーク） */
   | { ok: false; reason: string; retryable: boolean };
 
-/* d1を叩く唯一の窓口。key未設定・HTTP失敗・例外・不正JSONは ok:false（リトライなし）。
- * 極性（fullに倒すかfallbackにするか）は呼び出し側が決める */
-export async function callDecision(
+/* 1モデル分の呼び出し。status はフォールバック可否の判定にだけ使う */
+async function callOnce(
+  provider: DecisionProvider,
+  model: string,
   stateText: string,
   questions: Record<string, DecisionQuestion>,
-  fetchFn: FetchFn = fetch,
-  timeoutMs: number = DECISION_TIMEOUT_MS,
-): Promise<CallResult> {
-  const key = process.env.LIQUID_API_KEY?.trim();
-  if (!key) return { ok: false, reason: "LIQUID_API_KEY未設定", retryable: false };
+  fetchFn: FetchFn,
+  timeoutMs: number,
+): Promise<{ r: CallResult; status?: number }> {
+  const key = provider.apiKey()?.trim();
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetchFn(DECISION_API_URL, {
+    const res = await fetchFn(provider.url, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${key}`,
+        ...(key ? { Authorization: `Bearer ${key}` } : {}),
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: DECISION_MODEL,
+        model,
         state: stateText,
         questions,
       }),
@@ -184,25 +273,75 @@ export async function callDecision(
     });
     if (!res.ok) {
       return {
-        ok: false,
-        reason: `d1 HTTP ${res.status}`,
-        retryable: res.status === 429 || res.status >= 500,
+        r: {
+          ok: false,
+          reason: `${provider.name} HTTP ${res.status}`,
+          retryable: res.status === 429 || res.status >= 500,
+        },
+        status: res.status,
       };
     }
     const body = (await res.json()) as { answers?: DecisionAnswers };
     if (!body.answers || typeof body.answers !== "object") {
-      return { ok: false, reason: "d1応答にanswersなし", retryable: false };
+      return { r: { ok: false, reason: `${provider.name}応答にanswersなし`, retryable: false } };
     }
-    return { ok: true, answers: body.answers };
+    return { r: { ok: true, answers: body.answers, provider: provider.name, model } };
   } catch (e) {
     return {
-      ok: false,
-      reason: `d1呼出失敗(${e instanceof Error ? e.message : String(e)})`,
-      retryable: true,
+      r: {
+        ok: false,
+        reason: `${provider.name}呼出失敗(${e instanceof Error ? e.message : String(e)})`,
+        retryable: true,
+      },
     };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/* 判定モデルを叩く唯一の窓口。key未設定・HTTP失敗・例外・不正JSONは ok:false（リトライなし）。
+ * 極性（fullに倒すかfallbackにするか）は呼び出し側が決める。
+ * provider 既定は d1（切替は入口判定だけが明示で渡す）。
+ * timeoutMs は全モデル合計の予算（無料枠→有料のフォールバックで待ち時間を倍にしない） */
+export async function callDecision(
+  stateText: string,
+  questions: Record<string, DecisionQuestion>,
+  fetchFn: FetchFn = fetch,
+  timeoutMs: number = DECISION_TIMEOUT_MS,
+  provider: DecisionProvider = PROVIDERS.d1,
+): Promise<CallResult> {
+  const key = provider.apiKey()?.trim();
+  if (provider.name === "d1" && !key) {
+    return { ok: false, reason: "LIQUID_API_KEY未設定", retryable: false };
+  }
+  const models = provider.models();
+  const deadline = Date.now() + timeoutMs;
+  let last: CallResult = { ok: false, reason: `${provider.name}未実行`, retryable: false };
+  for (let i = 0; i < models.length; i++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      last = { ok: false, reason: `${provider.name} timeout(${timeoutMs}ms)`, retryable: true };
+      break;
+    }
+    const { r, status } = await callOnce(
+      provider,
+      models[i],
+      stateText,
+      questions,
+      fetchFn,
+      remaining,
+    );
+    if (r.ok) return r;
+    last = r;
+    /* 次のモデルは「課金・権限系で落ちた」かつキーがある時だけ（無駄な課金と待ちを避ける） */
+    const canNext =
+      i < models.length - 1 &&
+      status !== undefined &&
+      FALLBACK_STATUSES.has(status) &&
+      (provider.name !== "jev" || !!key);
+    if (!canNext) break;
+  }
+  return last;
 }
 
 /* callDecision＋一過性失敗のみ最大retries回リトライ。key未設定・4xx・不正応答は即返す。
@@ -308,10 +447,90 @@ export function mapDecisionAnswer(
   return { route, rawChoice, rawRoute: route, confidence: conf, reason: `d1判定(${route})`, fallback: false, difficulty: null, difficultyConfidence: null };
 }
 
-/* 入口routeをd1で判定する。失敗は一律full（現行fail-safe極性＝重い側）。
+/* shadow 呼び出しの in-flight 集合。テストが `await Promise.all(pendingShadows())` で
+ * 完了を待つための口（本番では誰も参照しない） */
+const inflightShadows = new Set<Promise<void>>();
+export function pendingShadows(): Promise<void>[] {
+  return [...inflightShadows];
+}
+
+/* shadow 判定（primary とは別プロバイダ）。route・state・last_decision_id には一切触らない。
+ * 内部で全例外を握るので未捕捉 rejection にならない */
+function scheduleShadow(args: {
+  root: string;
+  decisionId: string;
+  request: string;
+  questions: Record<string, DecisionQuestion>;
+  provider: DecisionProvider;
+  fetchFn: FetchFn;
+  timeoutMs: number;
+}): void {
+  const { root, decisionId, request, questions, provider, fetchFn, timeoutMs } = args;
+  const run = async (): Promise<void> => {
+    const t0 = performance.now();
+    try {
+      const r = await callDecision(request, questions, fetchFn, timeoutMs, provider);
+      if (!r.ok) {
+        await logDecision(root, {
+          decision_id: decisionId,
+          kind: "shadow",
+          provider: provider.name,
+          model: null,
+          request,
+          result: "error",
+          confidence: null,
+          latencyMs: Math.round(performance.now() - t0),
+          fallback: true,
+          reason: r.reason,
+        });
+        return;
+      }
+      const base = mapDecisionAnswer(r.answers.route?.choice, r.answers.route?.confidence);
+      const diff = mapDifficultyAnswer(
+        r.answers.difficulty?.choice,
+        r.answers.difficulty?.confidence,
+      );
+      await logDecision(root, {
+        decision_id: decisionId,
+        kind: "shadow",
+        provider: provider.name,
+        model: r.model,
+        request,
+        result: base.rawChoice ?? "invalid",
+        confidence: base.confidence,
+        latencyMs: Math.round(performance.now() - t0),
+        fallback: false,
+        reason: base.reason,
+        difficulty: diff.difficulty,
+        difficultyConfidence: diff.confidence,
+        rawChoice: base.rawChoice,
+      });
+    } catch (e) {
+      await logDecision(root, {
+        decision_id: decisionId,
+        kind: "shadow",
+        provider: provider.name,
+        model: null,
+        request,
+        result: "error",
+        confidence: null,
+        latencyMs: Math.round(performance.now() - t0),
+        fallback: true,
+        reason: `shadow失敗(${e instanceof Error ? e.message : String(e)})`,
+      });
+    }
+  };
+  const p = run().catch(() => {});
+  inflightShadows.add(p);
+  void p.finally(() => inflightShadows.delete(p));
+}
+
+/* 入口routeを判定モデルで判定する。失敗は一律full（現行fail-safe極性＝重い側）。
  * opts.root があれば較正ログに追記する（無ければ記録しない。テストは無指定）
  * opts.sessionID を渡すと較正ログにセッションを残せる（hook経由の自動判定用）
- * opts.timeoutMs で timeout を上書きできる（hook経路は短い待ち時間に切る） */
+ * opts.timeoutMs で timeout を上書きできる（hook経路は短い待ち時間に切る）
+ * primary は GRAPHHOPPER_DECISION_PROVIDER（既定 d1）。別プロバイダの shadow は
+ * opts.root がある時だけ走り、判定結果には影響しない */
 export async function decideRoute(
   request: string,
   fetchFn: FetchFn = fetch,
@@ -323,19 +542,41 @@ export async function decideRoute(
   },
 ): Promise<DecideResult> {
   const t0 = performance.now();
+  const primary = primaryProviderName();
+  const shadowName = shadowProviderName(primary);
+  const decisionId = opts?.root ? randomUUID().slice(0, 8) : null;
+  const timeoutMs = opts?.timeoutMs ?? DECISION_TIMEOUT_MS;
+  const questions: Record<string, DecisionQuestion> = {
+    route: {
+      type: "choice",
+      instructions:
+        "この作業内容に適したgraphhopperの入口routeを1つ選べ。迷ったらfull",
+      criteria: DECISION_ROUTE_CRITERIA,
+    },
+    difficulty: {
+      type: "choice",
+      instructions:
+        "この作業自体の難易度を1つ選べ（routeとは独立。迷ったらnormal）",
+      criteria: DECISION_DIFFICULTY_CRITERIA,
+    },
+  };
   const finish = async (
     d: DecideResult,
     failed = false,
+    model: string | null = null,
   ): Promise<DecideResult> => {
-    if (opts?.root) {
-      const id = randomUUID().slice(0, 8);
+    const root = opts?.root;
+    const id = decisionId;
+    if (root && id) {
       /* 失敗した判定は last decision id を更新しない。更新すると
        * 次の goal が偽の decide に紐付き、較正データを汚染する。
          （行には id を残す。calibrate は outcome 側から引くため一致しない） */
-      if (!failed) state.writeLastDecisionId(opts.root, id);
-      await logDecision(opts.root, {
+      if (!failed) state.writeLastDecisionId(root, id);
+      await logDecision(root, {
         id,
         kind: "decide",
+        provider: primary,
+        model,
         request,
         result: d.route,
         confidence: d.confidence,
@@ -345,30 +586,30 @@ export async function decideRoute(
         difficulty: d.difficulty,
         difficultyConfidence: d.difficultyConfidence,
         rawChoice: d.rawChoice,
-        sessionID: opts.sessionID ?? null,
-        messageID: opts.messageID ?? null,
+        sessionID: opts?.sessionID ?? null,
+        messageID: opts?.messageID ?? null,
       });
+      /* primary が落ちた回も shadow は走らせる（比較の母数を減らさない） */
+      if (shadowName) {
+        scheduleShadow({
+          root,
+          decisionId: id,
+          request,
+          questions,
+          provider: PROVIDERS[shadowName],
+          fetchFn,
+          timeoutMs,
+        });
+      }
     }
     return d;
   };
   const r = await callDecision(
     request,
-    {
-      route: {
-        type: "choice",
-        instructions:
-          "この作業内容に適したgraphhopperの入口routeを1つ選べ。迷ったらfull",
-        criteria: DECISION_ROUTE_CRITERIA,
-      },
-      difficulty: {
-        type: "choice",
-        instructions:
-          "この作業自体の難易度を1つ選べ（routeとは独立。迷ったらnormal）",
-        criteria: DECISION_DIFFICULTY_CRITERIA,
-      },
-    },
+    questions,
     fetchFn,
-    opts?.timeoutMs ?? DECISION_TIMEOUT_MS,
+    timeoutMs,
+    PROVIDERS[primary],
   );
   if (!r.ok) {
     return finish(
@@ -390,12 +631,16 @@ export async function decideRoute(
     r.answers.difficulty?.choice,
     r.answers.difficulty?.confidence,
   );
-  return finish({
-    ...base,
-    difficulty: diff.difficulty,
-    difficultyConfidence: diff.confidence,
-    reason: `${base.reason} / ${diff.reason}`,
-  });
+  return finish(
+    {
+      ...base,
+      difficulty: diff.difficulty,
+      difficultyConfidence: diff.confidence,
+      reason: `${base.reason} / ${diff.reason}`,
+    },
+    false,
+    r.model,
+  );
 }
 
 /* ───────── verifier編成selector ───────── */
