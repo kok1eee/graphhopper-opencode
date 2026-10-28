@@ -49,8 +49,20 @@ function makeHost(gh: Gh): CascadeHost {
  * enabled=false のときは適用中のものを復元する。戻り値は表示用の1行（変更なしは null）。
  */
 export async function syncCascade(gh: Gh): Promise<string | null> {
+  return (await syncCascadeResult(gh)).note;
+}
+
+/** syncCascade の結果。failed=切替が必要だったのにできなかった（文言に依存せず判定する） */
+export interface SyncCascadeResult {
+  note: string | null;
+  failed: boolean;
+}
+
+export async function syncCascadeResult(gh: Gh): Promise<SyncCascadeResult> {
+  const ok = (note: string | null): SyncCascadeResult => ({ note, failed: false });
+  const fail = (note: string): SyncCascadeResult => ({ note, failed: true });
   let active = state.getActive(gh.root);
-  if (!active) return null;
+  if (!active) return ok(null);
   /* implementing を外れたら途中確認は終わり（polish は main 指定なので不要） */
   const cp = active.state.cascade?.checkpoint;
   if (active.state.phase !== "implementing" && cp && cp !== "done") {
@@ -61,10 +73,10 @@ export async function syncCascade(gh: Gh): Promise<string | null> {
   const config = state.readConfig(gh.root);
 
   if (!config.cascade.enabled) {
-    if (!active.state.cascade) return null;
+    if (!active.state.cascade) return ok(null);
     await endCascade(host, active.state.session_id, active.state.cascade);
     state.setCascade(gh.root, null);
-    return "cascade: disabled → restored";
+    return fail("cascade: disabled → restored");
   }
 
   const { level, reason } = resolveLevel({
@@ -88,12 +100,12 @@ export async function syncCascade(gh: Gh): Promise<string | null> {
   });
   const targetRef = resolved.ref;
   if (!targetRef) {
-    return `cascade: モデル指定が不正（${resolved.raw}）— このgoalでは切替しない`;
+    return fail(`cascade: モデル指定が不正（${resolved.raw}）— このgoalでは切替しない`);
   }
   const targetKey = formatModel(targetRef);
-  if (current && current.level === level && current.model === targetKey) return null;
+  if (current && current.level === level && current.model === targetKey) return ok(null);
 
-  if (!sessionID) return "cascade: session unbound（切替せず）";
+  if (!sessionID) return fail("cascade: session unbound（切替せず）");
 
   const next = await applyCascade(host, {
     sessionID,
@@ -103,7 +115,7 @@ export async function syncCascade(gh: Gh): Promise<string | null> {
     previous: current,
     phase,
   });
-  if (!next) return "cascade: モデル不明のため切替せず";
+  if (!next) return fail("cascade: モデル不明のため切替せず");
   const fromModel =
     current?.model ?? (next.restore ? `${next.restore.providerID}/${next.restore.id}` : "(不明)");
   state.recordEvent(gh.root, {
@@ -122,7 +134,7 @@ export async function syncCascade(gh: Gh): Promise<string | null> {
   // await 中に detached な子セッション記録が追記され得るため、現在値を読み直してマージする
   const latest = state.readState(gh.root).cascade?.children ?? [];
   state.setCascade(gh.root, { ...next, children: mergeChildren(next.children, latest) });
-  return `cascade: ${level}（${reason}）→ ${next.model}`;
+  return ok(`cascade: ${level}（${reason}）→ ${next.model}`);
 }
 
 /** implementing の途中（タスク半分到達）で main 確認を1回要求する。戻り値は表示用の1行 */
@@ -150,10 +162,10 @@ export async function beginCheckpointReview(gh: Gh, sessionID: string): Promise<
   const before = state.getActive(gh.root);
   if (!before?.state.cascade) return false;
   state.setCascadeCheckpoint(gh.root, "reviewing", "途中確認を開始");
-  const note = await syncCascade(gh);
+  const { note, failed } = await syncCascadeResult(gh);
   const after = state.getActive(gh.root);
-  if (note?.includes("切替せず") || note?.includes("不正")) {
-    state.setCascadeCheckpoint(gh.root, "done", `切替できず中止: ${note}`);
+  if (failed) {
+    state.setCascadeCheckpoint(gh.root, "done", `切替できず中止: ${note ?? "(理由不明)"}`);
     return false;
   }
   const model = after?.state.cascade?.model ?? "(不明)";
