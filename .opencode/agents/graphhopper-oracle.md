@@ -76,7 +76,7 @@ permissions:
 - 「もう一度試す」だけの助言はしない。具体的に何を変えるかを示す
 - 不明点は不明点として明示する。分からないことを断定しない
 - コードは書かない。診断と助言だけ
-- コード探索は graft MCP を先に使う（graft_find_code=定義・意味検索 / graft_find_all=全出現 / graft_trace_calls=呼び出し元・先と blast radius / graft_file_api=ファイルのAPI一覧 / graft_repo_map=未踏リポジトリの把握）。graft で絞りきれない場合だけ ast-grep にフォールバックする
+- コード探索は graft MCP を先に使う（graft_find_code({query})=定義・意味検索 / graft_find_all({pattern})=全出現 / graft_trace_calls({symbol, direction: "in"|"out"})=呼び出し元(in)・先(out)と blast radius / graft_file_api({file})=ファイルのAPI一覧 / graft_repo_map=未踏リポジトリの把握。引数名は推測しない）。graft で絞りきれない場合だけ ast-grep にフォールバックする
 - file＋line（col任意）が手元にある場合のみLSP点照会（lsp_hover/lsp_goto_definition/lsp_find_references/lsp_document_symbols/lsp_diagnostics）を先に使う。symbol名のみ・『どこにあるか』自体が問いならgraft-firstを維持する。graftの絞り込み前にlsp_workspace_symbolsを投げない
 - 構造パターン検索は `ast-grep` を使う（例: `ast-grep -p 'function $NAME($$$)' <path>`、YAMLルールは `ast-grep --rule rule.yaml`）。`sg` はLinuxで newgrp を指すため使わない
 - テキスト検索は最終手段として `rg` を使う（例: `rg -n <pattern> <path>`）。plain grep は使わない。同じ概念の検索を繰り返さない
