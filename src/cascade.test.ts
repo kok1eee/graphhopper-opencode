@@ -13,6 +13,7 @@ import {
   parseCascadeModel,
   resolveChildModel,
   resolveLevel,
+  resolveMainModel,
   resolveTargetModel,
   shouldFlushOrphan,
   shouldSwitchChild,
@@ -406,5 +407,84 @@ describe("resolveTargetModel（phase 連動）", () => {
     });
     expect(calls.switched[0]?.id).toBe("claude-opus-5-5");
     expect(next?.model).toBe("claude-oauth/claude-opus-5-5");
+  });
+});
+
+describe("main 指定と途中確認", () => {
+  const cfg: CascadeConfig = {
+    ...config,
+    baseline: "opencode-go/deepseek-v4.1-flash",
+    expert: "claude-oauth/claude-opus-5-5",
+    phase_models: { designing: "main", polish: "main" },
+    checkpoint: true,
+  };
+  const fable: ModelRef = { providerID: "claude-oauth", id: "claude-fable-5-1" };
+  const deepseek: ModelRef = { providerID: "opencode-go", id: "deepseek-v4.1-flash" };
+
+  test("main 指定は goal 開始時のモデルに解決する", () => {
+    const r = resolveTargetModel({ phase: "designing", level: "baseline", config: cfg, main: fable });
+    expect(r.source).toBe("main");
+    expect(r.ref?.id).toBe("claude-fable-5-1");
+  });
+
+  test("main が baseline と同じ（弱い）なら expert にフォールバック", () => {
+    const r = resolveTargetModel({ phase: "polish", level: "baseline", config: cfg, main: deepseek });
+    expect(r.ref?.id).toBe("claude-opus-5-5");
+    expect(resolveMainModel({ main: null, config: { ...cfg, main_fallback: "me/x" } }).ref?.id).toBe("x");
+  });
+
+  test("implementing は通常 baseline、reviewing の間だけ main", () => {
+    const normal = resolveTargetModel({ phase: "implementing", level: "baseline", config: cfg, main: fable });
+    expect(normal.ref?.id).toBe("deepseek-v4.1-flash");
+    const review = resolveTargetModel({
+      phase: "implementing",
+      level: "baseline",
+      config: cfg,
+      main: fable,
+      checkpoint: "reviewing",
+    });
+    expect(review.ref?.id).toBe("claude-fable-5-1");
+    const requested = resolveTargetModel({
+      phase: "implementing",
+      level: "baseline",
+      config: cfg,
+      main: fable,
+      checkpoint: "requested",
+    });
+    expect(requested.ref?.id).toBe("deepseek-v4.1-flash");
+  });
+
+  test("applyCascade は checkpoint を引き継ぎ、restore を main にする", async () => {
+    const { host, calls } = fakeHost(fable);
+    const first = await applyCascade(host, {
+      sessionID: "s",
+      level: "baseline",
+      reason: "r",
+      config: cfg,
+      previous: null,
+      phase: "designing",
+    });
+    expect(calls.switched[0]?.id).toBe("claude-fable-5-1");
+    expect(first?.restore?.id).toBe("claude-fable-5-1");
+    const withCp = await applyCascade(host, {
+      sessionID: "s",
+      level: "baseline",
+      reason: "r",
+      config: cfg,
+      previous: { ...first!, checkpoint: "reviewing" },
+      phase: "implementing",
+    });
+    expect(withCp?.checkpoint).toBe("reviewing");
+    expect(calls.switched[1]?.id).toBe("claude-fable-5-1");
+    const back = await applyCascade(host, {
+      sessionID: "s",
+      level: "baseline",
+      reason: "r",
+      config: cfg,
+      previous: { ...withCp!, checkpoint: "done" },
+      phase: "implementing",
+    });
+    expect(back?.checkpoint).toBe("done");
+    expect(calls.switched[2]?.id).toBe("deepseek-v4.1-flash");
   });
 });

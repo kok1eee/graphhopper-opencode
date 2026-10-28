@@ -199,6 +199,8 @@ export interface CascadeState {
   restore: { providerID: string; id: string; variant?: string } | null;
   /** 直近の子セッション切替記録（古い順に最大10件） */
   children: CascadeChild[];
+  /** implementing 途中確認の段。未使用は undefined */
+  checkpoint?: "requested" | "reviewing" | "done";
   at: string;
 }
 
@@ -310,9 +312,13 @@ export interface CascadeConfig {
   escalate_on: Difficulty[];
   /** 連続失敗がこの数に達したら難易度に関係なく昇格（0以下で無効） */
   fail_threshold: number;
-  /** phase ごとのメインモデル（level より優先）。例: designing=Opus。
-   * implementing には置かない運用を推奨（fail 昇格を殺さないため） */
+  /** phase ごとのメインモデル（level より優先）。例: designing="main"。
+   * 値 "main" は goal 開始時のモデル（restore）に解決する */
   phase_models?: { [phase: string]: string };
+  /** "main" が弱い（baseline と同じ）ときの代替モデル。"provider/model"。未設定は expert→escalate */
+  main_fallback?: string;
+  /** implementing の途中で1回だけ main に確認させる（既定 false） */
+  checkpoint?: boolean;
   /** 常に昇格モデルで回す判定用 agent（goal の段には依存しない） */
   agents: {
     /** always: 段に関係なく切替 / escalated: メインが escalated のときだけ切替 */
@@ -755,6 +761,12 @@ export type HistoryEvent =
   | { type: "goal_pause"; goal: string }
   | { type: "goal_resume"; goal: string }
   | { type: "cascade_switch"; goal: string; from: string; to: string; phase: Phase; reason: string }
+  | {
+      type: "cascade_checkpoint";
+      goal: string;
+      stage: "requested" | "reviewing" | "done";
+      reason: string;
+    }
   | { type: "goal_complete"; goal: string; score?: number | null }
   | { type: "phase"; goal: string; from: Phase; to: Phase; notes?: string }
   | {
@@ -1689,6 +1701,25 @@ export function bindEntryRoute(
 /** カスケード状態の保存。null でクリア */
 export function setCascade(root: string, cascade: CascadeState | null): ActiveLoop | null {
   return mutateActive(root, () => ({ state: { cascade } }));
+}
+
+/** implementing 途中確認の段を更新する（cascade が無ければ何もしない） */
+export function setCascadeCheckpoint(
+  root: string,
+  stage: "requested" | "reviewing" | "done",
+  reason: string,
+): ActiveLoop | null {
+  const active = getActive(root);
+  if (!active?.state.cascade) return null;
+  recordEvent(root, {
+    type: "cascade_checkpoint",
+    goal: active.goal.id,
+    stage,
+    reason,
+  });
+  return mutateActive(root, () => ({
+    state: { cascade: { ...active.state.cascade!, checkpoint: stage } },
+  }));
 }
 
 /** 子セッションの切替記録を積む（古い順・最大10件） */

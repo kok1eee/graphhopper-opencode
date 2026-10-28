@@ -80,20 +80,53 @@ export function resolveLevel(input: {
   };
 }
 
+/** main が「弱い」か（未取得・baseline と同じ）。確認用の main 指定で使う */
+function isWeakMain(main: ModelRef | null, config: CascadeConfig): boolean {
+  if (!main) return true;
+  return formatModel(main) === formatModel(parseCascadeModel(config.baseline));
+}
+
+/** "main" 指定の解決先。main が弱ければ main_fallback → expert → escalate の順 */
+export function resolveMainModel(input: {
+  main: ModelRef | null;
+  config: CascadeConfig;
+}): { ref: ModelRef | null; raw: string } {
+  if (!isWeakMain(input.main, input.config)) {
+    return { ref: input.main, raw: formatModel(input.main) ?? "" };
+  }
+  for (const raw of [input.config.main_fallback, input.config.expert, input.config.escalate]) {
+    const ref = parseCascadeModel(raw);
+    if (ref) return { ref, raw: raw! };
+  }
+  return { ref: null, raw: "main" };
+}
+
 /**
- * 切替先モデルの決定。phase_models[phase] が有効ならそれを優先し、
- * 無い・不正なら level のモデル（baseline / escalated）へフォールバックする。
+ * 切替先モデルの決定。優先順位:
+ * 1. implementing の途中確認中（checkpoint=reviewing）→ main
+ * 2. phase_models[phase]（"main" は main 解決、解決できなければ level へ）
+ * 3. level のモデル（baseline / escalated）
  */
 export function resolveTargetModel(input: {
   phase?: string | null;
   level: CascadeLevel;
   config: CascadeConfig;
-}): { ref: ModelRef | null; raw: string; source: "phase" | "level" } {
+  /** goal 開始時のモデル（cascade.restore） */
+  main?: ModelRef | null;
+  checkpoint?: string | null;
+}): { ref: ModelRef | null; raw: string; source: "phase" | "level" | "main" } {
+  const levelRaw = input.level === "escalated" ? input.config.escalate : input.config.baseline;
+  const wantMain = input.checkpoint === "reviewing" && input.phase === "implementing";
   const phaseRaw = input.phase ? input.config.phase_models?.[input.phase] : undefined;
+  if (wantMain || phaseRaw?.trim() === "main") {
+    const main = resolveMainModel({ main: input.main ?? null, config: input.config });
+    if (main.ref) return { ref: main.ref, raw: main.raw, source: "main" };
+    /* main が解決できないときは level へフォールバック（切替しないより安い） */
+    return { ref: parseCascadeModel(levelRaw), raw: levelRaw, source: "level" };
+  }
   const phaseRef = parseCascadeModel(phaseRaw);
   if (phaseRaw && phaseRef) return { ref: phaseRef, raw: phaseRaw, source: "phase" };
-  const raw = input.level === "escalated" ? input.config.escalate : input.config.baseline;
-  return { ref: parseCascadeModel(raw), raw, source: "level" };
+  return { ref: parseCascadeModel(levelRaw), raw: levelRaw, source: "level" };
 }
 
 /**
@@ -109,17 +142,22 @@ export async function applyCascade(
     config: CascadeConfig;
     previous: CascadeState | null;
     phase?: string | null;
+    /** checkpoint を引き継ぐ（syncCascade の書き込みで消さない） */
+    checkpoint?: CascadeState["checkpoint"];
   },
 ): Promise<CascadeState | null> {
+  /* restore は最初の適用時に固定する（以後の main 解決の基準になる） */
+  const restore = input.previous?.restore ?? (await host.getModel(input.sessionID));
+  if (!restore) return null; // 復元先が無い切替はしない
+  const checkpoint = input.checkpoint ?? input.previous?.checkpoint;
   const target = resolveTargetModel({
     phase: input.phase,
     level: input.level,
     config: input.config,
+    main: restore,
+    checkpoint: checkpoint ?? null,
   }).ref;
   if (!target) return null;
-
-  const restore = input.previous?.restore ?? (await host.getModel(input.sessionID));
-  if (!restore) return null; // 復元先が無い切替はしない
 
   try {
     await host.switchModel(input.sessionID, target);
@@ -133,6 +171,7 @@ export async function applyCascade(
     model: formatModel(target),
     restore,
     children: input.previous?.children ?? [],
+    ...(checkpoint ? { checkpoint } : {}),
     at: new Date().toISOString(),
   };
 }

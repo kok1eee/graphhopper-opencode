@@ -177,6 +177,17 @@ compaction時はd1 keep-listが自動注入される（要約落ち防止の制�
 
 ## phase 連動のモデル切替
 
-`cascade.phase_models`（例: `{"designing":"claude-oauth/claude-opus-5-5","polish":"claude-oauth/claude-sonnet-5-5"}`）を置くと、
-`graphhopper_phase` で phase が変わるたびにメインのモデルを切り替え、`history.jsonl` に `cascade_switch` を記録する。
-未指定の phase は従来の baseline/escalated。implementing には置かない（fail 昇格を殺さないため）。
+`cascade.phase_models`（phase → モデル）を置くと、`graphhopper_phase` で phase が変わるたびにメインのモデルを切り替え、
+`history.jsonl` に `cascade_switch` を記録する。値 `"main"` は **goal 開始時のモデル**（`cascade.restore`）。
+main が baseline と同じ（deepseek で始めた）ときは `main_fallback` → `expert` → `escalate` の順で代替する。
+
+推奨: `{"designing":"main","polish":"main"}`。implementing は未指定にして baseline（安い実装モデル）で回し、
+fail 昇格の経路を殺さない。
+
+`cascade.checkpoint: true` なら、implementing でタスクが半分完了した時点で **1 goal 1回だけ**、次の idle で main に
+切り替えて方向を確認させ（design と差分を見る）、次の idle で実装モデルに戻す（`cascade_checkpoint` を記録）。
+phase が implementing を外れる・pause すると途中確認は終了する。
+
+**対象はメインセッションだけ**。graphhopper-* の subagent は agent 定義の `model:` で固定されており、main に追従しない
+（調査・実装を高いモデルで回さないため）。モデル未指定の組み込み `explore`/`general` は親を継承し得るので、
+main 中（designing/確認/polish）に呼ぶと main で動く点に注意。

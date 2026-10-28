@@ -22,6 +22,7 @@ import {
 import * as state from "../../../src/state";
 import { readRun } from "../../../src/workflow";
 import { logDecision } from "../../../src/decision";
+import { INTERNAL_PROMPT_METADATA_KEY } from "../../../src/entry-decide";
 import type { CascadeChild } from "../../../src/state";
 import type { Gh } from "./shared";
 
@@ -48,8 +49,14 @@ function makeHost(gh: Gh): CascadeHost {
  * enabled=false のときは適用中のものを復元する。戻り値は表示用の1行（変更なしは null）。
  */
 export async function syncCascade(gh: Gh): Promise<string | null> {
-  const active = state.getActive(gh.root);
+  let active = state.getActive(gh.root);
   if (!active) return null;
+  /* implementing を外れたら途中確認は終わり（polish は main 指定なので不要） */
+  const cp = active.state.cascade?.checkpoint;
+  if (active.state.phase !== "implementing" && cp && cp !== "done") {
+    state.setCascadeCheckpoint(gh.root, "done", `phase ${active.state.phase} で途中確認を終了`);
+    active = state.getActive(gh.root) ?? active;
+  }
   const host = makeHost(gh);
   const config = state.readConfig(gh.root);
 
@@ -68,16 +75,24 @@ export async function syncCascade(gh: Gh): Promise<string | null> {
   });
 
   const phase = active.state.phase;
-  const resolved = resolveTargetModel({ phase, level, config: config.cascade });
+  const current = active.state.cascade;
+  const sessionID = active.state.session_id;
+  /* main 指定の解決基準。restore は最初の適用時に固定される */
+  const main = current?.restore ?? (sessionID ? await host.getModel(sessionID) : null);
+  const resolved = resolveTargetModel({
+    phase,
+    level,
+    config: config.cascade,
+    main,
+    checkpoint: current?.checkpoint ?? null,
+  });
   const targetRef = resolved.ref;
   if (!targetRef) {
     return `cascade: モデル指定が不正（${resolved.raw}）— このgoalでは切替しない`;
   }
   const targetKey = formatModel(targetRef);
-  const current = active.state.cascade;
   if (current && current.level === level && current.model === targetKey) return null;
 
-  const sessionID = active.state.session_id;
   if (!sessionID) return "cascade: session unbound（切替せず）";
 
   const next = await applyCascade(host, {
@@ -97,12 +112,63 @@ export async function syncCascade(gh: Gh): Promise<string | null> {
     from: fromModel,
     to: next.model ?? targetKey ?? "(不明)",
     phase,
-    reason: `${resolved.source === "phase" ? `phase ${phase}` : reason}`,
+    reason:
+      resolved.source === "phase"
+        ? `phase ${phase}`
+        : resolved.source === "main"
+          ? `${resolved.raw === "main" ? "main" : `main(${resolved.raw})`}`
+          : reason,
   });
   // await 中に detached な子セッション記録が追記され得るため、現在値を読み直してマージする
   const latest = state.readState(gh.root).cascade?.children ?? [];
   state.setCascade(gh.root, { ...next, children: mergeChildren(next.children, latest) });
   return `cascade: ${level}（${reason}）→ ${next.model}`;
+}
+
+/** implementing の途中（タスク半分到達）で main 確認を1回要求する。戻り値は表示用の1行 */
+export function maybeRequestCheckpoint(gh: Gh): string | null {
+  const active = state.getActive(gh.root);
+  if (!active || active.state.phase !== "implementing") return null;
+  const cfg = state.readConfig(gh.root).cascade;
+  if (!cfg.enabled || !cfg.checkpoint) return null;
+  const current = active.state.cascade;
+  if (!current || current.checkpoint) return null; // 1 goal 1回
+  const loaded = state.readTodosStatus(gh.root, active.goal.id);
+  if (!loaded.valid) return null;
+  const items = loaded.store.items;
+  const done = items.filter((i) => i.status === "completed").length;
+  if (items.length < 2 || done * 2 < items.length) return null;
+  state.setCascadeCheckpoint(gh.root, "requested", `完了 ${done}/${items.length}`);
+  return `checkpoint: 半分到達（${done}/${items.length}）— 次の idle で main に1ターン切り替えて方向を確認する`;
+}
+
+/**
+ * requested → reviewing。main へ切り替えて確認 prompt を送る。
+ * 切替できなかったときは checkpoint を done にして false（prompt を送らない）。
+ */
+export async function beginCheckpointReview(gh: Gh, sessionID: string): Promise<boolean> {
+  const before = state.getActive(gh.root);
+  if (!before?.state.cascade) return false;
+  state.setCascadeCheckpoint(gh.root, "reviewing", "途中確認を開始");
+  const note = await syncCascade(gh);
+  const after = state.getActive(gh.root);
+  if (note?.includes("切替せず") || note?.includes("不正")) {
+    state.setCascadeCheckpoint(gh.root, "done", `切替できず中止: ${note}`);
+    return false;
+  }
+  const model = after?.state.cascade?.model ?? "(不明)";
+  await gh.ctx.session.prompt({
+    sessionID,
+    text: [
+      `[graphhopper] 途中確認: main モデル（${model}）に切り替えた。実装の方向だけを確認せよ。`,
+      "- design と現在の差分（jj diff / git diff）を読み、要件とずれていないか・このまま続けて良いかを見る",
+      `- 問題があれば修正方針を .graphhopper/plans/${before.goal.id}.log.md に書く。このターンで大きな実装はしない`,
+      "- 問題が無ければ「方向OK」と1行で述べる",
+      "次のターンで実装用モデルへ戻して続ける。",
+    ].join("\n"),
+    metadata: { [INTERNAL_PROMPT_METADATA_KEY]: true },
+  });
+  return true;
 }
 
 /** 子セッション記録を sessionID で重複排除しつつマージする（新しい方を優先） */

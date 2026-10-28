@@ -20,7 +20,7 @@ import {
   SELECTOR_TOOL_DESCRIPTION,
   selectLenses,
 } from "../../../src/decision";
-import { finishCascade, syncCascade } from "./cascade";
+import { finishCascade, maybeRequestCheckpoint, syncCascade } from "./cascade";
 import { ensureEntryDecision } from "../../../src/entry-decide";
 import * as state from "../../../src/state";
 import { readRun, summarizeRun } from "../../../src/workflow";
@@ -98,6 +98,9 @@ export function registerCoreTools(
           );
         }
         case "pause": {
+          /* pause 中に main が残らないよう、途中確認は終わらせる */
+          const cp = state.getActive(root)?.state.cascade?.checkpoint;
+          if (cp && cp !== "done") state.setCascadeCheckpoint(root, "done", "pause");
           const a = state.pauseGoal(root);
           return text(a ? `paused: "${a.goal.title}"` : "no active goal");
         }
@@ -251,7 +254,8 @@ export function registerCoreTools(
         ...(args.text ? { text: args.text } : {}),
         ...(args.reason ? { reason: args.reason } : {}),
       });
-      return text(r.text);
+      const cp = args.action === "done" && r.ok ? maybeRequestCheckpoint(gh) : null;
+      return text(cp ? `${r.text}\n${cp}` : r.text);
     },
   });
 

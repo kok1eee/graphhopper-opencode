@@ -5,7 +5,7 @@
  * H3 対応: context() は全文のみ (limit 無し) のためローカルで tail slice する。
  */
 import { $ } from "bun";
-import { flushOrphanCascade, syncCascade } from "./cascade";
+import { beginCheckpointReview, flushOrphanCascade, syncCascade } from "./cascade";
 import {
   type ChildHost,
   escalateChildSession,
@@ -580,6 +580,26 @@ async function onIdle(gh: Gh, sessionID: string): Promise<void> {
         return;
       }
     }
+  }
+
+  /* implementing 途中の main 確認（1 goal 1回）。dedupe より前に段を進める */
+  const checkpoint = active.state.cascade?.checkpoint;
+  if (checkpoint === "requested") {
+    try {
+      if (await beginCheckpointReview(gh, sessionID)) return; // この idle は確認に使う（eval は回さない）
+    } catch {
+      // 確認の失敗でループを止めない
+    }
+    active = state.getActive(root) ?? active;
+  } else if (checkpoint === "reviewing") {
+    state.setCascadeCheckpoint(root, "done", "途中確認を終了");
+    try {
+      const back = await syncCascade(gh);
+      if (back) cascadeNote = cascadeNote ? `${cascadeNote}\n${back}` : back;
+    } catch {
+      // 復帰失敗は次の sync で再試行される
+    }
+    active = state.getActive(root) ?? active;
   }
 
   let evalNote: string | null = null;
