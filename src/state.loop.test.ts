@@ -70,6 +70,10 @@ const CFG: GraphhopperConfig = {
   max_eval_fails: 6,
   stuck_edit_repeat: 5,
   stuck_diff_stall: 4,
+  loop_max_rounds: 50,
+  loop_max_stalls: 3,
+  loop_wait_limit_ms: 30 * 60_000,
+  loop_restart_pause: true,
   lsp_servers: [],
   require_critic: false,
   cascade: {
@@ -159,6 +163,26 @@ describe("isEchoMessage", () => {
 
   test("短い挨拶は false", () => {
     expect(isEchoMessage([msg("assistant", "👋"), msg("user", "👋")])).toBe(false);
+  });
+
+  test("synthetic の自動継続でもパターン2を検知する", () => {
+    const body = "已实施完毕。等待新的实际作业指示。以上。";
+    expect(
+      isEchoMessage([
+        msg("user", "実装を始めよう"),
+        msg("assistant", body),
+        msg("user", `${CONTINUATION_MARKER}\n続けよ`, true),
+        msg("assistant", "次のタスクに進みます。"),
+      ]),
+    ).toBe(false); // 継続への応答が別文なら echo ではない
+    expect(
+      isEchoMessage([
+        msg("user", "実装を始めよう"),
+        msg("assistant", body),
+        msg("user", `${CONTINUATION_MARKER}\n${body}`, true),
+        msg("assistant", body),
+      ]),
+    ).toBe(true); // 継続への応答が直前の assistant の繰り返し
   });
 });
 
@@ -395,6 +419,8 @@ describe("継続注入dedupe", () => {
     expect(isHumanTextPart({ type: "text", text: `${CONTINUATION_MARKER} foo` })).toBe(false);
     expect(isHumanTextPart({ type: "text", text: "実装して" })).toBe(true);
     expect(isHumanTextPart({ type: "text", text: "実装して", synthetic: true })).toBe(false);
+    expect(isHumanTextPart({ type: "text", text: "[graphhopper] eval_cmd が 6 回連続失敗" })).toBe(false);
+    expect(isHumanTextPart({ type: "text", text: "[graphhopper] 無限ループを検知" })).toBe(false);
   });
 
   test("待機ackの言い換えだけではフィンガープリントが変わらない", () => {

@@ -24,7 +24,8 @@ import { finishCascade, maybeRequestCheckpoint, syncCascade } from "./cascade";
 import { ensureEntryDecision } from "../../../src/entry-decide";
 import * as state from "../../../src/state";
 import { readRun, summarizeRun } from "../../../src/workflow";
-import { noteSession, S, text, type Gh } from "./shared";
+import { clearWaitTimer, noteSession, S, text, type Gh } from "./shared";
+import { checkBuiltinGoal } from "../../../src/goal-conflict";
 
 type Ctx = { sessionID: string };
 
@@ -32,6 +33,31 @@ function sess(gh: Gh, context: Ctx): string {
   const id = String(context.sessionID ?? "");
   if (id) noteSession(gh.root, id);
   return id;
+}
+
+/** 組み込み /goal が active なら開始・再開を拒否する（二重ループ防止・fail-open） */
+async function builtinGoalRefusal(
+  gh: Gh,
+  sessionID: string,
+): Promise<string | null> {
+  if (!sessionID) return null;
+  try {
+    const rpcClient = gh.ctx.rpc as unknown as {
+      call: (input: unknown, options?: unknown) => Promise<{ output?: unknown }>;
+    };
+    const r = await checkBuiltinGoal((input) => {
+      const signal = (input as { signal?: AbortSignal } | null)?.signal;
+      return rpcClient.call(input, { signal });
+    }, sessionID);
+    if (!r.active) return null;
+    return (
+      "error: このセッションでは opencode 組み込みの /goal が active です。" +
+      "2つのループが同じ idle で競合するため開始できません。" +
+      "先に `/goal pause` または `/goal clear` を実行してから再試行してください。"
+    );
+  } catch {
+    return null;
+  }
 }
 
 export function registerCoreTools(
@@ -62,6 +88,10 @@ export function registerCoreTools(
       switch (args.action) {
         case "start": {
           if (!args.title) return text("error: title is required for start");
+          {
+            const conflict = await builtinGoalRefusal(gh, sessionID);
+            if (conflict) return text(conflict);
+          }
           const active = state.getActive(root);
           if (active && active.goal.status === "active") {
             return text(
@@ -98,6 +128,7 @@ export function registerCoreTools(
           );
         }
         case "pause": {
+          clearWaitTimer(sessionID);
           /* pause 中に main が残らないよう、途中確認は終わらせる */
           const cp = state.getActive(root)?.state.cascade?.checkpoint;
           if (cp && cp !== "done") state.setCascadeCheckpoint(root, "done", "pause");
@@ -105,6 +136,10 @@ export function registerCoreTools(
           return text(a ? `paused: "${a.goal.title}"` : "no active goal");
         }
         case "resume": {
+          {
+            const conflict = await builtinGoalRefusal(gh, sessionID);
+            if (conflict) return text(conflict);
+          }
           if (state.isResumeBlocked(root) && !args.force) {
             const s = state.getActive(root);
             const max = state.readConfig(root).loop_stop_max;
@@ -125,6 +160,7 @@ export function registerCoreTools(
         case "complete": {
           const a = state.getActive(root);
           if (!a) return text("no active goal");
+          clearWaitTimer(sessionID);
           if (!args.force && a.state.last_verifier?.level !== "clean") {
             return text(
               "error: complete には直近の graphhopper_verifier_set（集約 clean）が必要です（self-graded 完了は禁止）。" +
@@ -140,6 +176,7 @@ export function registerCoreTools(
           );
         }
         case "clear": {
+          clearWaitTimer(sessionID);
           const restored = await finishCascade(gh);
           state.clearActiveGoal(root);
           state.unbindSession(root, sessionID);
@@ -382,7 +419,7 @@ export function registerCoreTools(
   editor.add({
     name: "graphhopper_set_eval",
     description:
-      "implementingの合否を機械判定するコマンド（テスト/lint/typecheck等）を設定する。設定後はturn終了（session.execution.succeeded）ごとに自動実行され、pass=polishへ自動遷移・fail=fail_streak機械カウントになる。graphhopper_attemptの自己申告より優先される",
+      "implementingの合否を機械判定するコマンド（テスト/lint/typecheck等）を設定する。設定後はturn終了（idle）ごとに自動実行され、pass=polishへ自動遷移・fail=fail_streak機械カウントになる。graphhopper_attemptの自己申告より優先される",
     input: S.obj(
       { cmd: S.str("実行するシェルコマンド（例: 'npx tsc --noEmit && npm test'）。空文字で解除") },
       ["cmd"],

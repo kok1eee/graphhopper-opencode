@@ -37,13 +37,16 @@ import {
   type EntryVerdict,
 } from "../../../src/entry-decide";
 import { decisionAvailable } from "../../../src/decision";
-import { isFailedEvent, isInterruptedEvent, isTurnEndEvent } from "../../../src/events";
+import { isFailedEvent, isInterruptedEvent } from "../../../src/events";
+import { evaluateGuard, isMidRoundRestart, progressKeyOf, type GuardPauseReason } from "../../../src/loop-guard";
+import { checkBuiltinGoal } from "../../../src/goal-conflict";
+import { statSync } from "node:fs";
 import { readHandoff } from "../../../src/handoff";
 import * as state from "../../../src/state";
 import { isDesignDocLocked, isDesignGateBlocked } from "../../../src/state";
 import { LSPServerManager } from "../../../src/lsp/client";
 import { handleGrandchild } from "./workflow";
-import type { Gh } from "./shared";
+import { clearAllWaitTimers, clearWaitTimer, setWaitTimer, type Gh } from "./shared";
 
 const SYSTEM_GUIDE = `## graphhopper（designing/implementing/polishループ）の存在
 
@@ -166,8 +169,93 @@ interface CompactionEvent {
   messages?: unknown[];
 }
 
+/* /goal 競合を記録した goal（1 goal 1回） */
+const goalConflictNoted = new Set<string>();
+
+async function notifyPause(gh: Gh, sessionID: string, text: string): Promise<void> {
+  try {
+    await gh.ctx.session.prompt({
+      sessionID,
+      text,
+      metadata: { [INTERNAL_PROMPT_METADATA_KEY]: true },
+    });
+  } catch {
+    // 通知失敗でも pause は成立している
+  }
+}
+
+/** ガードによる pause の通知文 */
+export function guardPauseText(
+  reason: GuardPauseReason,
+  next: { rounds: number; stalls: number },
+  cfg: { loop_max_rounds: number; loop_max_stalls: number },
+): string {
+  const head =
+    reason === "rounds"
+      ? `自動継続が上限（${cfg.loop_max_rounds} 回）に達した`
+      : reason === "stalls"
+        ? `進捗の無いターンが ${cfg.loop_max_stalls} 回続いた`
+        : reason === "wait"
+          ? "background（subagent / shell）の完了を待ち続けた"
+          : "継続の途中でプロセスが落ちた";
+  return (
+    `[graphhopper] ${head}ため自動継続を停止しました（goal は pause）。` +
+    `rounds=${next.rounds} stalls=${next.stalls}。` +
+    "状況を確認し、続けるなら graphhopper_goal(action: 'resume') で再開してください。"
+  );
+}
+
+/** 継続可否を判断する材料になる進捗キー */
+function currentProgressKey(root: string, goalId: string, s: state.LoopState): string {
+  const loaded = state.readTodosStatus(root, goalId);
+  const items = loaded.valid ? loaded.store.items : [];
+  const todosDone = items.filter((i) => i.status === "completed").length;
+  let planSize: number | null = null;
+  try {
+    planSize = statSync(state.planPath(root, goalId)).size;
+  } catch {
+    planSize = null;
+  }
+  return progressKeyOf({
+    phase: s.phase,
+    todosDone,
+    evalFingerprint: s.last_eval_fingerprint,
+    diffLines: s.last_diff_lines,
+    planSize,
+  });
+}
+
 export async function registerHooks(gh: Gh): Promise<() => void> {
   const { ctx, root } = gh;
+
+  /* 起動時: 継続を積んだまま落ちた goal を pause する（rounds 予算は維持） */
+  try {
+    const cfg0 = state.readConfig(root);
+    const active0 = state.getActive(root);
+    if (
+      active0 &&
+      active0.goal.status === "active" &&
+      isMidRoundRestart(active0.state.guard, state.bootId(), cfg0.loop_restart_pause)
+    ) {
+      const paused = state.stopLoopByPause(root);
+      if (paused) {
+        state.noteGuard(root, { pending: false, wait_since: null });
+        state.recordEvent(root, {
+          type: "guard_pause",
+          goal: paused.goal.id,
+          reason: "restart",
+          rounds: active0.state.guard.rounds,
+          stalls: active0.state.guard.stalls,
+        });
+        console.warn(
+          "graphhopper: 継続の途中で落ちた goal を pause しました goal=%s",
+          paused.goal.id,
+        );
+      }
+    }
+  } catch {
+    // 起動時チェックの失敗で plugin を止めない
+  }
 
   /* C-2不変条件: designing フェーズで source 編集を物理ブロックする */
   await ctx.tool.hook("execute.before", (event: unknown) => {
@@ -366,6 +454,22 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
   });
 
   /* event 駆動: deleted→unbind、idle→loop検知・dedupe・eval・continuation注入 */
+  /* 自動継続は idle フック内で synthetic を積む（同一 execution で次ステップが走る）。
+   * イベント（execution.succeeded）経由より、busy period の分裂・ユーザー入力との競合・
+   * ラウンド間クラッシュでの取りこぼしが無い。 */
+  await ctx.session.hook("experimental.idle", async (event: unknown) => {
+    const e = event as { sessionID?: unknown; background?: unknown };
+    try {
+      await onIdle(
+        gh,
+        String(e.sessionID ?? ""),
+        Array.isArray(e.background) ? e.background : [],
+      );
+    } catch (err) {
+      console.warn(`graphhopper: idle hook failed: ${String(err)}`);
+    }
+  });
+
   const controller = new AbortController();
   void (async () => {
     try {
@@ -374,12 +478,9 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
           type?: string;
           data?: { sessionID?: string; info?: { id?: string }; status?: { type?: string } };
         };
-        /* turn 完了のシグナルは session.execution.succeeded（v2 の正）。
-         * 判定は src/events.ts に集約している（src/events.ts:1 参照）。
-         * interrupted（ユーザー中断）と failed（プロバイダ障害）は自動継続しない。
-         *   両者は自動継続すると空回りするため、意図的に除外する。 */
+        /* 自動継続は experimental.idle フックが担当する（イベント側では駆動しない）。
+         * interrupted / failed は idle フック自体が発火しないため、ここでの除外は不要。 */
         if (isInterruptedEvent(event.type) || isFailedEvent(event.type)) continue;
-        const idle = isTurnEndEvent(event.type);
         try {
           if (event.type === "session.created") {
             const created = event.data as Record<string, unknown> | undefined;
@@ -409,8 +510,7 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
             }
             continue;
           }
-          if (!idle) continue;
-          await onIdle(gh, String(event.data?.sessionID ?? ""));
+          continue;
         } catch {
           // ループを止めないためイベントハンドラ内の例外は握りつぶす
         }
@@ -420,7 +520,10 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
     }
   })();
 
-  return () => controller.abort();
+  return () => {
+    controller.abort();
+    clearAllWaitTimers();
+  };
 }
 
 /** 子セッション（subagent）か。parentID があれば親あり。
@@ -522,9 +625,17 @@ function handleChildSessionCreated(gh: Gh, data: Record<string, unknown> | undef
   })();
 }
 
-async function onIdle(gh: Gh, sessionID: string): Promise<void> {
+async function onIdle(
+  gh: Gh,
+  sessionID: string,
+  background: unknown[] = [],
+): Promise<void> {
   const { ctx, root } = gh;
   if (!sessionID) return;
+  const boot = state.bootId();
+  /* 以前の待ちタイマーを必ず落とす（pause/complete 後も残らないように）。
+   * 待っている場合だけ、下で張り直す */
+  clearWaitTimer(sessionID);
   let cascadeNote: string | null = null;
   /* MCP経由の complete/clear で残った cascade を先に復元する */
   try {
@@ -538,6 +649,14 @@ async function onIdle(gh: Gh, sessionID: string): Promise<void> {
   if (active.goal.status !== "active") return;
   if (active.state.phase === "done") return;
   if (active.state.session_id !== sessionID) return;
+  /* 前回このプロセスが積んだ継続が返ってきたので pending を戻す（bound セッションだけ） */
+  {
+    const g0 = active.state.guard;
+    if (g0.pending && g0.boot === boot) {
+      state.noteGuard(root, { pending: false });
+      active = state.getActive(root) ?? active;
+    }
+  }
 
   /* H3: 全文取得→ローカル tail slice。fetch は idle あたり1本。 */
   let idleMsgs: state.SessionMessageLike[] | null = null;
@@ -603,6 +722,93 @@ async function onIdle(gh: Gh, sessionID: string): Promise<void> {
     active = state.getActive(root) ?? active;
   }
 
+  const cfg = state.readConfig(root);
+
+  /* background（subagent / shell）が動いている間は継続しない。
+   * 完了すると idle が再発火するので、待つだけでよい。
+   * ただし完了通知が来ないまま固まる場合に備えて上限時間で pause する。 */
+  const waiting = background.some((b) => {
+    const kind = (b as { kind?: unknown } | null)?.kind;
+    return kind === "subagent" || kind === "shell";
+  });
+  if (waiting) {
+    const d = evaluateGuard({
+      guard: state.readState(root).guard,
+      config: cfg,
+      now: Date.now(),
+      progressKey: state.readState(root).guard.progress_key ?? "",
+      waiting: true,
+      boot,
+    });
+    state.noteGuard(root, d.next);
+    if (d.action === "pause") {
+      const paused = state.stopLoopByPause(root);
+      if (paused) {
+        state.recordEvent(root, {
+          type: "guard_pause",
+          goal: paused.goal.id,
+          reason: "wait",
+          rounds: d.next.rounds,
+          stalls: d.next.stalls,
+        });
+        await notifyPause(gh, sessionID, guardPauseText("wait", d.next, cfg));
+      }
+      return;
+    }
+    /* 待ち上限のタイマー（idle が来なくても止める） */
+    clearWaitTimer(sessionID);
+    const timer = setTimeout(() => {
+      clearWaitTimer(sessionID);
+      void (async () => {
+        const a = state.getActive(root);
+        if (!a || a.goal.status !== "active" || a.state.session_id !== sessionID) return;
+        /* 待ちが解けているなら pause しない（再開後の誤発火を防ぐ） */
+        if (!state.readState(root).guard.wait_since) return;
+        const paused = state.stopLoopByPause(root);
+        if (!paused) return;
+        const g = state.readState(root).guard;
+        state.noteGuard(root, { wait_since: null });
+        state.recordEvent(root, {
+          type: "guard_pause",
+          goal: paused.goal.id,
+          reason: "wait",
+          rounds: g.rounds,
+          stalls: g.stalls,
+        });
+        await notifyPause(gh, sessionID, guardPauseText("wait", g, cfg));
+      })();
+    }, Math.max(1_000, cfg.loop_wait_limit_ms));
+    timer.unref?.();
+    setWaitTimer(sessionID, timer);
+    return;
+  }
+  /* 組み込み /goal が active なら継続しない（二重ループ防止）。fail-open。 */
+  try {
+    const rpcClient = ctx.rpc as unknown as {
+      call: (input: unknown, options?: unknown) => Promise<{ output?: unknown }>;
+    };
+    const rpc = (input: unknown) => {
+      const signal = (input as { signal?: AbortSignal } | null)?.signal;
+      return rpcClient.call(input, { signal });
+    };
+    const builtin = await checkBuiltinGoal(rpc as never, sessionID);
+    const a = state.getActive(root);
+    if (builtin.active) {
+      if (a?.goal.id && !goalConflictNoted.has(a.goal.id)) {
+        goalConflictNoted.add(a.goal.id);
+        state.recordEvent(root, { type: "goal_conflict", goal: a.goal.id, reason: builtin.reason });
+      }
+      return;
+    }
+    /* 検知できなかった理由を1 goal 1回だけ残す（fail-open の見える化。noise を避けて shape のみ） */
+    if (builtin.reason === "shape" && a?.goal.id && !goalConflictNoted.has(`${a.goal.id}:check`)) {
+      goalConflictNoted.add(`${a.goal.id}:check`);
+      state.recordEvent(root, { type: "goal_conflict", goal: a.goal.id, reason: `check_failed:${builtin.reason}` });
+    }
+  } catch {
+    // 検知失敗でループを止めない
+  }
+
   let evalNote: string | null = null;
 
   if (idleMsgs !== null) {
@@ -611,7 +817,7 @@ async function onIdle(gh: Gh, sessionID: string): Promise<void> {
       active.state.phase,
       active.state.eval_cmd,
       active.state.last_eval_fingerprint,
-    );
+    ) + `|r${active.state.guard.rounds}`;
     if (active.state.last_continuation_marker !== null && active.state.last_continuation_marker === marker) {
       if (active.goal.id) {
         state.recordEvent(root, { type: "continuation_skipped", goal: active.goal.id, marker });
@@ -676,15 +882,42 @@ async function onIdle(gh: Gh, sessionID: string): Promise<void> {
     if (!active) return;
   }
 
-  await ctx.session.prompt({
+  /* 上限ガード: ラウンド数・進捗なし回数で止める */
+  const progressKey = currentProgressKey(root, active.goal.id, active.state);
+  const decision = evaluateGuard({
+    guard: active.state.guard,
+    config: cfg,
+    now: Date.now(),
+    progressKey,
+    waiting: false,
+    boot,
+  });
+  if (decision.action === "pause") {
+    const paused = state.stopLoopByPause(root);
+    if (paused) {
+      state.noteGuard(root, decision.next);
+      state.recordEvent(root, {
+        type: "guard_pause",
+        goal: paused.goal.id,
+        reason: decision.reason,
+        rounds: decision.next.rounds,
+        stalls: decision.next.stalls,
+      });
+      await notifyPause(gh, sessionID, guardPauseText(decision.reason, decision.next, cfg));
+    }
+    return;
+  }
+  state.noteGuard(root, decision.next);
+
+  await ctx.session.synthetic({
     sessionID,
     text: [state.CONTINUATION_MARKER, evalNote, cascadeNote, continuationText(active.goal, active.state)].filter(Boolean).join("\n\n"),
-    metadata: { [INTERNAL_PROMPT_METADATA_KEY]: true },
-  });
+  } as never);
   if (idleMsgs !== null) {
     state.noteContinuation(
       root,
-      state.continuationFingerprint(idleMsgs, active.state.phase, active.state.eval_cmd, active.state.last_eval_fingerprint),
+      state.continuationFingerprint(idleMsgs, active.state.phase, active.state.eval_cmd, active.state.last_eval_fingerprint) +
+        `|r${state.readState(root).guard.rounds}`,
     );
   }
 }

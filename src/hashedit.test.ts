@@ -46,6 +46,10 @@ const CFG: GraphhopperConfig = {
   max_eval_fails: 6,
   stuck_edit_repeat: 5,
   stuck_diff_stall: 4,
+  loop_max_rounds: 50,
+  loop_max_stalls: 3,
+  loop_wait_limit_ms: 30 * 60_000,
+  loop_restart_pause: true,
   lsp_servers: [],
   require_critic: false,
   cascade: {

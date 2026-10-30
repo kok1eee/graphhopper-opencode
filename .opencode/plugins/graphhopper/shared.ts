@@ -11,6 +11,27 @@ export interface Gh {
   root: string;
 }
 
+/* ---------- background 待ちタイマー（pause/complete でも確実に止める） ---------- */
+const waitTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+export function setWaitTimer(sessionID: string, timer: ReturnType<typeof setTimeout>): void {
+  clearWaitTimer(sessionID);
+  waitTimers.set(sessionID, timer);
+}
+
+export function clearWaitTimer(sessionID: string): void {
+  const t = waitTimers.get(sessionID);
+  if (t) {
+    clearTimeout(t);
+    waitTimers.delete(sessionID);
+  }
+}
+
+export function clearAllWaitTimers(): void {
+  for (const t of waitTimers.values()) clearTimeout(t);
+  waitTimers.clear();
+}
+
 /* ---------- tool input JSON Schema builders ---------- */
 type Schema = Record<string, unknown>;
 const str = (description: string): Schema => ({ type: "string", description });

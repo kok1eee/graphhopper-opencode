@@ -191,3 +191,22 @@ phase が implementing を外れる・pause すると途中確認は終了する
 **対象はメインセッションだけ**。graphhopper-* の subagent は agent 定義の `model:` で固定されており、main に追従しない
 （調査・実装を高いモデルで回さないため）。モデル未指定の組み込み `explore`/`general` は親を継承し得るので、
 main 中（designing/確認/polish）に呼ぶと main で動く点に注意。
+
+## 自動継続と上限ガード
+
+自動継続は opencode の `experimental.idle` フックで行う。idle になる直前に `ctx.session.synthetic` を積むので、
+次のステップが**同じ execution** で走る（ターンごとに busy period が分かれない・ユーザー入力と競合しにくい）。
+
+- `background`（実行中の subagent / shell）がある間は継続しない。完了時の wake で idle が再発火する。
+- ガード（`loop_max_rounds` 50 / `loop_max_stalls` 3 / `loop_wait_limit_ms` 30分 / `loop_restart_pause`）に
+  達したら `stopLoopByPause` で pause し、`guard_pause` を history に記録する。resume でガードは数え直す
+  （`loop_stop_count` の恒久予算は維持）。
+- 進捗キー = phase + todos 完了数 + eval フィンガープリント + 差分行数 + design doc のサイズ。
+- 継続を積んだままプロセスが落ちた場合（`guard.pending` かつ別 boot）、起動時に pause する。
+
+## 組み込み `/goal` との併用禁止
+
+opencode 2.2.1+ の `/goal` も idle で継続を積むため、同じセッションで両方を回すと二重ループになる。
+`graphhopper_goal(start/resume)` は `/goal` が active なら拒否し、idle の継続もスキップする
+（`goal_conflict` を記録）。検知は `opencode.goal` RPC で、失敗時は fail-open（古い opencode で止めない）。
+単発の「〜が終わるまで」は `/goal`、設計判断を含む複数ファイル変更は graphhopper を使う。

@@ -204,6 +204,22 @@ export interface CascadeState {
   at: string;
 }
 
+/** 自動継続の上限ガード（opencode 組み込み /goal と同趣旨の歯止め） */
+export interface LoopGuard {
+  /** 継続を積んだ回数（resume で 0 に戻す） */
+  rounds: number;
+  /** 進捗なしの連続回数（resume で 0 に戻す） */
+  stalls: number;
+  /** 直近の継続時の進捗キー */
+  progress_key: string | null;
+  /** background（subagent/shell）待ちを始めた時刻。無ければ null */
+  wait_since: string | null;
+  /** 継続を積んだが、まだターンが返っていない */
+  pending: boolean;
+  /** 継続を積んだプロセスの boot id */
+  boot: string | null;
+}
+
 export interface LoopState {
   goal_id: string | null;
   /** ループ継続注入の対象セッション。null は未バインド */
@@ -287,6 +303,8 @@ export interface LoopState {
   decision_id: string | null;
   /** モデルカスケードの適用状態。null＝未適用 */
   cascade: CascadeState | null;
+  /** 自動継続の上限ガード */
+  guard: LoopGuard;
   /** light/advised→full昇格の実施時刻。null＝未昇格 */
   escalated_at: string | null;
   updated_at: string;
@@ -367,6 +385,14 @@ export interface GraphhopperConfig {
   /** trueで designing→implementing 遷移に critic_review 記録を要求する。
    * 既定 false（opt-in維持。ゲート化の是非は未決のためflagで両対応） */
   require_critic: boolean;
+  /** 自動継続の上限: 継続を積む回数（既定 50） */
+  loop_max_rounds: number;
+  /** 自動継続の上限: 進捗なしが連続した回数（既定 3） */
+  loop_max_stalls: number;
+  /** 自動継続の上限: background（subagent/shell）待ちの最大時間 ms（既定 30 分） */
+  loop_wait_limit_ms: number;
+  /** true ならラウンド途中で落ちた goal を起動時に pause する（既定 true） */
+  loop_restart_pause: boolean;
   /** dynamic workflow runner の設定 */
   workflow?: {
     /** 1ノードのタイムアウト(ms)。省略時は 10 分 */
@@ -388,6 +414,10 @@ export const DEFAULT_CONFIG: GraphhopperConfig = {
   max_eval_fails: 6,
   stuck_edit_repeat: 5,
   stuck_diff_stall: 4,
+  loop_max_rounds: 50,
+  loop_max_stalls: 3,
+  loop_wait_limit_ms: 30 * 60_000,
+  loop_restart_pause: true,
   lsp_servers: [],
   require_critic: false,
   cascade: {
@@ -762,6 +792,18 @@ export type HistoryEvent =
   | { type: "goal_resume"; goal: string }
   | { type: "cascade_switch"; goal: string; from: string; to: string; phase: Phase; reason: string }
   | {
+      type: "guard_pause";
+      goal: string;
+      reason: "rounds" | "stalls" | "wait" | "restart";
+      rounds: number;
+      stalls: number;
+    }
+  | {
+      type: "goal_conflict";
+      goal: string;
+      reason: string;
+    }
+  | {
       type: "cascade_checkpoint";
       goal: string;
       stage: "requested" | "reviewing" | "done";
@@ -995,6 +1037,12 @@ export function readConfig(root: string): GraphhopperConfig {
     loop_stop_threshold:
       raw.loop_stop_threshold ?? DEFAULT_CONFIG.loop_stop_threshold,
     loop_stop_max: raw.loop_stop_max ?? DEFAULT_CONFIG.loop_stop_max,
+    loop_max_rounds: raw.loop_max_rounds ?? DEFAULT_CONFIG.loop_max_rounds,
+    loop_max_stalls: raw.loop_max_stalls ?? DEFAULT_CONFIG.loop_max_stalls,
+    loop_wait_limit_ms:
+      raw.loop_wait_limit_ms ?? DEFAULT_CONFIG.loop_wait_limit_ms,
+    loop_restart_pause:
+      raw.loop_restart_pause ?? DEFAULT_CONFIG.loop_restart_pause,
     loop_tool_window:
       raw.loop_tool_window ?? DEFAULT_CONFIG.loop_tool_window,
     loop_tool_repeat_threshold:
@@ -1077,6 +1125,14 @@ function emptyState(): LoopState {
     difficulty: null,
     decision_id: null,
     cascade: null,
+    guard: {
+      rounds: 0,
+      stalls: 0,
+      progress_key: null,
+      wait_since: null,
+      pending: false,
+      boot: null,
+    },
     escalated_at: null,
     initial_diff_lines: null,
     initial_diff_files: null,
@@ -1096,6 +1152,7 @@ export function readState(root: string): LoopState {
   if (merged.cascade) {
     merged.cascade = { ...merged.cascade, children: merged.cascade.children ?? [] };
   }
+  merged.guard = { ...emptyState().guard, ...(loaded.guard ?? {}) };
   // 破損 state.json の未知 phase は designing にフォールバックする。
   // 未検証のまま通すと PHASE_ACTION[phase] 参照が undefined になる。
   if (!(PHASES as readonly string[]).includes(merged.phase)) {
@@ -1258,6 +1315,15 @@ export function resumeGoal(
         last_diff_lines: null,
         diff_stall: 0,
         last_stuck_reasons: [],
+        // 上限ガードは数え直す（loop_stop_count の恒久予算は維持）
+        guard: {
+          rounds: 0,
+          stalls: 0,
+          progress_key: null,
+          wait_since: null,
+          pending: false,
+          boot: null,
+        },
         // 別goalが走った後のresumeでも自goalの文脈に戻す（snapshotが無ければ現状維持）
         ...(snap
           ? {
@@ -2597,7 +2663,13 @@ export function isEchoMessage(msgs: SessionMessageLike[]): boolean {
 
   const text = (m: SessionMessageLike): string =>
     (m.parts ?? [])
-      .filter((p) => p.type === "text" && !p.synthetic)
+      /* 自動継続（synthetic + CONTINUATION_MARKER）は echo 判定の対象に含める。
+       * synthetic を一律に外すと、継続ループの echo 検知（パターン2）が空振りする */
+      .filter(
+        (p) =>
+          p.type === "text" &&
+          (!p.synthetic || (p.text ?? "").startsWith(CONTINUATION_MARKER)),
+      )
       .map((p) => p.text ?? "")
       .join("");
 
@@ -2704,7 +2776,9 @@ export function isHumanTextPart(
   p: SessionMessageLike["parts"][number],
 ): boolean {
   if (p.type !== "text" || p.synthetic || !(p.text ?? "").length) return false;
-  return !p.text!.startsWith(CONTINUATION_MARKER);
+  if (p.text!.startsWith(CONTINUATION_MARKER)) return false;
+  /* graphhopper の通知（"[graphhopper] ..."）は人間の新規入力ではない */
+  return !p.text!.startsWith("[graphhopper");
 }
 
 /** 同一tool call反復を検知する。callID重複は1件に数え直す。 */
@@ -2888,6 +2962,22 @@ export function noteEvalFingerprint(root: string, fp: string): LoopState {
 /** loop 停止時に goal を pause する（自動継続を物理的に止める）。累積停止回数
  * （loop_stop_count）を加算し、loop_stopped イベントを記録する。
  * pause は human の resume でしか解除されない。 */
+/** このプロセスの識別子。継続途中で落ちたかを判定する */
+let BOOT_ID: string | null = null;
+export function bootId(): string {
+  return (BOOT_ID ??= globalThis.crypto.randomUUID());
+}
+
+/** ガード状態の部分更新 */
+export function noteGuard(
+  root: string,
+  patch: Partial<LoopGuard>,
+): ActiveLoop | null {
+  return mutateActive(root, (_goal, state) => ({
+    state: { guard: { ...state.guard, ...patch } },
+  }));
+}
+
 export function stopLoopByPause(root: string): ActiveLoop | null {
   const state = readState(root);
   const count = state.loop_stop_count + 1;
