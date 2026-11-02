@@ -74,7 +74,7 @@ describe("invoke 引数検証", () => {
 describe("buildArgs", () => {
   test("基本形（-- 境界・shell非経由の配列）", () => {
     const a = buildArgs({ agent: "graphhopper-critic", model: "p/m", dir: "/r", title: "t", prompt: "hi" });
-    expect(a).toEqual(["run", "--model", "p/m", "--agent", "graphhopper-critic", "--title", "t", "--", "hi"]);
+    expect(a).toEqual(["run", "--standalone", "--model", "p/m", "--agent", "graphhopper-critic", "--title", "t", "--", "hi"]);
   });
   test("model省略時はflag自体付けない", () => {
     const a = buildArgs({ agent: "graphhopper-critic", dir: "/r", title: "t", prompt: "hi" });

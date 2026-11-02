@@ -93,10 +93,15 @@ function validModel(m: string): boolean {
 
 /** argv組立（純関数・shell非経由）。`--` でmessage境界を明示する。
  * v2 の `run` に `--dir` は無い (R-M4 実測) ため付けない。対象 dir は spawn 側の
- * `cwd` (RunChildOpts.cwd = root) で運ぶ。v2 run は cwd を project として解決する。 */
+ * `cwd` (RunChildOpts.cwd = root) で運ぶ。v2 run は cwd を project として解決する。
+ *
+ * `--standalone` は必須（2026-10-30 実測）。既定の v2 run は background service
+ * （共有サーバ）に生成を委譲するため、timeout で CLI のプロセスグループを kill しても
+ * **サーバ側で生成が続き課金だけが残る**（300秒killの63秒後に子セッションが完走した）。
+ * private server を子プロセス内に立てれば group kill で生成も止まる。 */
 export function buildArgs(a: { agent: string; model?: string; dir: string; title: string; prompt: string }): string[] {
   void a.dir;
-  const args = ["run"];
+  const args = ["run", "--standalone"];
   if (a.model) args.push("--model", a.model);
   args.push("--agent", a.agent, "--title", a.title, "--", a.prompt);
   return args;
