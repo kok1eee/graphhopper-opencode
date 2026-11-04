@@ -55,7 +55,7 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
   **d1 の判定は参考値**。明らかに単一ファイルの小修正なら route_set をしない（ループを作らない）
 - 手動で判定し直したいときだけ `graphhopper_route(request)` → `graphhopper_decide(request)` →
   `graphhopper_route_set(route, reason)`。手動の decide も同じログに記録される
-- **full=フル**（現行通り）/**light=軽量**（thin design＋task列のみ、critic省略、verifier general×1）/
+- **full=フル**（現行通り）/**light=軽量**（design の内容規約は full と同じ。判断は少なくてよいが1件以上、critic省略、verifier general×1）/
   **direct=直行**（loopなし・goalを作らない。historyに1行のみ残る）/
   **advised=軽量＋第二意見**（light相当＋implementing前にadvisor相談1回）/
   **oracle=多角**（full相当＋開始時にoracle相談1回。stuck時は同session継続）
@@ -65,7 +65,7 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
   `router_check` でlight/advised＋大diffなら**自動昇格**（designing巻き戻し＋肉付け＋critic1回＋fan-out×3）。
   stuck発火時もlight/advisedは自動昇格する（fullのstuckは従来通りoracle相談）。
   昇格後はcritic記録なしにimplementingへ進めない（機械ゲート）
-- light適用条件（decide criteria）：単一関心・設計判断なし・既存踏襲・テスト容易。
+- light適用条件（decide criteria）：単一関心・設計判断が少ない（1件以上。判断ゼロの作業は direct）・既存踏襲・テスト容易。
   1つでも欠けたらfull。誤lightは昇格で回収する前提
 
 ### designing

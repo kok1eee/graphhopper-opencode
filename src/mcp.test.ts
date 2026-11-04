@@ -300,6 +300,7 @@ describe("graphhopper-mcp goal往復", () => {
       "graphhopper_consult_set",
     );
     await call("graphhopper_consult_set", { kind: "advisor", summary: "asked, ok" });
+    fillCompliantDesign(root);
     expect(await call("graphhopper_phase", { phase: "implementing", session_id: "sess-d" })).toContain(
       "phase -> implementing",
     );
@@ -964,6 +965,7 @@ describe("graphhopper-mcp route系tool（統合）", () => {
     };
     await call("graphhopper_goal", { action: "start", title: "auto esc" });
     st.bindEntryRoute(root, "advised");
+    fillCompliantDesign(root);
     await call("graphhopper_phase", { phase: "implementing" });
     // goal開始後の実装分だけが実効diffになる（start前脏れは除外される）
     writeFileSync(join(root, "a.txt"), Array(450).fill("y").join("\n") + "\n");

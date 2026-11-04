@@ -370,7 +370,7 @@ export async function callDecisionWithRetry(
 export const DECISION_ROUTE_CRITERIA: Record<state.EntryRoute, string> = {
   full: "フルループ。設計判断を要する・複数関心にまたがる・規模不明・曖昧・以下のいずれにも当てはまらない全ての作業",
   light:
-    "軽量。全て満たす時のみ → (1)単一関心 (2)設計判断なし (3)既存パターンの踏襲 (4)テスト容易。1つでも欠けたらfull",
+    "軽量。全て満たす時のみ → (1)単一関心 (2)設計判断が少ない（1件以上。判断ゼロの作業はdirect） (3)既存パターンの踏襲 (4)テスト容易。1つでも欠けたらfull",
   advised:
     "軽量＋第二意見。light条件を満たす＋影響範囲の読みに迷いがある／第二意見が欲しい軽微変更",
   oracle:

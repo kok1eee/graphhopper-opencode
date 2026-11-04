@@ -512,29 +512,18 @@ describe("continuationText 3段階文面", () => {
     expect(g.parseEntryRoute("  ADVISED  ").route).toBe("advised");
   });
 
-  test("checkDesignDocThin: task列のみ見る", async () => {
-    const g = await import("./gate");
-    const s = await import("./state");
-    const { mkdtempSync } = await import("node:fs");
-    const { tmpdir } = await import("node:os");
-    const { join } = await import("node:path");
-    const root = mkdtempSync(join(tmpdir(), "gh-thin-"));
-    expect(g.checkDesignDocThin(root, "g-x")).toEqual(["design doc自体が無い"]);
-    const { goal } = s.startGoal(root, "t", "s1");
-    // scaffoldは骨格あり→thinはtask列（scaffoldに含まれる）で通過
-    expect(g.checkDesignDocThin(root, goal.id)).toEqual([]);
-  });
-
   test("effectivePhaseAction: light/advisedのみ注記", async () => {
     const g = await import("./gate");
     expect(g.effectivePhaseAction("designing", null)).toBe(g.PHASE_ACTION["designing"]);
     expect(g.effectivePhaseAction("designing", "full")).toBe(g.PHASE_ACTION["designing"]);
     const light = g.effectivePhaseAction("designing", "light");
-    expect(light).toContain("thin doc");
+    expect(light).toContain("内容規約");
+    expect(light).not.toContain("thin");
     expect(light).toContain("critic省略");
     expect(g.effectivePhaseAction("polish", "light")).toContain("general×1");
     const advised = g.effectivePhaseAction("designing", "advised");
-    expect(advised).toContain("thin doc");
+    expect(advised).toContain("内容規約");
+    expect(advised).not.toContain("thin");
     expect(advised).toContain("graphhopper-advisor");
     const oracle = g.effectivePhaseAction("designing", "oracle");
     expect(oracle).toContain("graphhopper-oracle");

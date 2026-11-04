@@ -78,19 +78,6 @@ export function parseEntryRoute(text: string | null | undefined): {
   return { route: "full", reason: "parse失敗→full" };
 }
 
-/* light/advised用thin design gate: task列の存在のみ（goal理解・設計判断・棄却は問わない）。
- * 薄いspecで回す代わり、昇格時にdesigningへ戻って肉付けする */
-export function checkDesignDocThin(root: string, goalId: string): string[] {
-  let raw: string;
-  try {
-    raw = decodeUtf8Strict(readFileSync(state.planPath(root, goalId)));
-  } catch {
-    return ["design doc自体が無い"];
-  }
-  if (!TASK_LINE.test(raw)) return ["タスク行（- ...）"];
-  return [];
-}
-
 /* route別phase指示（effective route）。light/advisedはcritic省略・verifier×1の注記を付与。
  * oracleは開始時相談の注記を付与。transform注入・tool応答の単一源泉 */
 export function effectivePhaseAction(
@@ -104,7 +91,7 @@ export function effectivePhaseAction(
         ? "implementing前にtask(graphhopper-advisor)／graphhopper_invoke(agent: 'graphhopper-advisor')で相談1回し、graphhopper_consult_set(kind: 'advisor')で記録（機械ゲート）。"
         : "";
     const note =
-      `（entry_route=${entryRoute}軽量: designingはthin doc＋task列のみで可、critic省略、` +
+      `（entry_route=${entryRoute}軽量: designingは内容規約（判断の理由・代替案・反証条件、§5 触らないもの、§2 の file:line 証拠、§4 のタスク紐付け）を満たすこと。critic省略、` +
       `polishのverifierはgeneral×1。${advisor}` +
       "詰まったらgraphhopper_escalateでfullへ昇格）";
     // 単一源泉則: light/advised designingもPHASE_ACTION.designingを基にし、差分は例外条項で明示する
@@ -633,19 +620,13 @@ export function checkPhaseMove(
       "task(graphhopper-oracle)／graphhopper_invoke(agent: 'graphhopper-oracle')で相談1回し、graphhopper_consult_set(kind: 'oracle')で記録してから遷移せよ。"
     );
   }
-  // scaffoldが自動生成するため、失敗するのは骨格を削った場合のみ。
-  // entry_route=light/advisedはthin gate（task列のみ。薄いspecで回し昇格時に肉付けする）
+  // scaffoldが自動生成するため、骨格不足で失敗するのは骨格を削った場合のみ。
+  // route による内容規約の特別扱いはしない（light/advised も同じ規約。規模差は判断の数で吸収する）
   if (to === "implementing" && active.state.phase === "designing") {
-    const thin =
-      active.state.entry_route === "light" ||
-      active.state.entry_route === "advised";
     // design.md は1回だけ読む（骨格と内容で同じ raw を使う。途中で変わると判定が割れる）
     const designRaw = readDesignRaw(root, active.goal.id);
-    const missing = thin
-      ? checkDesignDocThin(root, active.goal.id)
-      : designRaw === null
-        ? ["design doc自体が無い"]
-        : checkDesignDocFromRaw(designRaw);
+    const missing =
+      designRaw === null ? ["design doc自体が無い"] : checkDesignDocFromRaw(designRaw);
     if (missing.length > 0) {
       return (
         `error: design.md の骨格不足（${missing.join("・")}）。` +
@@ -653,17 +634,14 @@ export function checkPhaseMove(
         `質の指摘はcriticの領分であり、このゲートは骨格の有無だけを見る。`
       );
     }
-    // 内容規約（full/oracle のみ）。構造で判定できる規約だけを見る。
-    // light/advised は thin のまま（薄いspecで回し、escalate で肉付けする既存設計）
-    if (!thin) {
-      const violations = checkDesignContent(designRaw ?? "");
-      if (violations.length > 0) {
-        return (
-          `error: design.md が規約に違反（${violations.length}件）。\n- ` +
-          violations.join("\n- ") +
-          "\n修正してから implementing へ遷移せよ（意味の指摘は critic の領分で、このゲートは構造規約だけを見る）。"
-        );
-      }
+    // 内容規約（全 route）。構造で判定できる規約だけを見る。
+    const violations = checkDesignContent(designRaw ?? "");
+    if (violations.length > 0) {
+      return (
+        `error: design.md が規約に違反（${violations.length}件）。\n- ` +
+        violations.join("\n- ") +
+        "\n修正してから implementing へ遷移せよ（意味の指摘は critic の領分で、このゲートは構造規約だけを見る）。"
+      );
     }
   }
   // 進捗ゲート: implementing→polish は未完了タスクを残さない。

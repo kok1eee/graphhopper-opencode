@@ -1284,6 +1284,26 @@ describe("design scaffold＋構造ゲート", () => {
     const err = checkPhaseMove(root, "implementing");
     expect(err).toContain("骨格不足");
   });
+
+  test("light/advised でも内容規約が効く（scaffold は止まり、規約準拠なら通る）", async () => {
+    const s = await import("./state");
+    const { checkPhaseMove } = await import("./gate");
+    const root = tmpRoot();
+    startGoal(root, "t", "s");
+    s.bindEntryRoute(root, "light");
+    expect(checkPhaseMove(root, "implementing")).toContain("規約に違反");
+    fillCompliantDesign(root);
+    expect(checkPhaseMove(root, "implementing")).toBeNull();
+
+    const root2 = tmpRoot();
+    startGoal(root2, "t", "s");
+    s.bindEntryRoute(root2, "advised");
+    // advised は相談ゲートが先に効くため、記録してから内容規約を見る
+    s.setConsult(root2, "advisor", { summary: "asked, ok" });
+    expect(checkPhaseMove(root2, "implementing")).toContain("規約に違反");
+    fillCompliantDesign(root2);
+    expect(checkPhaseMove(root2, "implementing")).toBeNull();
+  });
 });
 
 describe("タスク列抽出（progress素材）", () => {
