@@ -325,7 +325,7 @@ const REQUIRED_SECTIONS: { key: string; match: RegExp }[] = [
   { key: "現状", match: /現状|背景/ },
   { key: "設計判断", match: /設計判断|決定事項/ },
   { key: "タスク列", match: /タスク/ },
-  { key: "棄却", match: /棄却|スコープ外|非対象/ },
+  { key: "スコープ外", match: /触らない|スコープ外|非対象|棄却/ },
 ];
 
 const TASK_LINE = /^\s*-\s*(\[[ x]\])?\s*\S/m;
@@ -355,13 +355,8 @@ export function extractTasks(root: string, goalId: string): DesignProgress {
   return { total: items.length, done: items.filter((i) => i.done).length, items };
 }
 
-export function checkDesignDoc(root: string, goalId: string): string[] {
-  let raw: string;
-  try {
-    raw = decodeUtf8Strict(readFileSync(state.planPath(root, goalId)));
-  } catch {
-    return ["design doc自体が無い"];
-  }
+/** 骨格検査の本体（生テキストを受ける）。checkPhaseMove が1回だけ読んだ raw を共用するため分離 */
+function checkDesignDocFromRaw(raw: string): string[] {
   const headers = raw
     .split("\n")
     .filter((l) => l.startsWith("##"))
@@ -371,6 +366,192 @@ export function checkDesignDoc(root: string, goalId: string): string[] {
   );
   if (!TASK_LINE.test(raw)) missing.push("タスク行（- ...）");
   return missing;
+}
+
+/** 骨格検査（ファイルから読む薄いラッパ）。読めなければ「無い」を返す */
+export function checkDesignDoc(root: string, goalId: string): string[] {
+  const raw = readDesignRaw(root, goalId);
+  return raw === null ? ["design doc自体が無い"] : checkDesignDocFromRaw(raw);
+}
+
+/* ───────── design doc 規約（内容）─────────
+ * 骨格（checkDesignDoc）とは別レイヤー。構造で判定できる規約だけを見る:
+ * 判断の4点セット（理由/代替案/反証条件）、§5 触らないものの非空、
+ * §2 の file:line 証拠2箇所、§4 タスクの判断番号紐付けと判断網羅。
+ * 意味の判定（仕様書化していないか等）は critic の領分であり、ここでは見ない。 */
+
+/** 規約の単一源泉（テストもここを参照する） */
+export const DESIGN_RULES = {
+  /** 判断の4点セット（「決定」は項目自体なので語では見ない） */
+  reason: /理由|なぜ|棄却理由/,
+  alternative: /代替案|代替|他案/,
+  falsify: /反証条件|反証|崩れる条件|失敗条件/,
+  /** 免除マーカー: タスクを持たない判断（「今回入れない」等）に付ける */
+  exempt: /[（(]タスク不要[）)]/,
+  /** 免除マーカーの案内文（エラーメッセージ用） */
+  exemptLabel: "（タスク不要）",
+  /** §2 の証拠アンカー（file:line） */
+  evidence: /[A-Za-z0-9_./-]+\.(?:ts|tsx|js|jsx|mjs|cjs|md|json|toml|ya?ml|sh):\d+/g,
+  evidenceMin: 2,
+  /** 実質内容の最小文字数（プレースホルダ判定の閾値。3文字でラベルだけ/括弧だけを弾く） */
+  minContent: 3,
+  /** §5「触らないもの」の最小文字数（設計判断4: 8文字以上の実質行を要求） */
+  scopeMinContent: 8,
+} as const;
+
+const SECTION_HEADING = /^##\s+(.*)$/;
+const JUDGMENT_LINE = /^(\d+)\.\s+\S/;
+/** タスク行。先頭空白を許す（seed 側 src/todos.ts の parseTaskLines と揃える） */
+const TASK_ITEM_LINE = /^\s*-\s*\[[ x]\]\s+\S/;
+const TASK_REF = /判断\s*(\d+(?:\s*[,、]\s*\d+)*)/;
+const PLACEHOLDER = /^[（(].*[）)]$/;
+const TABLE_SEP = /^\|?[\s:|-]+$/;
+const TABLE_HEAD = /^\|\s*(対象|項目|内容|スコープ)/;
+
+/** 節の本文（見出しの次の行から、次の `##` まで）。無ければ null */
+function sectionBody(raw: string, match: RegExp): string[] | null {
+  // CRLF の doc でも見出しが一致するよう \r を落として分割する
+  const lines = raw.split(/\r?\n/);
+  const i = lines.findIndex((l) => {
+    const m = SECTION_HEADING.exec(l);
+    return m !== null && match.test(m[1]);
+  });
+  if (i === -1) return null;
+  const out: string[] = [];
+  for (const l of lines.slice(i + 1)) {
+    if (SECTION_HEADING.test(l)) break;
+    out.push(l);
+  }
+  return out;
+}
+
+/** 行から記号・ラベル・括弧内プレースホルダを除いた実質文字列。
+ * ラベルは「行頭〜最初のコロン」を丸ごと落とす（代替案/理由/反証条件などの語自体を
+ * 内容と誤認しないため。ラベルだけの行は 0 文字になる） */
+function substantive(line: string): string {
+  let s = line.trim();
+  s = s.replace(/^[-*]\s+/, "").replace(/^\d+\.\s+/, "");
+  s = s.replace(/^[*_`#\s]+/, "");
+  s = s.replace(/^[^:：]{1,16}[:：]\s*/, "");
+  s = s.replace(/[*_`]/g, "");
+  s = s.replace(/[（(][^）)]*[）)]/g, "");
+  return s.replace(/\s/g, "");
+}
+
+/** 語が「実質行」として現れるか（プレースホルダだけの行は数えない） */
+function hasSubstantive(lines: string[], label: RegExp): boolean {
+  return lines.some(
+    (l) => label.test(l) && substantive(l).length >= DESIGN_RULES.minContent,
+  );
+}
+
+/** §5 触らないものが実質空か（プレースホルダ・表ヘッダ・区切りだけ） */
+function isEmptyScope(lines: string[]): boolean {
+  return !lines.some((l) => {
+    const t = l.trim();
+    if (!t) return false;
+    if (TABLE_SEP.test(t) || TABLE_HEAD.test(t)) return false;
+    // ここでラベル（行頭〜最初のコロン）を落とさない: §5 は「型定義: 変更なし」のように
+    // ラベル自体が情報であり、落とすと正当な行が 8 文字未満になって誤って空判定になる
+    const body = t.replace(/^[-*]\s+/, "");
+    if (PLACEHOLDER.test(body)) return false;
+    return body.replace(/\s/g, "").length >= DESIGN_RULES.scopeMinContent;
+  });
+}
+
+/** 判断ブロック（番号付き項目の行から、次の項目の手前まで） */
+function judgmentBlocks(lines: string[]): { num: number; lines: string[] }[] {
+  const out: { num: number; lines: string[] }[] = [];
+  lines.forEach((l, i) => {
+    const m = JUDGMENT_LINE.exec(l);
+    if (!m) return;
+    const block = [l];
+    for (const n of lines.slice(i + 1)) {
+      if (JUDGMENT_LINE.test(n)) break;
+      block.push(n);
+    }
+    out.push({ num: Number(m[1]), lines: block });
+  });
+  return out;
+}
+
+/** design doc の生テキスト（読めなければ null） */
+function readDesignRaw(root: string, goalId: string): string | null {
+  try {
+    return decodeUtf8Strict(readFileSync(state.planPath(root, goalId)));
+  } catch {
+    return null;
+  }
+}
+
+/** design doc の規約検査。空配列なら適合。違反は「何をどこに足すか」を返す */
+export function checkDesignContent(raw: string): string[] {
+  const problems: string[] = [];
+
+  // §3: 判断の4点セット（決定＝項目自体、理由・代替案・反証条件を語で見る）
+  const judges = judgmentBlocks(sectionBody(raw, /設計判断|決定事項/) ?? []);
+  if (judges.length === 0) {
+    problems.push("§3 設計判断に番号付きの判断が無い（1. **決定**: … の形で書く）");
+  }
+  for (const j of judges) {
+    if (!hasSubstantive(j.lines, DESIGN_RULES.reason)) {
+      problems.push(`設計判断${j.num} に「理由」が無い（§3 に「理由: …」を足す）`);
+    }
+    if (!hasSubstantive(j.lines, DESIGN_RULES.alternative)) {
+      problems.push(`設計判断${j.num} に「代替案」が無い（§3 に「代替案: …」を足す）`);
+    }
+    if (!hasSubstantive(j.lines, DESIGN_RULES.falsify)) {
+      problems.push(`設計判断${j.num} に「反証条件」が無い（§3 に「反証条件: …」を足す）`);
+    }
+  }
+
+  // §2: file:line の証拠（出現回数で数える）
+  const current = sectionBody(raw, /現状|背景/);
+  // プレースホルダ（例示）行は証拠に数えない。テンプレの `src/foo.ts:123` が
+  // そのまま 1 件として数えられると、実質 1 箇所でも通ってしまう
+  const evidenceLines = (current ?? []).filter(
+    (l) => !PLACEHOLDER.test(l.trim().replace(/^[-*]\s+/, "")),
+  );
+  const evidenceCount = (evidenceLines.join("\n").match(DESIGN_RULES.evidence) ?? []).length;
+  if (evidenceCount < DESIGN_RULES.evidenceMin) {
+    problems.push(
+      `§2 現状に file:line の証拠が${DESIGN_RULES.evidenceMin}箇所未満（現在${evidenceCount}）。` +
+        "`src/foo.ts:123` の形で根拠を付ける",
+    );
+  }
+
+  // §4: タスク行の判断番号紐付け（走査は §4 内のみ。§3 の箇条書きをタスクと誤認しない）
+  const tasks = sectionBody(raw, /タスク/) ?? [];
+  const refs = new Set<number>();
+  for (const l of tasks) {
+    if (!TASK_ITEM_LINE.test(l)) continue;
+    const m = TASK_REF.exec(l);
+    if (!m) {
+      problems.push(
+        `タスク行に判断番号が無い（§4 の「${l.trim().slice(0, 20)}…」に「（判断N）」を足す）`,
+      );
+      continue;
+    }
+    for (const n of m[1].split(/[,、]/)) refs.add(Number(n.trim()));
+  }
+
+  // §4: 判断の網羅（免除マーカー付きの判断は除く）
+  for (const j of judges) {
+    if (j.lines.some((l) => DESIGN_RULES.exempt.test(l))) continue;
+    if (!refs.has(j.num)) {
+      problems.push(
+        `設計判断${j.num} に対応するタスクが無い（§4 に「（判断${j.num}）」を付けたタスクを足すか、判断に「${DESIGN_RULES.exemptLabel}」を付ける）`,
+      );
+    }
+  }
+
+  // §5: 触らないものの非空
+  const scope = sectionBody(raw, /触らない|スコープ外|非対象|棄却/);
+  if (scope === null || isEmptyScope(scope)) {
+    problems.push("§5 触らないもの（スコープ外）が空（この goal で変えないものを具体的に書く）");
+  }
+
+  return problems;
 }
 
 /* phase遷移前の機械チェック（plugin/MCP両callerで共有）。
@@ -455,17 +636,34 @@ export function checkPhaseMove(
   // scaffoldが自動生成するため、失敗するのは骨格を削った場合のみ。
   // entry_route=light/advisedはthin gate（task列のみ。薄いspecで回し昇格時に肉付けする）
   if (to === "implementing" && active.state.phase === "designing") {
-    const missing =
+    const thin =
       active.state.entry_route === "light" ||
-      active.state.entry_route === "advised"
-        ? checkDesignDocThin(root, active.goal.id)
-        : checkDesignDoc(root, active.goal.id);
+      active.state.entry_route === "advised";
+    // design.md は1回だけ読む（骨格と内容で同じ raw を使う。途中で変わると判定が割れる）
+    const designRaw = readDesignRaw(root, active.goal.id);
+    const missing = thin
+      ? checkDesignDocThin(root, active.goal.id)
+      : designRaw === null
+        ? ["design doc自体が無い"]
+        : checkDesignDocFromRaw(designRaw);
     if (missing.length > 0) {
       return (
         `error: design.md の骨格不足（${missing.join("・")}）。` +
         `scaffold（.graphhopper/plans/${active.goal.id}.md）を埋めてから遷移せよ。` +
         `質の指摘はcriticの領分であり、このゲートは骨格の有無だけを見る。`
       );
+    }
+    // 内容規約（full/oracle のみ）。構造で判定できる規約だけを見る。
+    // light/advised は thin のまま（薄いspecで回し、escalate で肉付けする既存設計）
+    if (!thin) {
+      const violations = checkDesignContent(designRaw ?? "");
+      if (violations.length > 0) {
+        return (
+          `error: design.md が規約に違反（${violations.length}件）。\n- ` +
+          violations.join("\n- ") +
+          "\n修正してから implementing へ遷移せよ（意味の指摘は critic の領分で、このゲートは構造規約だけを見る）。"
+        );
+      }
     }
   }
   // 進捗ゲート: implementing→polish は未完了タスクを残さない。

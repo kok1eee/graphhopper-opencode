@@ -11,6 +11,7 @@ import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { compliantDesignDoc } from "./design-fixture";
 import { join } from "node:path";
 import { registerCoreTools } from "../.opencode/plugins/graphhopper/tools-core";
 import { registerOpsTools } from "../.opencode/plugins/graphhopper/tools-ops";
@@ -47,23 +48,10 @@ function textOf(out: unknown): string {
   return (out as { content?: string })?.content ?? "";
 }
 
-const DESIGN_WITH_TASKS = [
-  "# design: plugin test",
-  "",
-  "## 1. goal理解",
-  "",
-  "## 2. 現状",
-  "",
-  "## 3. 設計判断",
-  "",
-  "## 4. 実装タスク列",
-  "",
-  "- [ ] T1 実装する",
-  "- [ ] T2 テストを書く",
-  "",
-  "## 5. 棄却した代替案",
-  "",
-].join("\n");
+const DESIGN_WITH_TASKS = compliantDesignDoc({
+  title: "plugin test",
+  tasks: ["- [ ] T1（判断1）: 実装する", "- [ ] T2（判断1）: テストを書く"],
+});
 
 describe("plugin tool: graphhopper_todo", () => {
   test("goal 不在時は error を返す", async () => {
@@ -86,7 +74,7 @@ describe("plugin tool: graphhopper_todo", () => {
     expect(readTodos(root, g.id).items.length).toBe(2);
 
     const listed = textOf(await t!.execute({ action: "list" }, ctx));
-    expect(listed).toContain("T1 実装する");
+    expect(listed).toContain("T1（判断1）: 実装する");
 
     expect(textOf(await t!.execute({ action: "done", id: "t1" }, ctx))).toContain(
       "t1 -> completed",

@@ -4,7 +4,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFile
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { $ } from "bun";
+import { SCAFFOLD_TASK_PLACEHOLDER } from "./todos";
 import {
+  designTemplate,
   ensureTodos,
   completeGoal,
   evalToPolish,
@@ -32,6 +34,8 @@ function shell() {
   return $ as never;
 }
 
+/** 注意: 旧形式の fixture（§5 が空・§3 が空）。checkPhaseMove の内容規約は通らない。
+ * phase 遷移を伴うテストを足すときは src/design-fixture.ts の compliantDesignDoc を使う。 */
 const DESIGN_WITH_TASKS = [
   "# design: t",
   "",
@@ -74,6 +78,8 @@ describe("進捗 todo ストア", () => {
     const g = startGoal(root, "t", "s").goal;
     // startGoal が scaffold を作る。プレースホルダは seed 対象外
     expect(ensureTodos(root, g.id).items.length).toBe(0);
+    // テンプレのタスク行と seed 除外の定数がズレていないこと（drift の原因を一発で示す）
+    expect(designTemplate("g-x", "t")).toContain(SCAFFOLD_TASK_PLACEHOLDER);
   });
 
   test("todoAction: list/start/done/cancel/add と監査記録", () => {

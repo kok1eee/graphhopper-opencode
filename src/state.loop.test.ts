@@ -6,6 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fillCompliantDesign } from "./design-fixture";
 import {
   type GraphhopperConfig,
   type SessionMessageLike,
@@ -1223,6 +1224,7 @@ describe("critic gate（flag両対応）", () => {
     const { checkPhaseMove } = await import("./gate");
     const root = tmpRoot();
     startGoal(root, "t", "s");
+    fillCompliantDesign(root);
     // 既定configはrequire_critic=false（このrepoのconfig.jsonもfalseのはずだが
     // テストrootにはconfigが無い→DEFAULT false）
     expect(checkPhaseMove(root, "implementing")).toBeNull();
@@ -1267,11 +1269,16 @@ describe("design scaffold＋構造ゲート", () => {
     expect(checkDesignDoc(root, "g-nonexistent")).toEqual(["design doc自体が無い"]);
   });
 
-  test("checkPhaseMove: 骨格を削るとimplementing遷移が止まる", async () => {
+  test("checkPhaseMove: scaffold は内容規約で止まり、埋めれば通り、骨格を削ると骨格不足", async () => {
     const { checkPhaseMove } = await import("./gate");
     const { planPath } = await import("./state");
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
+    // scaffold は節を持つが中身がプレースホルダなので内容規約で止まる（判断10の反証条件）
+    const scaffoldErr = checkPhaseMove(root, "implementing");
+    expect(scaffoldErr).toContain("規約に違反");
+    expect(scaffoldErr).toContain("§2");
+    fillCompliantDesign(root);
     expect(checkPhaseMove(root, "implementing")).toBeNull();
     writeFileSync(planPath(root, g.id), "# empty\n");
     const err = checkPhaseMove(root, "implementing");
@@ -1519,6 +1526,7 @@ describe("deep検知（RISK_PATHS×自goal差分）", () => {
     const { checkPhaseMove } = await import("./gate");
     const root = tmpRoot();
     s.startGoal(root, "t", "s1");
+    fillCompliantDesign(root);
     s.bindEntryRoute(root, "advised");
     s.snapshotInitialDiffFiles(root, []);
     const shell = fakeShell({ code: 0, out: "src/state.ts\n" }, { code: 0, out: "" });
@@ -1532,6 +1540,7 @@ describe("deep検知（RISK_PATHS×自goal差分）", () => {
     // full entry＋deepは相談なしで通る
     const root2 = tmpRoot();
     s.startGoal(root2, "t", "s1");
+    fillCompliantDesign(root2);
     s.snapshotInitialDiffFiles(root2, []);
     await s.recordRouterCheckWithRisk(shell, root2, "abc123", 10, "advisor");
     expect(checkPhaseMove(root2, "implementing")).toBeNull();
@@ -2027,6 +2036,7 @@ describe("昇格後critic必須＋stuck自動昇格", () => {
     const { checkPhaseMove } = await import("./gate");
     const root = tmpRoot();
     s.startGoal(root, "t", "s1");
+    fillCompliantDesign(root);
     s.bindEntryRoute(root, "light");
     s.setPhase(root, "implementing");
     s.escalateEntryRoute(root);
@@ -2054,6 +2064,7 @@ describe("entry相談ゲート（advised/oracle）", () => {
     const { checkPhaseMove } = await import("./gate");
     const root = tmpRoot();
     s.startGoal(root, "t", "s1");
+    fillCompliantDesign(root);
     s.bindEntryRoute(root, "advised");
     expect(checkPhaseMove(root, "implementing")).toContain(
       "graphhopper_consult_set",
@@ -2070,6 +2081,7 @@ describe("entry相談ゲート（advised/oracle）", () => {
     const { checkPhaseMove } = await import("./gate");
     const root = tmpRoot();
     s.startGoal(root, "t", "s1");
+    fillCompliantDesign(root);
     s.bindEntryRoute(root, "oracle");
     expect(checkPhaseMove(root, "implementing")).toContain(
       "graphhopper_consult_set",
@@ -2088,11 +2100,13 @@ describe("entry相談ゲート（advised/oracle）", () => {
     for (const route of ["full", "light"] as const) {
       const root = tmpRoot();
       s.startGoal(root, "t", "s1");
+      fillCompliantDesign(root);
       s.bindEntryRoute(root, route);
       expect(checkPhaseMove(root, "implementing")).toBeNull();
     }
     const rootNull = tmpRoot();
     s.startGoal(rootNull, "t", "s1");
+    fillCompliantDesign(rootNull);
     expect(checkPhaseMove(rootNull, "implementing")).toBeNull();
   });
 
@@ -2101,6 +2115,7 @@ describe("entry相談ゲート（advised/oracle）", () => {
     const { checkPhaseMove } = await import("./gate");
     const root = tmpRoot();
     s.startGoal(root, "t", "s1");
+    fillCompliantDesign(root);
     s.bindEntryRoute(root, "advised");
     s.setPhase(root, "implementing");
     s.escalateEntryRoute(root);

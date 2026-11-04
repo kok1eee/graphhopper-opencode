@@ -17,6 +17,8 @@ function tmpRoot(): string {
   return mkdtempSync(join(tmpdir(), "gh-charter-test-"));
 }
 
+/** 注意: 旧形式の fixture（§5 が空・§3 が空）。checkPhaseMove の内容規約は通らない。
+ * phase 遷移を伴うテストを足すときは src/design-fixture.ts の compliantDesignDoc を使う。 */
 const DESIGN_WITH_TASKS = [
   "# design: charter test",
   "",

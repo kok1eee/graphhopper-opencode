@@ -92,7 +92,7 @@ describe("todo 純粋層", () => {
       const scaffold = [
         "## 4. 実装タスク列",
         "",
-        "- [ ] T1 （タスク）",
+        "- [ ] T1（判断1）: （タスク）",
       ].join("\n");
       expect(parseSeedTasks(scaffold)).toEqual([]);
     });

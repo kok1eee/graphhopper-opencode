@@ -26,7 +26,7 @@ export interface TodoStore {
 }
 
 /** scaffold が生成するプレースホルダ行。実タスクではないので seed 対象外 */
-export const SCAFFOLD_TASK_PLACEHOLDER = "T1 （タスク）";
+export const SCAFFOLD_TASK_PLACEHOLDER = "T1（判断1）: （タスク）";
 
 /** タスク列セクションの見出し（seed の対象範囲） */
 const TASK_SECTION_HEADING = /^#{2,}\s+.*タスク列.*$/m;

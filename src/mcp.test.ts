@@ -11,6 +11,7 @@ import { execSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, lineageEnriched, parseSkeletonSymbols, resolveRoot } from "./mcp";
+import { compliantDesignDoc, fillCompliantDesign } from "./design-fixture";
 
 async function linked() {
   const [clientT, serverT] = InMemoryTransport.createLinkedPair();
@@ -78,6 +79,7 @@ describe("graphhopper-mcp goal往復", () => {
       session_id: "sess-test",
     });
     expect(started).toContain('goal started: "mcp test"');
+    fillCompliantDesign(root);
     expect(await call("graphhopper_phase", { phase: "implementing" })).toContain(
       "phase -> implementing",
     );
@@ -107,23 +109,10 @@ describe("graphhopper-mcp goal往復", () => {
     })();
     writeFileSync(
       join(root, ".graphhopper", "plans", `${goalId}.md`),
-      [
-        "# design: todo test",
-        "",
-        "## 1. goal理解",
-        "",
-        "## 2. 現状",
-        "",
-        "## 3. 設計判断",
-        "",
-        "## 4. 実装タスク列",
-        "",
-        "- [ ] T1 実装する",
-        "- [ ] T2 テストを書く",
-        "",
-        "## 5. 棄却した代替案",
-        "",
-      ].join("\n"),
+      compliantDesignDoc({
+        title: "todo test",
+        tasks: ["- [ ] T1（判断1）: 実装する", "- [ ] T2（判断1）: テストを書く"],
+      }),
       "utf8",
     );
     expect(await call("graphhopper_phase", { phase: "implementing" })).toContain(
@@ -132,8 +121,8 @@ describe("graphhopper-mcp goal往復", () => {
 
     // list: 2 件 seed されている
     const listed = await call("graphhopper_todo", { action: "list" });
-    expect(listed).toContain("T1 実装する");
-    expect(listed).toContain("T2 テストを書く");
+    expect(listed).toContain("T1（判断1）: 実装する");
+    expect(listed).toContain("T2（判断1）: テストを書く");
 
     // add: 3 件目
     expect(await call("graphhopper_todo", { action: "add", text: "追加タスク" })).toContain(
@@ -351,6 +340,7 @@ describe("graphhopper-mcp goal往復", () => {
       return c[0]?.text ?? "";
     };
     await call("graphhopper_goal", { action: "start", title: "drv test", session_id: "sess-a" });
+    fillCompliantDesign(root);
     const out = await call("graphhopper_phase", { phase: "implementing", session_id: "sess-b" });
     expect(out).toContain("phase -> implementing");
     expect(out).toContain("別session");
@@ -402,6 +392,7 @@ describe("graphhopper-mcp goal往復", () => {
       return c[0]?.text ?? "";
     };
     await call("graphhopper_goal", { action: "start", title: "mcp test3" });
+    fillCompliantDesign(root);
     await call("graphhopper_phase", { phase: "implementing" });
     await call("graphhopper_set_eval", { cmd: "false" });
     const out = await call("graphhopper_eval", {});
@@ -423,6 +414,7 @@ describe("graphhopper-mcp goal往復", () => {
     expect(noGoal).toContain("error: no active goal");
     expect(noGoal).toContain(`root=${root}`);
     await call("graphhopper_goal", { action: "start", title: "skip matrix" });
+    fillCompliantDesign(root);
     // designing＋未設定→両行
     const both = await call("graphhopper_eval", {});
     expect(both.startsWith("skip:")).toBe(true);
@@ -498,6 +490,7 @@ describe("graphhopper-mcp edit gate（plugin hook と同型）", () => {
     });
     const id = started.match(/\((g-[0-9a-z]+)\)/)?.[1] ?? "";
     expect(id).not.toBe("");
+    fillCompliantDesign(root);
     await call("graphhopper_phase", { phase: "implementing" });
     mkdirSync(join(root, ".graphhopper", "plans"), { recursive: true });
     writeFileSync(join(root, ".graphhopper", "plans", `${id}.md`), "# design\n");
@@ -695,6 +688,7 @@ describe("graphhopper-mcp lineage", () => {
       return c[0]?.text ?? "";
     };
     await call("graphhopper_goal", { action: "start", title: "lin test", session_id: "s" });
+    fillCompliantDesign(root);
     await call("graphhopper_phase", { phase: "implementing" });
     await call("graphhopper_attempt", { ok: false, note: "x" });
     await call("graphhopper_phase", { phase: "polish" });
@@ -766,6 +760,7 @@ describe("graft連携（skeleton enrich）", () => {
       return c[0]?.text ?? "";
     };
     await call("graphhopper_goal", { action: "start", title: "sym test", session_id: "s" });
+    fillCompliantDesign(root);
     await call("graphhopper_phase", { phase: "implementing" });
     writeFileSync(join(root, "c.txt"), "old\n");
     const h = JSON.parse(await call("graphhopper_hash", { filePath: "c.txt" })) as {
