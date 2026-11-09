@@ -11,7 +11,8 @@
  *   bun scripts/gen-agents.ts --check-policy        # CI 用: commit 済み config.example.json で catalog と cascade を検査
  * 割当表を変えたら再実行＋opencode再起動が必要。
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bakeAgents, checkCatalogPolicy, formatBakeViolation } from "../src/bake";
@@ -60,16 +61,41 @@ if (checkPolicy) {
     console.error(`error: cannot read ${policyPath}: ${String(err)}`);
     process.exit(1);
   }
-  const result = checkCatalogPolicy({
-    outDir: join(projRoot, ".opencode", "agents"),
-    policy: { allow: example.model_allow, deny: example.model_deny },
-    cascade: example.cascade,
-  });
-  if (!result.ok) {
-    for (const v of result.violations) console.error(`error: ${formatBakeViolation(v)}`);
-    process.exit(1);
+  const policy = { allow: example.model_allow, deny: example.model_deny };
+  // project catalog は常に、global catalog は存在する場合だけ検査する（design 判断3）。
+  // 後者はローカル限定の保証で、CI には global が無い
+  const targets: {
+    label: string;
+    outDir: string;
+    cascade?: Parameters<typeof checkCatalogPolicy>[0]["cascade"];
+  }[] = [
+    {
+      label: "project",
+      outDir: join(projRoot, ".opencode", "agents"),
+      cascade: example.cascade,
+    },
+  ];
+  const globalDir = join(homedir(), ".config", "opencode", "agents");
+  if (existsSync(globalDir)) targets.push({ label: "global", outDir: globalDir });
+
+  let failed = false;
+  for (const t of targets) {
+    const result = checkCatalogPolicy({
+      outDir: t.outDir,
+      policy,
+      cascade: t.cascade,
+    });
+    for (const v of result.violations) {
+      // cascade は config レベルの設定なので catalog ラベルを付けない
+      const label = v.agent.startsWith("cascade.") ? "config" : t.label;
+      console.error(`error: [${label}] ${formatBakeViolation(v)}`);
+      failed = true;
+    }
   }
-  console.log("ok: catalog and cascade config satisfy the committed policy");
+  if (failed) process.exit(1);
+  console.log(
+    `ok: ${targets.map((t) => t.label).join("+")} catalog and cascade config satisfy the committed policy`,
+  );
   process.exit(0);
 }
 if (outIdx >= 0 && (!outValue || outValue.startsWith("--"))) {

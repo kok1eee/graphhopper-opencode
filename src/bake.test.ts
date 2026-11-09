@@ -1,7 +1,7 @@
 /** catalog bake の単体テスト（design g-mw8rlbjr）。 */
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -18,10 +18,15 @@ const tmpCfg = (json: object | string) => {
   writeFileSync(path, typeof json === "string" ? json : JSON.stringify(json), "utf8");
   return path;
 };
-const runCli = (args: string[], cfgPath: string) =>
+const runCli = (args: string[], cfgPath: string, home?: string) =>
   spawnSync(process.execPath, ["scripts/gen-agents.ts", ...args], {
     cwd: join(import.meta.dir, ".."),
-    env: { ...process.env, GRAPHHOPPER_CONFIG: cfgPath },
+    env: {
+      ...process.env,
+      GRAPHHOPPER_CONFIG: cfgPath,
+      // global catalog の検査が実ユーザー環境に依存しないよう HOME を隔離する
+      HOME: home ?? mkdtempSync(join(tmpdir(), "gh-home-")),
+    },
     encoding: "utf8",
   });
 
@@ -261,6 +266,28 @@ describe("bakeAgents", () => {
     const r = runCli(["--check-policy", "--policy", denied], cfgPath);
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("model_deny");
+  });
+
+  test("CLI --check-policy: global catalog があれば検査し、違反は [global] で出る", () => {
+    const cfgPath = tmpCfg({});
+    const home = mkdtempSync(join(tmpdir(), "gh-home-global-"));
+    const dir = join(home, ".config", "opencode", "agents");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "graphhopper-critic.md"),
+      '---\nmodel: "opencode-go/gpt-6-luna"\n---\nbody\n',
+      "utf8",
+    );
+    const r = runCli(["--check-policy"], cfgPath, home);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("[global]");
+  });
+
+  test("CLI --check-policy: global catalog が無ければ通る", () => {
+    const cfgPath = tmpCfg({});
+    const home = mkdtempSync(join(tmpdir(), "gh-home-none-"));
+    const r = runCli(["--check-policy"], cfgPath, home);
+    expect(r.status).toBe(0);
   });
 
   test("checkCatalogPolicy は欠落・deny・cascade 違反を検出する", () => {

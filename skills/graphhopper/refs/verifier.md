@@ -81,6 +81,8 @@ polish前にlens編成の助言が欲しい場合のみ使う（現行routerは�
   切り替えず `failed` を返す（同じ拒否は1 goal 1回だけ報告）。goal 終了時の復元は拒否しない。
   CI は `bun scripts/gen-agents.ts --check-policy` で、commit 済みの
   `.graphhopper/config.example.json` をポリシー源に catalog と cascade 設定を検査する。
+  ローカルでは project catalog に加えて `~/.config/opencode/agents` が存在すれば
+  global catalog も同じポリシーで検査する（`[global]` ラベル。CI には無いためローカル限定の保証）。
   見逃し率はscoreboardで監視。
   researcher/librarian は `opencode-go/minimax-m3.1-flash-free`（無料枠の M3.1）、
   **simplifyは `opencode-go/deepseek-v4.1-flash`（primary。遅い/枠切れ時は `claude-oauth/claude-sonnet-5-5` に手動切替）**、oracleはopus-5-5、advisorはglm-5.3（Bedrock cross-region。coding特化・prompt cache対応。旧grok-4.7から2026-10-08に置換）。

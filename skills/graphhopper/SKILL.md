@@ -42,6 +42,7 @@ resume 時に catalog へ model_allow/model_deny 違反のモデルが焼かれ�
 cascade の切替先（baseline/escalate/quality 等）も deny で拒否され、拒否時は切り替えない
 （goal 終了時の復元は通す）。CI は `bun scripts/gen-agents.ts --check-policy` で
 `.graphhopper/config.example.json` を源に catalog と cascade 設定を検査する。
+ローカルでは global catalog（`~/.config/opencode/agents`）も存在すれば検査する（`[global]` ラベル）。
 
 ## フェーズ
 
