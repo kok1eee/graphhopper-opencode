@@ -91,6 +91,49 @@ function validModel(m: string): boolean {
   return m.includes("/") && !/\s/.test(m) && m.length < 200;
 }
 
+/** モデル許可/拒否ポリシー（config の model_allow / model_deny） */
+export interface ModelPolicy {
+  allow?: string[];
+  deny?: string[];
+}
+
+/** 判定結果。拒否理由を説明できるよう判別共用体で返す（design g-mw8qwiy6 判断6） */
+export type ModelCheck =
+  | { ok: true }
+  | { ok: false; kind: "deny"; rule: string }
+  | { ok: false; kind: "allow" }
+  | { ok: false; kind: "unresolved" };
+
+/** glob（`*` のみ）を全体一致で照合する。大小文字は区別する（design 判断1） */
+function globMatch(pattern: string, model: string): boolean {
+  if (!pattern.includes("*")) return pattern === model;
+  const body = pattern
+    .split("*")
+    .map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join(".*");
+  return new RegExp(`^${body}$`).test(model);
+}
+
+/** モデルの許可判定。deny 優先・allow 非空なら一致必須・未解決は制限有効時のみ拒否 */
+export function checkModelAllowed(
+  model: string | undefined,
+  policy: ModelPolicy,
+): ModelCheck {
+  const allow = policy.allow ?? [];
+  const deny = policy.deny ?? [];
+  if (model === undefined) {
+    return allow.length === 0 && deny.length === 0
+      ? { ok: true }
+      : { ok: false, kind: "unresolved" };
+  }
+  const denied = deny.find((p) => globMatch(p, model));
+  if (denied !== undefined) return { ok: false, kind: "deny", rule: denied };
+  if (allow.length > 0 && !allow.some((p) => globMatch(p, model))) {
+    return { ok: false, kind: "allow" };
+  }
+  return { ok: true };
+}
+
 /** argv組立（純関数・shell非経由）。`--` でmessage境界を明示する。
  * v2 の `run` に `--dir` は無い (R-M4 実測) ため付けない。対象 dir は spawn 側の
  * `cwd` (RunChildOpts.cwd = root) で運ぶ。v2 run は cwd を project として解決する。
@@ -285,10 +328,36 @@ export async function invokeStructured(
       `error: unknown agent "${args.agent}". must be one of: ${Object.keys(GRAPHHOPPER_AGENTS).join(", ")}`,
     );
   }
+  const cfg = readConfig(args.root);
   const model = resolveModel(args.root, args.agent, args.model);
   if (args.model && !validModel(args.model)) {
     return fail(
       `error: invalid model "${args.model}". must be provider/model without whitespace`,
+    );
+  }
+  // モデル許可/拒否（design g-mw8qwiy6）。課金事故を止めるため確定値で判定し、
+  // 拒否時はフォールバックせず理由と修正先を返す（判断5）
+  const allowed = checkModelAllowed(model, {
+    allow: cfg.model_allow,
+    deny: cfg.model_deny,
+  });
+  if (!allowed.ok) {
+    const source = args.model ? "arg" : "config";
+    const fix =
+      "fix: ~/.config/opencode/graphhopper.json か .graphhopper/config.json の model_allow/model_deny を直す";
+    if (allowed.kind === "unresolved") {
+      return fail(
+        `error: model unresolved for agent "${args.agent}" while model_allow/model_deny is set. ` +
+          `model を明示するか config の agents["${args.agent}"] を設定せよ。${fix}`,
+      );
+    }
+    if (allowed.kind === "deny") {
+      return fail(
+        `error: model "${model}" is denied by model_deny (rule: ${allowed.rule}, source: ${source}). ${fix}`,
+      );
+    }
+    return fail(
+      `error: model "${model}" is not in model_allow (source: ${source}, allow: ${(cfg.model_allow ?? []).join(", ")}). ${fix}`,
     );
   }
   if (args.prompt.length > PROMPT_MAX_CHARS) {

@@ -308,7 +308,7 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
 
   "graphhopper-verifier": {
     description:
-      "polish/advisorのverifier用。route=polishではrequirement/behavior/progressの3レンズfan-out、route=advisorでは'general'（3観点統合）lensで単発呼び出しされる。判断nodeなので上位品質モデルで使う（モデルは .graphhopper/config.json の agents で設定）。実装者本人（メインエージェント）とは独立した第三者チェックであることが呼び出しの目的そのもの",
+      "polish/advisorのverifier用。route=polishではrequirement/behavior/progressの3レンズfan-out、route=advisorでは'general'（3観点統合）lensで単発呼び出しされる。判断nodeなので上位品質モデルを使うが、モデルは .graphhopper/config.json の agents と model_allow/model_deny に従う（invoke の明示指定は deny で拒否される）。実装者本人（メインエージェント）とは独立した第三者チェックであることが呼び出しの目的そのもの",
     mode: "all",
     model: { providerID: "minimax", model: "MiniMax-M3.1-Flash" },
     temperature: 0.2,

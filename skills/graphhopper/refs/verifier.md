@@ -66,7 +66,11 @@ polish前にlens編成の助言が欲しい場合のみ使う（現行routerは�
   割当の見直しは `/choice` で対話変更できる（変更後はTUI再起動）。
   **verifier（並列 fan-out）は `minimax/MiniMax-M3.1-Flash`**（claude-oauth の
   ローカルプロキシ逼迫を避けるため。枠切れ時は `opencode-go/minimax-m3.1-flash-free` 等へ切替可。
-  自動切替は無いためmain判断で呼ぶ）。
+  自動切替は無いため main が選ぶが、**`graphhopper_invoke` の `model` は config の
+  `model_allow` / `model_deny` で機械的に検査される**。deny に一致するモデルを渡すと
+  invoke は拒否して止まる（フォールバックしない）。止められたらモデルを変えるのではなく、
+  まず config の deny を確認する。高額モデル（Go の Kimi/GPT 等、月枠が小さいもの）は
+  deny に入れるのが既定運用）。
   見逃し率はscoreboardで監視。
   researcher/librarian は `opencode-go/minimax-m3.1-flash-free`（無料枠の M3.1）、
   **simplifyは `opencode-go/deepseek-v4.1-flash`（primary。遅い/枠切れ時は `claude-oauth/claude-sonnet-5-5` に手動切替）**、oracleはopus-5-5、advisorはglm-5.3（Bedrock cross-region。coding特化・prompt cache対応。旧grok-4.7から2026-10-08に置換）。

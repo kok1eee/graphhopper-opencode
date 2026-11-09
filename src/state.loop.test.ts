@@ -737,6 +737,23 @@ describe("config 2層解決（グローバル既定 → プロジェクト上書
     );
   }
 
+  test("model_deny は和集合・model_allow は project 置き換え（design g-mw8qwiy6 判断2）", () => {
+    withGlobal({ model_deny: ["a/*"], model_allow: ["a/*"] }, () => {
+      const root = tmpRoot();
+      withProject(root, { model_deny: ["b/*"], model_allow: ["b/*"] });
+      const cfg = readConfig(root);
+      // deny は禁止を単調に強くする（project の空配列で global を外せない）
+      expect(cfg.model_deny).toEqual(["a/*", "b/*"]);
+      // allow は和集合だと制限が緩むため、project が置き換える
+      expect(cfg.model_allow).toEqual(["b/*"]);
+    });
+    withGlobal({ model_deny: ["a/*"] }, () => {
+      const root = tmpRoot();
+      withProject(root, { model_deny: [] });
+      expect(readConfig(root).model_deny).toEqual(["a/*"]);
+    });
+  });
+
   test("cascade.phase_models は global と project をキー単位でマージし、空文字は捨てる", () => {
     withGlobal(
       { cascade: { phase_models: { designing: "g/opus", polish: "g/sonnet" } } },

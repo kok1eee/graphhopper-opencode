@@ -354,6 +354,12 @@ export interface GraphhopperConfig {
   design_gate_allow: string[];
   /** subagent 名で model を上書きする（例: { "graphhopper-verifier": "amazon-bedrock/anthropic.claude-opus-5" }） */
   agents: { [name: string]: string };
+  /** 許可するモデルの glob（全体一致・大小文字区別・`*` は任意長）。
+   * 非空なら一致必須。空・未設定は無制限。project が global を置き換える */
+  model_allow?: string[];
+  /** 拒否するモデルの glob（全体一致・大小文字区別）。allow より優先。
+   * global と project の和集合（禁止は単調に強くする） */
+  model_deny?: string[];
   /** implementing の連続失敗数がこれに達したら graphhopper-oracle への相談を促す */
   stuck_threshold: number;
   /** echoループ（直前のassistantメッセージとほぼ同一のuserメッセージ）を
@@ -1016,6 +1022,15 @@ function atomicWrite(path: string, data: unknown): void {
   renameSync(tmp, path);
 }
 
+/** 文字列配列の和集合（順序保持・重複除去・空は undefined）。
+ * config の deny 合成で使う（design g-mw8qwiy6 判断2） */
+function unionStrings(a?: unknown, b?: unknown): string[] | undefined {
+  const pick = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x.trim() !== "") : [];
+  const merged = [...new Set([...pick(a), ...pick(b)])];
+  return merged.length > 0 ? merged : undefined;
+}
+
 export function readConfig(root: string): GraphhopperConfig {
   // グローバル既定 < プロジェクト上書き。agents だけは name 単位でマージする
   // （プロジェクト側で一部の subagent だけ別モデルに差し替えられるように）。
@@ -1025,6 +1040,10 @@ export function readConfig(root: string): GraphhopperConfig {
     ...global,
     ...project,
     agents: { ...(global.agents ?? {}), ...(project.agents ?? {}) },
+    // モデル制限は非対称に合成する（design g-mw8qwiy6 判断2）:
+    // deny は和集合（禁止は単調に強くし、project の空配列で外せない）、
+    // allow は project 置き換え（和集合は制限を緩める方向に働くため）。
+    model_deny: unionStrings(global.model_deny, project.model_deny),
   };
   const stuck_threshold =
     raw.stuck_threshold ?? DEFAULT_CONFIG.stuck_threshold;
@@ -1035,6 +1054,8 @@ export function readConfig(root: string): GraphhopperConfig {
     design_gate_allow:
       raw.design_gate_allow ?? DEFAULT_CONFIG.design_gate_allow,
     agents: { ...(DEFAULT_CONFIG.agents ?? {}), ...(raw.agents ?? {}) },
+    model_allow: raw.model_allow,
+    model_deny: raw.model_deny,
     stuck_threshold,
     loop_stop_threshold:
       raw.loop_stop_threshold ?? DEFAULT_CONFIG.loop_stop_threshold,

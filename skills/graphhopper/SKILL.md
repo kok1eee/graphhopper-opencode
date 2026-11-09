@@ -31,6 +31,9 @@ subagent呼び出しは `task(subagent_type: ...)` が既定（文脈共有・TU
 `graphhopper_invoke` を使う（毎回configを読み直す）。枠切れ時（MiniMax等の
 quota枯渇）のみ `task()`＋親継承を許す（親がOAuthなら$0。結果のmodelは
 verifier_set等に明示し、復旧したらinvokeに戻す）。
+`graphhopper_invoke` の `model` は config の `model_allow` / `model_deny` で
+機械的に検査される。deny 一致は拒否して止まる（フォールバックしない）。高額モデル
+（Go の Kimi/GPT 等、月枠が小さいもの）は deny に入れる。
 
 ## フェーズ
 

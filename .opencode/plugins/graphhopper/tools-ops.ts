@@ -627,7 +627,7 @@ export function registerOpsTools(
     input: S.obj(
       {
         agent: S.str("graphhopper-* agent名（例: graphhopper-critic）"),
-        model: S.optStr("provider/model形式。省略時はconfig既定"),
+        model: S.optStr("provider/model形式。省略時はconfig既定。configのmodel_allow/model_denyで拒否される場合がある"),
         prompt: S.str("lens指示＋渡し物全文（12000文字まで）"),
         timeoutMs: S.num("タイムアウトms（既定120000・上限300000）"),
         delayMs: S.num("起動前の待機ms（並列herd回避用。既定0・上限60000）"),

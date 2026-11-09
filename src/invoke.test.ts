@@ -104,6 +104,120 @@ describe("resolveModel", () => {
   });
 });
 
+describe("checkModelAllowed", () => {
+  test("未設定は無制限", async () => {
+    const { checkModelAllowed } = await import("./invoke");
+    expect(checkModelAllowed("a/b", {})).toEqual({ ok: true });
+    expect(checkModelAllowed(undefined, {})).toEqual({ ok: true });
+  });
+  test("deny は allow より優先", async () => {
+    const { checkModelAllowed } = await import("./invoke");
+    expect(checkModelAllowed("a/b", { allow: ["a/*"], deny: ["a/b"] })).toEqual({
+      ok: false,
+      kind: "deny",
+      rule: "a/b",
+    });
+  });
+  test("allow 非空なら一致必須", async () => {
+    const { checkModelAllowed } = await import("./invoke");
+    expect(checkModelAllowed("a/b", { allow: ["a/*"] })).toEqual({ ok: true });
+    expect(checkModelAllowed("x/y", { allow: ["a/*"] })).toEqual({
+      ok: false,
+      kind: "allow",
+    });
+  });
+  test("glob は全体一致・大小文字区別", async () => {
+    const { checkModelAllowed } = await import("./invoke");
+    expect(checkModelAllowed("opencode-go/x", { deny: ["opencode-go/*"] })).toMatchObject({
+      ok: false,
+      kind: "deny",
+    });
+    // 部分一致しない
+    expect(checkModelAllowed("pre-opencode-go/x", { deny: ["opencode-go/*"] })).toEqual({
+      ok: true,
+    });
+    // 大小文字を区別する
+    expect(checkModelAllowed("Opencode-Go/x", { deny: ["opencode-go/*"] })).toEqual({
+      ok: true,
+    });
+  });
+  test("未解決は制限有効時のみ拒否", async () => {
+    const { checkModelAllowed } = await import("./invoke");
+    expect(checkModelAllowed(undefined, { deny: ["a/*"] })).toEqual({
+      ok: false,
+      kind: "unresolved",
+    });
+  });
+});
+
+describe("invoke のモデル制限（config 駆動）", () => {
+  /** GRAPHHOPPER_CONFIG を一時ファイルへ向ける（実ユーザー設定を読まない） */
+  function withGlobal(json: object, fn: () => Promise<void>): Promise<void> {
+    const prev = process.env.GRAPHHOPPER_CONFIG;
+    const path = join(mkdtempSync(join(tmpdir(), "gh-invoke-cfg-")), "global.json");
+    writeFileSync(path, JSON.stringify(json), "utf8");
+    process.env.GRAPHHOPPER_CONFIG = path;
+    return fn().finally(() => {
+      if (prev === undefined) delete process.env.GRAPHHOPPER_CONFIG;
+      else process.env.GRAPHHOPPER_CONFIG = prev;
+    });
+  }
+
+  test("引数の deny 一致を拒否（source: arg）", async () => {
+    const { invokeStructured } = await import("./invoke");
+    await withGlobal({ model_deny: ["opencode-go/gpt-*"] }, async () => {
+      const r = await invokeStructured(
+        { agent: "graphhopper-critic", model: "opencode-go/gpt-6-luna", prompt: "hi", root: "/tmp" },
+        okSpawn,
+      );
+      expect(r.output).toContain("denied by model_deny");
+      expect(r.output).toContain("source: arg");
+      expect(r.output).toContain("model_deny");
+    });
+  });
+
+  test("config 由来の拒否も止まる（source: config）", async () => {
+    const { invokeStructured } = await import("./invoke");
+    await withGlobal(
+      {
+        agents: { "graphhopper-critic": "opencode-go/kimi-k3.1-pro" },
+        model_deny: ["opencode-go/kimi-*"],
+      },
+      async () => {
+        const r = await invokeStructured(
+          { agent: "graphhopper-critic", prompt: "hi", root: "/tmp" },
+          okSpawn,
+        );
+        expect(r.output).toContain("denied by model_deny");
+        expect(r.output).toContain("source: config");
+      },
+    );
+  });
+
+  test("allow 非空でモデル未解決なら拒否", async () => {
+    const { invokeStructured } = await import("./invoke");
+    await withGlobal({ model_allow: ["bedrock/*"] }, async () => {
+      const r = await invokeStructured(
+        { agent: "graphhopper-critic", prompt: "hi", root: "/tmp" },
+        okSpawn,
+      );
+      expect(r.output).toContain("model unresolved");
+      expect(r.output).toContain("model_allow");
+    });
+  });
+
+  test("許可されたモデルは通る", async () => {
+    const { invokeStructured } = await import("./invoke");
+    await withGlobal({ model_allow: ["opencode-go/*"] }, async () => {
+      const r = await invokeStructured(
+        { agent: "graphhopper-critic", model: "opencode-go/deepseek-v4.1-flash", prompt: "hi", root: "/tmp" },
+        okSpawn,
+      );
+      expect(r.output).toContain("hello");
+    });
+  });
+});
+
 describe("runChild", () => {
   test("成功出力", async () => {
     const r = await runChild("opencode", ["run"], { timeoutMs: 5000, cwd: "/tmp", childEnv: {} }, okSpawn);

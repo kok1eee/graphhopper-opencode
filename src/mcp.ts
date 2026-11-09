@@ -1608,7 +1608,7 @@ const TOOL_DEFS: ToolDef[] = [
       type: "object",
       properties: {
         agent: { type: "string", description: "graphhopper-* agent名（例: graphhopper-critic）" },
-        model: { type: "string", description: "provider/model形式。省略時はconfig既定" },
+        model: { type: "string", description: "provider/model形式。省略時はconfig既定。configのmodel_allow/model_denyで拒否される場合がある" },
         prompt: { type: "string", description: "lens指示＋渡し物全文（12000文字まで）" },
         timeoutMs: { type: "number", description: "タイムアウトms（既定120000・上限300000）" },
         delayMs: { type: "number", description: "起動前の待機ms（並列herd回避用。既定0・上限60000）" },
