@@ -4,7 +4,13 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bakeAgents, formatBakeViolation } from "./bake";
+import {
+  bakeAgents,
+  catalogPolicyViolations,
+  catalogPolicyWarning,
+  checkCatalogPolicy,
+  formatBakeViolation,
+} from "./bake";
 
 const tmpOut = () => join(mkdtempSync(join(tmpdir(), "gh-bake-")), "agents");
 const tmpCfg = (json: object | string) => {
@@ -183,6 +189,107 @@ describe("bakeAgents", () => {
     expect(readFileSync(join(outDir, "graphhopper-critic.md"), "utf8")).not.toContain(
       'model: "test/p"',
     );
+  });
+
+  test("catalogPolicyViolations は焼き込み済みモデルの policy 違反だけを見る", () => {
+    const root = mkdtempSync(join(tmpdir(), "gh-catalog-"));
+    const outDir = join(root, ".opencode", "agents");
+    bakeAgents({ outDir, agents: {}, policy: {} });
+    // 既定（minimax / claude-oauth 等）は deny に当たらない
+    expect(catalogPolicyViolations(root, { model_deny: ["opencode-go/gpt-*"] })).toEqual([]);
+
+    // catalog に拒否モデルを焼き込んだ状態を作る
+    const path = join(outDir, "graphhopper-critic.md");
+    writeFileSync(
+      path,
+      readFileSync(path, "utf8").replace(/^model: ".*"$/m, 'model: "opencode-go/gpt-6-luna"'),
+      "utf8",
+    );
+    expect(catalogPolicyViolations(root, { model_deny: ["opencode-go/gpt-*"] })).toEqual([
+      {
+        agent: "graphhopper-critic",
+        model: "opencode-go/gpt-6-luna",
+        kind: "deny",
+        rule: "opencode-go/gpt-*",
+      },
+    ]);
+  });
+
+  test("catalogPolicyWarning は違反が無ければ null、あれば焼き直しを促す", () => {
+    const root = mkdtempSync(join(tmpdir(), "gh-catalog-warn-"));
+    const outDir = join(root, ".opencode", "agents");
+    bakeAgents({ outDir, agents: {}, policy: {} });
+    expect(catalogPolicyWarning(root, { model_deny: ["opencode-go/gpt-*"] })).toBeNull();
+
+    const path = join(outDir, "graphhopper-critic.md");
+    writeFileSync(
+      path,
+      readFileSync(path, "utf8").replace(/^model: ".*"$/m, 'model: "opencode-go/gpt-6-luna"'),
+      "utf8",
+    );
+    const warn = catalogPolicyWarning(root, { model_deny: ["opencode-go/gpt-*"] });
+    expect(warn).toContain("graphhopper-critic");
+    expect(warn).toContain("gen-agents");
+    expect(warn).toContain("resume");
+  });
+
+  test("CLI --check-policy は commit 済み example で通る", () => {
+    const cfgPath = tmpCfg({});
+    // GRAPHHOPPER_CONFIG は --check-policy では使わない（repo の example を読む）
+    const r = runCli(["--check-policy"], cfgPath);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("ok:");
+  });
+
+  test("CLI --check-policy は破損 JSON・配列・欠落・deny で exit 1", () => {
+    const cfgPath = tmpCfg({});
+    const broken = tmpCfg("{ not json");
+    expect(runCli(["--check-policy", "--policy", broken], cfgPath).status).toBe(1);
+
+    const arrayJson = tmpCfg("[]");
+    expect(runCli(["--check-policy", "--policy", arrayJson], cfgPath).status).toBe(1);
+
+    // model_deny が配列でない
+    const notArray = tmpCfg({ model_deny: "opencode-go/gpt-6-luna" });
+    expect(runCli(["--check-policy", "--policy", notArray], cfgPath).status).toBe(1);
+
+    const missing = join(mkdtempSync(join(tmpdir(), "gh-policy-none-")), "nope.json");
+    expect(runCli(["--check-policy", "--policy", missing], cfgPath).status).toBe(1);
+
+    // repo catalog のモデル（claude-oauth 等）を deny する
+    const denied = tmpCfg({ model_deny: ["claude-oauth/*"] });
+    const r = runCli(["--check-policy", "--policy", denied], cfgPath);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("model_deny");
+  });
+
+  test("checkCatalogPolicy は欠落・deny・cascade 違反を検出する", () => {
+    const outDir = tmpOut();
+    const missing = checkCatalogPolicy({ outDir, policy: {} });
+    expect(missing.ok).toBe(false);
+    expect(missing.violations.every((v) => v.kind === "missing")).toBe(true);
+
+    bakeAgents({ outDir, agents: {}, policy: {} });
+    expect(checkCatalogPolicy({ outDir, policy: {} }).ok).toBe(true);
+
+    const denied = checkCatalogPolicy({
+      outDir,
+      policy: { deny: ["minimax/*"] },
+    });
+    expect(denied.ok).toBe(false);
+    expect(denied.violations.every((v) => v.kind === "deny")).toBe(true);
+
+    const cascade = checkCatalogPolicy({
+      outDir,
+      policy: { deny: ["opencode-go/kimi-*"] },
+      cascade: { escalate: "opencode-go/kimi-k3.1-pro" },
+    });
+    expect(cascade.violations).toContainEqual({
+      agent: "cascade.escalate",
+      model: "opencode-go/kimi-k3.1-pro",
+      kind: "deny",
+      rule: "opencode-go/kimi-*",
+    });
   });
 
   test("formatBakeViolation は agent とルールを含む", () => {

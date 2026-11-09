@@ -8,9 +8,11 @@ import { $ } from "bun";
 import { chooseRecovery, chooseWorkflow } from "../../../src/decision";
 import { INTERNAL_PROMPT_METADATA_KEY } from "../../../src/entry-decide";
 import * as state from "../../../src/state";
-import { parseCascadeModel } from "../../../src/cascade";
+import { checkCascadeTarget, parseCascadeModel } from "../../../src/cascade";
+import { describeModelDenial } from "../../../src/model-policy";
 import {
   getWorkflow,
+  POLICY_DENIED,
   readRun,
   writeRun,
   sha1,
@@ -29,13 +31,29 @@ const NO_GRANDCHILD = [
 
 const aborts = new Map<string, { aborted: boolean; trigger: () => void }>();
 
-function makeHost(gh: Gh, parentID: string): WorkflowHost {
+/** workflow の子セッションを起動する host（テストからも使う） */
+export function makeHost(gh: Gh, parentID: string): WorkflowHost {
   const { ctx, root } = gh;
   return {
     async createChild(i) {
+      const model = parseCascadeModel(i.model);
+      // モデル指定がポリシーで拒否されるなら子を作らない（design g-mw8xvsg8 判断5）。
+      // workflow は無人で走るため、警告ではなく node の失敗として人間に見せる
+      if (model) {
+        const cfg = state.readConfig(root);
+        const denial = checkCascadeTarget(model, {
+          allow: cfg.model_allow,
+          deny: cfg.model_deny,
+        });
+        if (denial) {
+          // POLICY_DENIED を付けて runner 側で LLM リカバリを回さない（決定的な設定エラー）
+          throw new Error(
+            `${POLICY_DENIED}: ${denial.model} (${describeModelDenial(denial)})`,
+          );
+        }
+      }
       const id = `ses_${randomUUID().replace(/-/g, "").slice(0, 26)}`;
       runnerChildren.add(id);
-      const model = parseCascadeModel(i.model);
       await ctx.session.create({
         id,
         parentID,

@@ -8,7 +8,7 @@
  * hook 登録 → 呼び出し → decisions.jsonl の記録までを fake ctx で固定する。
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerHooks } from "../.opencode/plugins/graphhopper/hooks";
@@ -312,6 +312,80 @@ describe("plugin hook: 入口d1判定の context hook（注入）", () => {
       });
     } finally {
       restore();
+    }
+  });
+
+  test("拒否された子セッションの切替先は switchModel を呼ばず、警告は1回だけ", async () => {
+    const prevCfg = process.env.GRAPHHOPPER_CONFIG;
+    const cfgPath = join(tmpRoot(), "global.json");
+    writeFileSync(
+      cfgPath,
+      JSON.stringify({
+        cascade: {
+          enabled: true,
+          agents: { quality: { "graphhopper-verifier": "opencode-go/gpt-6-luna" } },
+        },
+        model_deny: ["opencode-go/gpt-6-luna"],
+      }),
+      "utf8",
+    );
+    process.env.GRAPHHOPPER_CONFIG = cfgPath;
+    const prevWarn = console.warn;
+    const warns: string[] = [];
+    console.warn = (...a: unknown[]) => {
+      warns.push(a.map(String).join(" "));
+    };
+    try {
+      const root = tmpRoot();
+      startGoal(root, "t", "s1");
+      let switched = 0;
+      const event = {
+        type: "session.created",
+        data: {
+          sessionID: "child1",
+          parentID: "s1",
+          agent: "graphhopper-verifier",
+          model: { providerID: "x", id: "y" },
+        },
+      };
+      // bound でない親の子は切替対象外。判定が shouldSwitchChild より前にあると
+      // ここでも警告が出る（順序の退行を検出する）
+      const unrelated = {
+        type: "session.created",
+        data: {
+          sessionID: "child2",
+          parentID: "other",
+          agent: "graphhopper-verifier",
+          model: { providerID: "x", id: "y" },
+        },
+      };
+      const ctx = {
+        tool: { hook: async () => {} },
+        session: {
+          hook: async () => {},
+          get: async () => ({ id: "s1", parentID: null }),
+          context: async () => [],
+          prompt: async () => undefined,
+          switchModel: async () => {
+            switched++;
+          },
+        },
+        event: {
+          subscribe: async function* () {
+            yield event;
+            yield event;
+            yield unrelated;
+          },
+        },
+      };
+      await registerHooks({ ctx: ctx as never, root });
+      await new Promise((r) => setTimeout(r, 80));
+      expect(switched).toBe(0);
+      expect(warns.filter((w) => w.includes("model_deny")).length).toBe(1);
+    } finally {
+      console.warn = prevWarn;
+      if (prevCfg === undefined) delete process.env.GRAPHHOPPER_CONFIG;
+      else process.env.GRAPHHOPPER_CONFIG = prevCfg;
     }
   });
 });

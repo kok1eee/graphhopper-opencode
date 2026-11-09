@@ -7,6 +7,12 @@
  * state の読み書きは呼び出し側（plugin / tools）が行う。
  */
 import type { CascadeConfig, CascadeState, Difficulty } from "./state";
+import {
+  checkModelAllowed,
+  toViolation,
+  type ModelPolicy,
+  type ModelViolation,
+} from "./model-policy";
 
 export type CascadeLevel = "baseline" | "escalated";
 
@@ -43,6 +49,20 @@ export function formatModel(model: ModelRef | null): string | null {
   return model.variant
     ? `${model.providerID}/${model.id}#${model.variant}`
     : `${model.providerID}/${model.id}`;
+}
+
+/**
+ * cascade の切替先がポリシーで拒否されるかを判定する（design g-mw8xvsg8 判断1）。
+ * 復元（endCascade）はこの関数を通さない（判断2: 復元は拒否しない）。
+ * variant は判定に含めない（bake と同じく provider/id で正規化する）。
+ */
+export function checkCascadeTarget(
+  target: ModelRef | null,
+  policy: ModelPolicy,
+): ModelViolation | null {
+  if (!target) return null; // 解決不能は呼び出し側の別エラーで扱う
+  const model = `${target.providerID}/${target.id}`;
+  return toViolation("cascade", model, checkModelAllowed(model, policy));
 }
 
 /**

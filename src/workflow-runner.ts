@@ -11,6 +11,7 @@ import {
   expandTemplate,
   extractJsonBlock,
   nodeKey,
+  POLICY_DENIED,
   resolveNodeModel,
   type Tier,
   validateOutput,
@@ -264,6 +265,8 @@ export async function runWorkflow(host: WorkflowHost, opts: RunOptions): Promise
     let r = await execNode(node, tierOverride);
     while (!r.ok) {
       if (r.reason === "aborted") return finish("aborted", "abort 要求");
+      // ポリシー拒否は決定的な設定エラー。LLM リカバリ（課金・遅延）を回さず即失敗
+      if (r.reason.includes(POLICY_DENIED)) return finish("failed", `${node.id} 失敗: ${r.reason}`);
       const choice: RecoveryKind = allowRecovery(
         await opts.decideRecovery({ id: node.id, reason: r.reason }).catch(() => "abort"),
         run.inserted,

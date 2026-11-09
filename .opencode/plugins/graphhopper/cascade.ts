@@ -12,6 +12,7 @@ import {
   type CascadeHost,
   type ModelRef,
   applyCascade,
+  checkCascadeTarget,
   endCascade,
   formatModel,
   parseCascadeModel,
@@ -19,12 +20,16 @@ import {
   resolveTargetModel,
   shouldFlushOrphan,
 } from "../../../src/cascade";
+import { describeModelDenial } from "../../../src/model-policy";
 import * as state from "../../../src/state";
 import { readRun } from "../../../src/workflow";
 import { logDecision } from "../../../src/decision";
 import { INTERNAL_PROMPT_METADATA_KEY } from "../../../src/entry-decide";
 import type { CascadeChild } from "../../../src/state";
 import type { Gh } from "./shared";
+
+/** ポリシーで拒否した切替先（"goalID:model"）。同一拒否の再報告を防ぐ */
+const deniedCascadeTargets = new Set<string>();
 
 function makeHost(gh: Gh): CascadeHost {
   return {
@@ -106,6 +111,22 @@ export async function syncCascadeResult(gh: Gh): Promise<SyncCascadeResult> {
   if (current && current.level === level && current.model === targetKey) return ok(null);
 
   if (!sessionID) return fail("cascade: session unbound（切替せず）");
+
+  // 切替先がポリシーで拒否されるなら切り替えない（design g-mw8xvsg8 判断1, 3）。
+  // 同じ拒否は1 goal につき1回だけ報告する（idle/eval のたびに警告を出さない）。
+  // 表示だけ抑止し、failed の意味（切替できなかった）は保つ
+  const denial = checkCascadeTarget(targetRef, {
+    allow: config.model_allow,
+    deny: config.model_deny,
+  });
+  if (denial) {
+    const key = `${active.goal.id}:${denial.model}`;
+    if (deniedCascadeTargets.has(key)) return { note: null, failed: true };
+    deniedCascadeTargets.add(key);
+    return fail(
+      `cascade: 切替先 ${denial.model} は ${describeModelDenial(denial)} のため切替しない`,
+    );
+  }
 
   const next = await applyCascade(host, {
     sessionID,

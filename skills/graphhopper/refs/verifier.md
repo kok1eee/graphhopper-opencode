@@ -76,6 +76,11 @@ polish前にlens編成の助言が欲しい場合のみ使う（現行routerは�
   exit 1 する。deny を変えたら必ず焼き直す（`bun scripts/gen-agents.ts`）。
   `--check` で config と既存 `.md` のズレを検出できる。agent→モデル束縛はセッション開始時に
   凍結されるため、resume したセッションには反映されない（新規セッションで始める）。
+  resume 時に catalog へ model_allow/model_deny 違反のモデルが焼かれていると、応答に警告が付く（焼き直して新規セッション）。
+  **cascade の切替先（baseline/escalate/quality 等）も同じ deny で拒否される**。拒否時は
+  切り替えず `failed` を返す（同じ拒否は1 goal 1回だけ報告）。goal 終了時の復元は拒否しない。
+  CI は `bun scripts/gen-agents.ts --check-policy` で、commit 済みの
+  `.graphhopper/config.example.json` をポリシー源に catalog と cascade 設定を検査する。
   見逃し率はscoreboardで監視。
   researcher/librarian は `opencode-go/minimax-m3.1-flash-free`（無料枠の M3.1）、
   **simplifyは `opencode-go/deepseek-v4.1-flash`（primary。遅い/枠切れ時は `claude-oauth/claude-sonnet-5-5` に手動切替）**、oracleはopus-5-5、advisorはglm-5.3（Bedrock cross-region。coding特化・prompt cache対応。旧grok-4.7から2026-10-08に置換）。

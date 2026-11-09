@@ -18,7 +18,7 @@ export type ModelCheck =
   | { ok: false; kind: "unresolved" };
 
 /** 違反の種類。invalid=形式不正、unknown=未知の agent 名（bake 用） */
-export type ModelViolationKind = "deny" | "allow" | "invalid" | "unknown";
+export type ModelViolationKind = "deny" | "allow" | "invalid" | "unknown" | "missing";
 
 /** 拒否された agent/モデルの組（bake の違反と実行時警告で共用） */
 export interface ModelViolation {
@@ -41,6 +41,22 @@ export function toViolation(
     kind: check.kind,
     ...(check.kind === "deny" ? { rule: check.rule } : {}),
   };
+}
+
+/** 拒否理由を人間向けの1行にする（plugin / CLI の表示で共用） */
+export function describeModelDenial(v: ModelViolation): string {
+  switch (v.kind) {
+    case "deny":
+      return `model_deny (rule: ${v.rule})`;
+    case "allow":
+      return "model_allow 外";
+    case "invalid":
+      return "provider/model 形式不正";
+    case "unknown":
+      return "未知の agent 名";
+    case "missing":
+      return "catalog 未生成";
+  }
 }
 
 /** glob（`*` のみ）を全体一致で照合する。大小文字は区別する */

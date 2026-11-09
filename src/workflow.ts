@@ -108,6 +108,9 @@ export function getWorkflow(name: string): WorkflowDef | null {
   return name === "bugfix" ? BUGFIX_WORKFLOW : null;
 }
 
+/** モデルポリシー拒否を識別する接頭辞（runner が LLM リカバリを回さないため） */
+export const POLICY_DENIED = "policy_denied";
+
 /**
  * tier→モデル。cascade 無効なら null（親セッションのモデルを継承）。
  * - baseline: 初期作業（安いモデル）

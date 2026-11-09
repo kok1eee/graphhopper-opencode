@@ -12,6 +12,7 @@ import { latestSummary } from "../../../src/compaction-store";
 import * as handoff from "../../../src/handoff";
 import { invokeStructured } from "../../../src/invoke";
 import { formatScoreboard } from "../../../src/scoreboard-format";
+import { catalogPolicyWarning } from "../../../src/bake";
 import * as state from "../../../src/state";
 import { knownSessions, noteSession, S, text, type Gh } from "./shared";
 
@@ -412,6 +413,8 @@ export function registerOpsTools(
             );
           }
           resumeNote = `resumed: "${r.goal.title}" (${r.goal.id}) / phase: ${r.state.phase}`;
+          const policyNote = catalogPolicyWarning(root, state.readConfig(root));
+          if (policyNote) resumeNote += `\n${policyNote}`;
         } else if (active.state.session_id && active.state.session_id !== sessionID) {
           /* 別セッションが実行中の goal を、このセッションが横取りしない（pending も据え置く） */
           return text(

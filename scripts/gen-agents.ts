@@ -8,12 +8,13 @@
  *   bun scripts/gen-agents.ts --out ~/.config/opencode/agents --global-only
  *                                                   # global (global表のみ)
  *   bun scripts/gen-agents.ts --check               # 焼き直さず、config と既存 .md のズレだけ検査
+ *   bun scripts/gen-agents.ts --check-policy        # CI 用: commit 済み config.example.json で catalog と cascade を検査
  * 割当表を変えたら再実行＋opencode再起動が必要。
  */
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { bakeAgents, formatBakeViolation } from "../src/bake";
+import { bakeAgents, checkCatalogPolicy, formatBakeViolation } from "../src/bake";
 import type { ModelPolicy } from "../src/model-policy";
 import { globalConfigPath, readConfig } from "../src/state";
 
@@ -26,6 +27,51 @@ const outValue = outIdx >= 0 ? (argv[outIdx + 1] ?? "") : "";
 const outDir = resolve(outIdx >= 0 ? outValue : join(projRoot, ".opencode", "agents"));
 const globalOnly = argv.includes("--global-only");
 const checkOnly = argv.includes("--check");
+const checkPolicy = argv.includes("--check-policy");
+
+/* CI 用: commit 済みの .graphhopper/config.example.json を唯一のポリシー源にする。
+ * .graphhopper/* は gitignore のため、CI には config.json が存在しない（design 判断7）。 */
+if (checkPolicy) {
+  const policyIdx = argv.indexOf("--policy");
+  const policyValue = policyIdx >= 0 ? (argv[policyIdx + 1] ?? "") : "";
+  if (policyIdx >= 0 && (!policyValue || policyValue.startsWith("--"))) {
+    console.error("error: --policy requires a path");
+    process.exit(1);
+  }
+  const policyPath = policyIdx >= 0
+    ? resolve(policyValue)
+    : join(projRoot, ".graphhopper", "config.example.json");
+  let example: {
+    model_allow?: string[];
+    model_deny?: string[];
+    cascade?: Parameters<typeof checkCatalogPolicy>[0]["cascade"];
+  };
+  try {
+    example = JSON.parse(readFileSync(policyPath, "utf8"));
+    if (typeof example !== "object" || example === null || Array.isArray(example)) {
+      throw new Error("policy must be a JSON object");
+    }
+    for (const k of ["model_allow", "model_deny"] as const) {
+      if (example[k] !== undefined && !Array.isArray(example[k])) {
+        throw new Error(`${k} must be an array`);
+      }
+    }
+  } catch (err) {
+    console.error(`error: cannot read ${policyPath}: ${String(err)}`);
+    process.exit(1);
+  }
+  const result = checkCatalogPolicy({
+    outDir: join(projRoot, ".opencode", "agents"),
+    policy: { allow: example.model_allow, deny: example.model_deny },
+    cascade: example.cascade,
+  });
+  if (!result.ok) {
+    for (const v of result.violations) console.error(`error: ${formatBakeViolation(v)}`);
+    process.exit(1);
+  }
+  console.log("ok: catalog and cascade config satisfy the committed policy");
+  process.exit(0);
+}
 if (outIdx >= 0 && (!outValue || outValue.startsWith("--"))) {
   console.error("error: --out requires a directory");
   process.exit(1);

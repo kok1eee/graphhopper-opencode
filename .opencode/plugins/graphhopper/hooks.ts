@@ -8,7 +8,9 @@ import { $ } from "bun";
 import { beginCheckpointReview, flushOrphanCascade, syncCascade } from "./cascade";
 import {
   type ChildHost,
+  checkCascadeTarget,
   escalateChildSession,
+  parseCascadeModel,
   resolveChildModel,
   shouldSwitchChild,
 } from "../../../src/cascade";
@@ -23,6 +25,7 @@ import {
   PHASE_ACTION_BRIEF,
   PONYTAIL_BRIEF,
 } from "../../../src/gate";
+import { describeModelDenial } from "../../../src/model-policy";
 import { PONYTAIL_RULES } from "../../../src/ponytail-rules";
 import { resolveCompactDb, runCompactGate } from "../../../src/compact";
 import { goalResumeContext } from "../../../src/gate";
@@ -547,6 +550,9 @@ async function isChildSession(
 /** 切替処理中の子セッション（同一 sessionID の二重切替を防ぐ） */
 const inflightChildren = new Set<string>();
 
+/** ポリシーで拒否した子セッション（警告の繰り返しを防ぐ） */
+const deniedChildren = new Set<string>();
+
 /**
  * 子セッション（subagent）が作成されたときのモデル切替。
  * quality マップ（verifier / simplify）に入っている agent だけを対象にし、
@@ -586,6 +592,24 @@ function handleChildSessionCreated(gh: Gh, data: Record<string, unknown> | undef
   ) {
     return;
   }
+
+  // 切替先がポリシーで拒否されるなら切り替えない（design g-mw8xvsg8 判断4）。
+  // 実際に切替対象になった子だけを見る（shouldSwitchChild の後）。
+  // 拒否した sessionID は in-memory で記録し、毎イベントの警告を防ぐ
+  const denial = checkCascadeTarget(parseCascadeModel(target), {
+    allow: config.model_allow,
+    deny: config.model_deny,
+  });
+  if (denial) {
+    if (!deniedChildren.has(sessionID)) {
+      deniedChildren.add(sessionID);
+      console.warn(
+        `graphhopper: 子セッション ${agent} の切替先 ${denial.model} は ${describeModelDenial(denial)} のため切り替えない`,
+      );
+    }
+    return;
+  }
+
   // 冪等: 同じ子セッションは2回切替しない（記録済み or 実行中）
   if ((active.state.cascade?.children ?? []).some((c) => c.sessionID === sessionID)) return;
   if (inflightChildren.has(sessionID)) return;

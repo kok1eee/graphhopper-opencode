@@ -38,6 +38,10 @@ verifier_set等に明示し、復旧したらinvokeに戻す）。
 `bun scripts/gen-agents.ts` が bake 時に同じ deny で検査し、違反があれば書き込まず
 exit 1 する。deny を変えたら焼き直す。`--check` で config とのズレを検出できる。
 凍結された既存セッション（resume）には反映されないので、新規セッションで始める。
+resume 時に catalog へ model_allow/model_deny 違反のモデルが焼かれていると応答に警告が付く。
+cascade の切替先（baseline/escalate/quality 等）も deny で拒否され、拒否時は切り替えない
+（goal 終了時の復元は通す）。CI は `bun scripts/gen-agents.ts --check-policy` で
+`.graphhopper/config.example.json` を源に catalog と cascade 設定を検査する。
 
 ## フェーズ
 

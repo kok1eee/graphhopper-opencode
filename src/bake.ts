@@ -141,6 +141,106 @@ export function bakeAgents(input: BakeInput): BakeResult {
   return { ok: true, written: rendered.map((r) => r.name), violations: [], stale: [] };
 }
 
+/**
+ * 焼き込み済み catalog のモデルがポリシーに違反しているかを返す（design g-mw8xvsg8 判断6）。
+ * stale（config との差分）は見ない: 既知の verifier drift で resume 警告が常時発火するため。
+ */
+export function catalogPolicyViolations(
+  root: string,
+  cfg: { model_allow?: string[]; model_deny?: string[] },
+): ModelViolation[] {
+  const outDir = join(root, ".opencode", "agents");
+  const policy: ModelPolicy = { allow: cfg.model_allow, deny: cfg.model_deny };
+  const violations: ModelViolation[] = [];
+  for (const name of Object.keys(GRAPHHOPPER_AGENTS)) {
+    const path = join(outDir, `${name}.md`);
+    const raw = existsSync(path) ? readFileSync(path, "utf8") : null;
+    const model = readBakedModel(raw);
+    if (!model) continue; // 未 bake は --check-policy の領分
+    const v = toViolation(name, model, checkModelAllowed(model, policy));
+    if (v) violations.push(v);
+  }
+  return violations;
+}
+
+/** resume 応答に付ける警告1行（違反が無ければ null） */
+export function catalogPolicyWarning(
+  root: string,
+  cfg: { model_allow?: string[]; model_deny?: string[] },
+): string | null {
+  const v = catalogPolicyViolations(root, cfg);
+  if (v.length === 0) return null;
+  return (
+    `注意: agent catalog に model_allow/model_deny 違反が ${v.length} 件あります（${v.map((x) => x.agent).join(", ")}）。` +
+    "resume はモデルを凍結するため反映されません。bun scripts/gen-agents.ts で焼き直し、新規セッションで開始してください。"
+  );
+}
+
+/**
+ * 焼き込み済み catalog と cascade 設定を、commit 済みポリシーで検査する（CI 用。判断7, 8）。
+ * 個人 global 設定は読まない（CI に存在しないため）。
+ */
+export function checkCatalogPolicy(input: {
+  outDir: string;
+  policy: ModelPolicy;
+  cascade?: {
+    baseline?: string;
+    escalate?: string;
+    second?: string;
+    expert?: string;
+    main_fallback?: string;
+    phase_models?: Record<string, string>;
+    /** legacy の escalate も readConfig が quality へマージするため検査する */
+    agents?: { quality?: Record<string, string>; escalate?: Record<string, string> };
+  };
+}): { ok: boolean; violations: ModelViolation[] } {
+  const violations: ModelViolation[] = [];
+  for (const name of Object.keys(GRAPHHOPPER_AGENTS)) {
+    const path = join(input.outDir, `${name}.md`);
+    const raw = existsSync(path) ? readFileSync(path, "utf8") : null;
+    const model = readBakedModel(raw);
+    if (!model) {
+      violations.push({ agent: name, model: "(missing)", kind: "missing" });
+      continue;
+    }
+    const v = toViolation(name, model, checkModelAllowed(model, input.policy));
+    if (v) violations.push(v);
+  }
+  const c = input.cascade;
+  if (c) {
+    const entries: [string, string | undefined][] = [
+      ["cascade.baseline", c.baseline],
+      ["cascade.escalate", c.escalate],
+      ["cascade.second", c.second],
+      ["cascade.expert", c.expert],
+      ["cascade.main_fallback", c.main_fallback],
+      ...Object.entries(c.phase_models ?? {}).map(
+        ([k, v]) => [`cascade.phase_models.${k}`, v] as [string, string],
+      ),
+      ...Object.entries(c.agents?.quality ?? {}).map(
+        ([k, v]) => [`cascade.agents.quality.${k}`, v] as [string, string],
+      ),
+      ...Object.entries(c.agents?.escalate ?? {}).map(
+        ([k, v]) => [`cascade.agents.escalate.${k}`, v] as [string, string],
+      ),
+    ];
+    for (const [label, value] of entries) {
+      if (!value || value === "main") continue;
+      let model: string;
+      try {
+        const ref = parseModelRef(value);
+        model = `${ref.providerID}/${ref.model}`;
+      } catch {
+        violations.push({ agent: label, model: value, kind: "invalid" });
+        continue;
+      }
+      const v = toViolation(label, model, checkModelAllowed(model, input.policy));
+      if (v) violations.push(v);
+    }
+  }
+  return { ok: violations.length === 0, violations };
+}
+
 /** 違反を人間向けの1行にする（CLI の stderr 用） */
 export function formatBakeViolation(v: BakeViolation): string {
   switch (v.kind) {
@@ -152,5 +252,7 @@ export function formatBakeViolation(v: BakeViolation): string {
       return `${v.agent}: model "${v.model}" is not a valid provider/model ref`;
     case "unknown":
       return `${v.agent}: unknown agent name in config agents (typo?)`;
+    case "missing":
+      return `${v.agent}: catalog .md is missing (run bun scripts/gen-agents.ts)`;
   }
 }

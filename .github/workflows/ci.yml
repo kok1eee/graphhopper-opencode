@@ -1,0 +1,20 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # bun.lock を生成した版に固定する（design g-mw8xvsg8 判断9）
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - run: npx tsc --noEmit
+      # repo に焼かれた catalog と cascade 設定が、commit 済みポリシーに違反しないか
+      - run: bun scripts/gen-agents.ts --check-policy

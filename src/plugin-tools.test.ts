@@ -18,7 +18,7 @@ import { registerOpsTools } from "../.opencode/plugins/graphhopper/tools-ops";
 import { readHandoff, handoffPath } from "./handoff";
 import { resumeGoal } from "./state";
 import { formatScoreboard } from "./scoreboard-format";
-import { planPath, readTodos, startGoal } from "./state";
+import { pauseGoal, planPath, readTodos, startGoal } from "./state";
 
 interface ToolDef {
   name: string;
@@ -51,6 +51,35 @@ function textOf(out: unknown): string {
 const DESIGN_WITH_TASKS = compliantDesignDoc({
   title: "plugin test",
   tasks: ["- [ ] T1（判断1）: 実装する", "- [ ] T2（判断1）: テストを書く"],
+});
+
+describe("plugin tool: resume の catalog 警告（design g-mw8xvsg8）", () => {
+  test("catalog に deny モデルが焼かれていると resume 応答に警告が付く", async () => {
+    const prevCfg = process.env.GRAPHHOPPER_CONFIG;
+    const cfgPath = join(tmpRoot(), "global.json");
+    writeFileSync(cfgPath, JSON.stringify({ model_deny: ["opencode-go/gpt-*"] }), "utf8");
+    process.env.GRAPHHOPPER_CONFIG = cfgPath;
+    try {
+      const root = tmpRoot();
+      startGoal(root, "t", "s1");
+      pauseGoal(root);
+      const agentsDir = join(root, ".opencode", "agents");
+      mkdirSync(agentsDir, { recursive: true });
+      writeFileSync(
+        join(agentsDir, "graphhopper-critic.md"),
+        '---\nmodel: "opencode-go/gpt-6-luna"\n---\nbody\n',
+        "utf8",
+      );
+      const t = tools(root).get("graphhopper_goal");
+      const out = await t!.execute({ action: "resume" }, { sessionID: "s1" });
+      const text = textOf(out);
+      expect(text).toContain("resumed:");
+      expect(text).toContain("gen-agents");
+    } finally {
+      if (prevCfg === undefined) delete process.env.GRAPHHOPPER_CONFIG;
+      else process.env.GRAPHHOPPER_CONFIG = prevCfg;
+    }
+  });
 });
 
 describe("plugin tool: graphhopper_todo", () => {

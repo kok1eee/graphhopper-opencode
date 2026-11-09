@@ -18,6 +18,7 @@ import {
   shouldFlushOrphan,
   shouldSwitchChild,
   applyCascade,
+  checkCascadeTarget,
 } from "./cascade";
 import type { CascadeConfig } from "./state";
 
@@ -119,6 +120,34 @@ describe("resolveLevel", () => {
       config: { ...config, fail_threshold: 0 },
     });
     expect(r.level).toBe("baseline");
+  });
+});
+
+describe("checkCascadeTarget", () => {
+  test("deny 一致は違反を返す（variant は無視して正規化）", () => {
+    expect(
+      checkCascadeTarget(
+        { providerID: "opencode-go", id: "gpt-6-luna", variant: "default" },
+        { deny: ["opencode-go/gpt-6-luna"] },
+      ),
+    ).toEqual({
+      agent: "cascade",
+      model: "opencode-go/gpt-6-luna",
+      kind: "deny",
+      rule: "opencode-go/gpt-6-luna",
+    });
+  });
+  test("allow 非空で不一致は違反", () => {
+    expect(
+      checkCascadeTarget({ providerID: "a", id: "b" }, { allow: ["x/*"] }),
+    ).toEqual({ agent: "cascade", model: "a/b", kind: "allow" });
+  });
+  test("許可・未設定・解決不能は null", () => {
+    expect(checkCascadeTarget({ providerID: "a", id: "b" }, {})).toBeNull();
+    expect(
+      checkCascadeTarget({ providerID: "a", id: "b" }, { deny: ["x/*"] }),
+    ).toBeNull();
+    expect(checkCascadeTarget(null, { deny: ["a/*"] })).toBeNull();
   });
 });
 

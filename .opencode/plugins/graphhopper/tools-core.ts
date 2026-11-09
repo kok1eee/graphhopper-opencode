@@ -22,6 +22,7 @@ import {
 } from "../../../src/decision";
 import { finishCascade, maybeRequestCheckpoint, syncCascade } from "./cascade";
 import { ensureEntryDecision } from "../../../src/entry-decide";
+import { catalogPolicyWarning } from "../../../src/bake";
 import * as state from "../../../src/state";
 import { readRun, summarizeRun } from "../../../src/workflow";
 import { clearWaitTimer, noteSession, S, text, type Gh } from "./shared";
@@ -151,9 +152,12 @@ export function registerCoreTools(
           }
           const a = state.resumeGoal(root, sessionID, args.force);
           const cascadeNote = a ? await syncCascade(gh) : null;
+          const policyNote = a
+            ? catalogPolicyWarning(root, state.readConfig(root))
+            : null;
           return text(
             a
-              ? `resumed: "${a.goal.title}" | phase: ${a.state.phase}${args.force ? " (forced)" : ""}${cascadeNote ? `\n${cascadeNote}` : ""}`
+              ? `resumed: "${a.goal.title}" | phase: ${a.state.phase}${args.force ? " (forced)" : ""}${cascadeNote ? `\n${cascadeNote}` : ""}${policyNote ? `\n${policyNote}` : ""}`
               : "no active goal",
           );
         }

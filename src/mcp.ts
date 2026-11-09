@@ -60,6 +60,7 @@ import {
   SELECTOR_TOOL_DESCRIPTION,
   selectLenses,
 } from "./decision";
+import { catalogPolicyWarning } from "./bake";
 import * as state from "./state";
 import { invokeStructured } from "./invoke";
 import { formatScoreboard } from "./scoreboard-format";
@@ -260,8 +261,11 @@ async function goalAction(
           );
           if (approved) {
             const a2 = state.resumeGoal(root, sessionID, true);
+            const policyNote = a2
+              ? catalogPolicyWarning(root, state.readConfig(root))
+              : null;
             return a2
-              ? `resumed: "${a2.goal.title}" | phase: ${a2.state.phase} (forced via elicitation)`
+              ? `resumed: "${a2.goal.title}" | phase: ${a2.state.phase} (forced via elicitation)${policyNote ? `\n${policyNote}` : ""}`
               : "no active goal";
           }
         }
@@ -277,8 +281,11 @@ async function goalAction(
       const unbound =
         !sessionID &&
         "\n(note: session_id 未指定のため未バインドのまま。継続注入・stuck計数を有効にするには session_id を指定せよ)";
+      const policyNote = a
+        ? catalogPolicyWarning(root, state.readConfig(root))
+        : null;
       return a
-        ? `resumed: "${a.goal.title}" | phase: ${a.state.phase}${force ? " (forced)" : ""}${unbound ?? ""}`
+        ? `resumed: "${a.goal.title}" | phase: ${a.state.phase}${force ? " (forced)" : ""}${unbound ?? ""}${policyNote ? `\n${policyNote}` : ""}`
         : "no active goal";
     }
     case "complete": {
