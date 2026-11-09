@@ -104,52 +104,6 @@ describe("resolveModel", () => {
   });
 });
 
-describe("checkModelAllowed", () => {
-  test("未設定は無制限", async () => {
-    const { checkModelAllowed } = await import("./invoke");
-    expect(checkModelAllowed("a/b", {})).toEqual({ ok: true });
-    expect(checkModelAllowed(undefined, {})).toEqual({ ok: true });
-  });
-  test("deny は allow より優先", async () => {
-    const { checkModelAllowed } = await import("./invoke");
-    expect(checkModelAllowed("a/b", { allow: ["a/*"], deny: ["a/b"] })).toEqual({
-      ok: false,
-      kind: "deny",
-      rule: "a/b",
-    });
-  });
-  test("allow 非空なら一致必須", async () => {
-    const { checkModelAllowed } = await import("./invoke");
-    expect(checkModelAllowed("a/b", { allow: ["a/*"] })).toEqual({ ok: true });
-    expect(checkModelAllowed("x/y", { allow: ["a/*"] })).toEqual({
-      ok: false,
-      kind: "allow",
-    });
-  });
-  test("glob は全体一致・大小文字区別", async () => {
-    const { checkModelAllowed } = await import("./invoke");
-    expect(checkModelAllowed("opencode-go/x", { deny: ["opencode-go/*"] })).toMatchObject({
-      ok: false,
-      kind: "deny",
-    });
-    // 部分一致しない
-    expect(checkModelAllowed("pre-opencode-go/x", { deny: ["opencode-go/*"] })).toEqual({
-      ok: true,
-    });
-    // 大小文字を区別する
-    expect(checkModelAllowed("Opencode-Go/x", { deny: ["opencode-go/*"] })).toEqual({
-      ok: true,
-    });
-  });
-  test("未解決は制限有効時のみ拒否", async () => {
-    const { checkModelAllowed } = await import("./invoke");
-    expect(checkModelAllowed(undefined, { deny: ["a/*"] })).toEqual({
-      ok: false,
-      kind: "unresolved",
-    });
-  });
-});
-
 describe("invoke のモデル制限（config 駆動）", () => {
   /** GRAPHHOPPER_CONFIG を一時ファイルへ向ける（実ユーザー設定を読まない） */
   function withGlobal(json: object, fn: () => Promise<void>): Promise<void> {

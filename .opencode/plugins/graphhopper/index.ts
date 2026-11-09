@@ -4,7 +4,7 @@
  * v1 (config hook＋tool map) を v2 (Plugin.define＋domain transforms/hooks) に移植。
  */
 import { Plugin } from "@opencode/plugin";
-import { collectAgentUpdates } from "../../../src/agents";
+import { resolveAgentAssignments } from "../../../src/agents";
 import { registerHooks } from "./hooks";
 import { registerCoreTools } from "./tools-core";
 import { registerLspTools } from "./tools-lsp";
@@ -25,7 +25,20 @@ export default Plugin.define({
      * 実測済み)。割当の適用は scripts/gen-agents.ts の bake が本命。
      * ここは将来の順序変更に備えた best-effort として残す。 */
     await ctx.agent.transform((editor) => {
-      const updates = collectAgentUpdates(gh.root);
+      const { updates, warnings } = resolveAgentAssignments(gh.root);
+      for (const w of warnings) {
+        const reason =
+          w.kind === "deny"
+            ? `model_deny (rule: ${w.rule})`
+            : w.kind === "allow"
+              ? "model_allow 外"
+              : w.kind === "invalid"
+                ? "provider/model 形式不正"
+                : "未知の agent 名";
+        console.warn(
+          `graphhopper: ${w.agent} のモデル "${w.model}" は ${reason} のため既定へフォールバック。catalog の焼き直しは bun scripts/gen-agents.ts`,
+        );
+      }
       for (const [name, u] of Object.entries(updates)) {
         if (!editor.get(name)) continue;
         editor.update(name, (agent) => {

@@ -8,6 +8,7 @@ import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process"
 import { execSync } from "node:child_process";
 import { resolve } from "node:path";
 import { GRAPHHOPPER_AGENTS } from "./agents";
+import { checkModelAllowed } from "./model-policy";
 import { readConfig } from "./state";
 
 export const PROMPT_MAX_CHARS = 12000;
@@ -91,48 +92,10 @@ function validModel(m: string): boolean {
   return m.includes("/") && !/\s/.test(m) && m.length < 200;
 }
 
-/** モデル許可/拒否ポリシー（config の model_allow / model_deny） */
-export interface ModelPolicy {
-  allow?: string[];
-  deny?: string[];
-}
-
-/** 判定結果。拒否理由を説明できるよう判別共用体で返す（design g-mw8qwiy6 判断6） */
-export type ModelCheck =
-  | { ok: true }
-  | { ok: false; kind: "deny"; rule: string }
-  | { ok: false; kind: "allow" }
-  | { ok: false; kind: "unresolved" };
-
-/** glob（`*` のみ）を全体一致で照合する。大小文字は区別する（design 判断1） */
-function globMatch(pattern: string, model: string): boolean {
-  if (!pattern.includes("*")) return pattern === model;
-  const body = pattern
-    .split("*")
-    .map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-    .join(".*");
-  return new RegExp(`^${body}$`).test(model);
-}
-
-/** モデルの許可判定。deny 優先・allow 非空なら一致必須・未解決は制限有効時のみ拒否 */
-export function checkModelAllowed(
-  model: string | undefined,
-  policy: ModelPolicy,
-): ModelCheck {
-  const allow = policy.allow ?? [];
-  const deny = policy.deny ?? [];
-  if (model === undefined) {
-    return allow.length === 0 && deny.length === 0
-      ? { ok: true }
-      : { ok: false, kind: "unresolved" };
-  }
-  const denied = deny.find((p) => globMatch(p, model));
-  if (denied !== undefined) return { ok: false, kind: "deny", rule: denied };
-  if (allow.length > 0 && !allow.some((p) => globMatch(p, model))) {
-    return { ok: false, kind: "allow" };
-  }
-  return { ok: true };
-}
+// モデル許可判定は src/model-policy.ts に置く（src/agents.ts からも使うため循環を避ける）。
+// 既存の import 経路（`./invoke`）を壊さないよう再エクスポートする。
+export { checkModelAllowed } from "./model-policy";
+export type { ModelCheck, ModelPolicy } from "./model-policy";
 
 /** argv組立（純関数・shell非経由）。`--` でmessage境界を明示する。
  * v2 の `run` に `--dir` は無い (R-M4 実測) ため付けない。対象 dir は spawn 側の

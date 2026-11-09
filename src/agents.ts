@@ -28,6 +28,7 @@
  * ユーザーが opencode.json(c) に同名 agent を定義している場合はそちらを優先する。
  * プロジェクト単位のモデル上書きは .graphhopper/config.json の agents で指定する。
  */
+import { checkModelAllowed, toViolation, type ModelViolation } from "./model-policy";
 import { readConfig } from "./state";
 
 export interface PermissionRule { action: string; resource: string; effect: "allow" | "ask" | "deny"; }
@@ -436,22 +437,63 @@ export interface AgentUpdate {
   temperature?: number;
 }
 
+/** config の agents 上書きが model_allow / model_deny で拒否されたときの警告 */
+export type AgentAssignmentWarning = ModelViolation;
+
+/**
+ * 割当表を解決する。拒否された上書きは built-in 既定へ落とし、警告として返す。
+ * 注意: これは実行時 transform 用の best-effort であり、task() の実効ゲートではない
+ * （transform は catalog 発見より先に走るため no-op。ゲートは scripts/gen-agents.ts の
+ * bake。design g-mw8rlbjr 判断6）。
+ */
+export function resolveAgentAssignments(root: string): {
+  updates: Record<string, AgentUpdate>;
+  warnings: AgentAssignmentWarning[];
+} {
+  const cfg = readConfig(root);
+  const updates: Record<string, AgentUpdate> = {};
+  const warnings: AgentAssignmentWarning[] = [];
+  for (const [name, def] of Object.entries(GRAPHHOPPER_AGENTS)) {
+    const override = cfg.agents[name];
+    let model = def.model;
+    if (override) {
+      let ref: V2ModelRef | null = null;
+      try {
+        ref = parseModelRef(override);
+      } catch {
+        ref = null;
+      }
+      if (!ref) {
+        // 形式不正を黙って既定へ落とすと設定ミスが見えない（bake は invalid で止める）
+        warnings.push({ agent: name, model: override, kind: "invalid" });
+      } else {
+        // bake と同じく正規化した provider/model で判定する（variant の有無で差を作らない）
+        const normalized = `${ref.providerID}/${ref.model}`;
+        const v = toViolation(
+          name,
+          normalized,
+          checkModelAllowed(normalized, { allow: cfg.model_allow, deny: cfg.model_deny }),
+        );
+        if (v) warnings.push(v);
+        else model = ref;
+      }
+    }
+    updates[name] = {
+      model,
+      permissions: buildPermissions(def, name),
+      ...(def.temperature !== undefined ? { temperature: def.temperature } : {}),
+    };
+  }
+  return { updates, warnings };
+}
+
 /**
  * v2 plugin の `ctx.agent.transform(editor => editor.update(...))` に渡す更新集合。
  * 8→7 agent は `agents/*.md` で静的宣言済み (v2 の AgentEditor に add は無い) が前提。
  * 割当表 (.graphhopper/config.json の agents。global＋project マージ済み) の model が
  * 静的宣言の既定より優先される (v1 K10/K11 の教訓: 割当は update で必ず適用する)。
+ * 後方互換ラッパー（実質テスト用。plugin は resolveAgentAssignments を使う）。
  */
 export function collectAgentUpdates(root: string): Record<string, AgentUpdate> {
-  const cfg = readConfig(root);
-  const out: Record<string, AgentUpdate> = {};
-  for (const [name, def] of Object.entries(GRAPHHOPPER_AGENTS)) {
-    const override = cfg.agents[name];
-    out[name] = {
-      model: override ? parseModelRef(override) : def.model,
-      permissions: buildPermissions(def, name),
-      ...(def.temperature !== undefined ? { temperature: def.temperature } : {}),
-    };
-  }
-  return out;
+  return resolveAgentAssignments(root).updates;
 }

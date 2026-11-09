@@ -34,6 +34,10 @@ verifier_set等に明示し、復旧したらinvokeに戻す）。
 `graphhopper_invoke` の `model` は config の `model_allow` / `model_deny` で
 機械的に検査される。deny 一致は拒否して止まる（フォールバックしない）。高額モデル
 （Go の Kimi/GPT 等、月枠が小さいもの）は deny に入れる。
+`task()` のモデルは `.opencode/agents/*.md` の焼き込み値で決まるため、
+`bun scripts/gen-agents.ts` が bake 時に同じ deny で検査し、違反があれば書き込まず
+exit 1 する。deny を変えたら焼き直す。`--check` で config とのズレを検出できる。
+凍結された既存セッション（resume）には反映されないので、新規セッションで始める。
 
 ## フェーズ
 

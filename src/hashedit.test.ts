@@ -18,6 +18,7 @@ import {
   buildPermissions,
   collectAgentUpdates,
   parseModelRef,
+  resolveAgentAssignments,
 } from "./agents";
 import { applySingleEdit, decodeUtf8Strict, sha1Hex, verifyHash } from "./hashedit";
 import {
@@ -262,6 +263,72 @@ describe("subagent read-only guard (v2 permissions)", () => {
     expect(updates["graphhopper-oracle"]?.model).toEqual({
       providerID: "test-prov",
       model: "test-model",
+    });
+  });
+
+  test("拒否された上書きは既定へフォールバックし警告を返す（design g-mw8rlbjr）", () => {
+    // 実ユーザーのグローバル設定を読まない（GRAPHHOPPER_CONFIG を空の一時ファイルへ）
+    const prevCfg = process.env.GRAPHHOPPER_CONFIG;
+    const globalCfg = join(mkdtempSync(join(tmpdir(), "gh-assign-global-")), "global.json");
+    writeFileSync(globalCfg, "{}", "utf8");
+    process.env.GRAPHHOPPER_CONFIG = globalCfg;
+    const root = mkdtempSync(join(tmpdir(), "gh-assign-deny-"));
+    mkdirSync(join(root, ".graphhopper"), { recursive: true });
+    writeFileSync(
+      join(root, ".graphhopper", "config.json"),
+      JSON.stringify({
+        agents: { "graphhopper-critic": "opencode-go/gpt-6-luna" },
+        model_deny: ["opencode-go/gpt-6-luna"],
+      }),
+      "utf8",
+    );
+    const { updates, warnings } = (() => {
+      try {
+        return resolveAgentAssignments(root);
+      } finally {
+        if (prevCfg === undefined) delete process.env.GRAPHHOPPER_CONFIG;
+        else process.env.GRAPHHOPPER_CONFIG = prevCfg;
+      }
+    })();
+    // built-in 既定（critic は claude-oauth/claude-haiku-5-5）へ戻る
+    expect(updates["graphhopper-critic"]?.model).toEqual({
+      providerID: "claude-oauth",
+      model: "claude-haiku-5-5",
+    });
+    expect(warnings).toEqual([
+      {
+        agent: "graphhopper-critic",
+        model: "opencode-go/gpt-6-luna",
+        kind: "deny",
+        rule: "opencode-go/gpt-6-luna",
+      },
+    ]);
+  });
+
+  test("形式不正の上書きは invalid 警告を出して既定へ落とす（design g-mw8rlbjr）", () => {
+    const prevCfg = process.env.GRAPHHOPPER_CONFIG;
+    const globalCfg = join(mkdtempSync(join(tmpdir(), "gh-assign-global2-")), "global.json");
+    writeFileSync(globalCfg, "{}", "utf8");
+    process.env.GRAPHHOPPER_CONFIG = globalCfg;
+    const root = mkdtempSync(join(tmpdir(), "gh-assign-invalid-"));
+    mkdirSync(join(root, ".graphhopper"), { recursive: true });
+    writeFileSync(
+      join(root, ".graphhopper", "config.json"),
+      JSON.stringify({ agents: { "graphhopper-critic": "no-slash" } }),
+      "utf8",
+    );
+    const { warnings } = (() => {
+      try {
+        return resolveAgentAssignments(root);
+      } finally {
+        if (prevCfg === undefined) delete process.env.GRAPHHOPPER_CONFIG;
+        else process.env.GRAPHHOPPER_CONFIG = prevCfg;
+      }
+    })();
+    expect(warnings).toContainEqual({
+      agent: "graphhopper-critic",
+      model: "no-slash",
+      kind: "invalid",
     });
   });
 

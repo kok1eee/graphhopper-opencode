@@ -71,6 +71,11 @@ polish前にlens編成の助言が欲しい場合のみ使う（現行routerは�
   invoke は拒否して止まる（フォールバックしない）。止められたらモデルを変えるのではなく、
   まず config の deny を確認する。高額モデル（Go の Kimi/GPT 等、月枠が小さいもの）は
   deny に入れるのが既定運用）。
+  **`task()` 経路のモデルは `.opencode/agents/*.md` に焼かれた値で決まる**ため、
+  `bun scripts/gen-agents.ts` の bake 時に同じ deny で検査され、違反があれば何も書かずに
+  exit 1 する。deny を変えたら必ず焼き直す（`bun scripts/gen-agents.ts`）。
+  `--check` で config と既存 `.md` のズレを検出できる。agent→モデル束縛はセッション開始時に
+  凍結されるため、resume したセッションには反映されない（新規セッションで始める）。
   見逃し率はscoreboardで監視。
   researcher/librarian は `opencode-go/minimax-m3.1-flash-free`（無料枠の M3.1）、
   **simplifyは `opencode-go/deepseek-v4.1-flash`（primary。遅い/枠切れ時は `claude-oauth/claude-sonnet-5-5` に手動切替）**、oracleはopus-5-5、advisorはglm-5.3（Bedrock cross-region。coding特化・prompt cache対応。旧grok-4.7から2026-10-08に置換）。

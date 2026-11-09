@@ -455,7 +455,7 @@ function configPath(root: string): string {
 }
 
 /** 全プロジェクト共通の既定設定。`GRAPHHOPPER_CONFIG` で明示指定も可能。 */
-function globalConfigPath(): string {
+export function globalConfigPath(): string {
   return (
     process.env.GRAPHHOPPER_CONFIG ??
     join(homedir(), ".config", "opencode", "graphhopper.json")
