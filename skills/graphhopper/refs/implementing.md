@@ -1,8 +1,8 @@
 - researcher / librarian の使い分け（調査の内外分離。両方とも最安tier・read-only）:
   - researcher = repo**内**（定義・構造・呼び出し関係をgraft-firstで）。librarian = repo**外**
     （公式doc・仕様・実装例を webfetch / context7 で。URLと引用付き、判断なし。
-    context7に無い一般web（issue・blog・changelog）はwebsearch MCP（Exa）、
-    コード例はgrep.app MCPにフォールバック）
+    context7に無い一般web（issue・blog・changelog）は websearch、
+    コード例は webfetch（grep.app の URL を直接）にフォールバック）
   - **モデル**: primary は `opencode-go/minimax-m3.1-flash-free`（無料枠）。枠切れ・遅いときは
     課金枠の `minimax/MiniMax-M3.1-Flash` に手動切替できる（割当表を書き換えて
     `bun scripts/gen-agents.ts` して再起動）
