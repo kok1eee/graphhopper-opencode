@@ -79,6 +79,11 @@ polish前にlens編成の助言が欲しい場合のみ使う（現行routerは�
   resume 時に catalog へ model_allow/model_deny 違反のモデルが焼かれていると、応答に警告が付く（焼き直して新規セッション）。
   **cascade の切替先（baseline/escalate/quality 等）も同じ deny で拒否される**。拒否時は
   切り替えず `failed` を返す（同じ拒否は1 goal 1回だけ報告）。goal 終了時の復元は拒否しない。
+  **verifier clean の後に差分を変えると `complete` は止まる**（design g-mwd3n5bo）。
+  `verifier_set` が検証時点の全文 diff の sha1 を記録し、complete 時に現在値と照合する。
+  止められたら再検証する（`graphhopper_verifier_set`）。人間が問題ないと判断した場合だけ
+  `force: true` を使う（監査の `goal_complete` に `diff_gate: forced` が残る）。
+  VCS が無い・baseline が取れない環境ではゲートは無効（`diff_gate: unavailable`）。
   CI は `bun scripts/gen-agents.ts --check-policy` で、commit 済みの
   `.graphhopper/config.example.json` をポリシー源に catalog と cascade 設定を検査する。
   ローカルでは project catalog に加えて `~/.config/opencode/agents` が存在すれば

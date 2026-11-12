@@ -1758,6 +1758,30 @@ describe("stashDiff（verifier用diff退避）", () => {
     expect(existsSync(stashed!.path)).toBe(true);
   });
 
+  test("computeDiffHash は全文diffのsha1を返し、変更で変わる（design g-mwd3n5bo）", async () => {
+    const { computeDiffHash } = await import("./state");
+    const { $ } = await import("bun");
+    const root = tmpRoot();
+    await $`git init -q ${root}`.quiet();
+    await $`git -C ${root} config user.email t@t`.quiet();
+    await $`git -C ${root} config user.name t`.quiet();
+    await Bun.write(`${root}/a.txt`, "one\n");
+    await $`git -C ${root} add -A`.quiet();
+    await $`git -C ${root} commit -qm init`.quiet();
+    const rev = (await $`git -C ${root} rev-parse HEAD`.text()).trim();
+
+    const empty = await computeDiffHash($, root, rev);
+    expect(empty).not.toBeNull();
+    await Bun.write(`${root}/a.txt`, "one\ntwo\n");
+    const changed = await computeDiffHash($, root, rev);
+    expect(changed).not.toBeNull();
+    expect(changed).not.toBe(empty);
+    // 同じ状態なら同じ（決定的）
+    expect(await computeDiffHash($, root, rev)).toBe(changed);
+    // baseline 不正は null（fail-open）
+    expect(await computeDiffHash($, root, "x; rm")).toBeNull();
+  });
+
   test("初期脏れを除外した実効diffだけ退避する", async () => {
     const s = await import("./state");
     type Shell = Parameters<typeof s.stashDiff>[0];

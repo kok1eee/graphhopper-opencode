@@ -8,6 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
+import { $ } from "bun";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, lineageEnriched, parseSkeletonSymbols, resolveRoot } from "./mcp";
@@ -186,6 +187,37 @@ describe("graphhopper-mcp goal往復", () => {
     expect(await call("graphhopper_goal", { action: "complete" })).toContain(
       "error: complete には直近の graphhopper_verifier_set",
     );
+    await client.close();
+  });
+
+  test("検証後に差分が変わると complete を拒否（diff hash ゲート）", async () => {
+    const client = await linked();
+    const root = freshRoot();
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const r = await client.callTool({ name, arguments: { ...args, root } });
+      const c = r.content as { type: string; text: string }[];
+      return c[0]?.text ?? "";
+    };
+    await $`git init -q ${root}`.quiet();
+    await $`git -C ${root} config user.email t@t`.quiet();
+    await $`git -C ${root} config user.name t`.quiet();
+    await Bun.write(`${root}/a.txt`, "one\n");
+    await $`git -C ${root} add -A`.quiet();
+    await $`git -C ${root} commit -qm init`.quiet();
+
+    await call("graphhopper_goal", { action: "start", title: "t", session_id: "s1" });
+    await call("graphhopper_verifier_set", {
+      results: [{ lens: "general", level: "clean" }],
+      reason: "ok",
+    });
+    await Bun.write(`${root}/a.txt`, "one\ntwo\n");
+
+    expect(await call("graphhopper_goal", { action: "complete" })).toContain(
+      "検証後に差分が変わっています",
+    );
+    expect(
+      await call("graphhopper_goal", { action: "complete", force: true }),
+    ).toContain("completed");
     await client.close();
   });
 

@@ -291,6 +291,19 @@ async function goalAction(
     case "complete": {
       const a = state.getActive(root);
       if (!a) return "no active goal";
+      // 検証後の変更検知（design g-mwd3n5bo）
+      const baseline =
+        a.state.router.baseline_rev ??
+        (await state.captureBaselineRev($, root));
+      const currentHash = await state.computeDiffHash($, root, baseline);
+      const verifiedHash = a.state.last_verifier?.diff_hash ?? null;
+      const mismatch =
+        !!currentHash && !!verifiedHash && currentHash !== verifiedHash;
+      const diffGate = mismatch
+        ? "forced"
+        : currentHash && verifiedHash
+          ? "ok"
+          : "unavailable";
       // self-graded done 禁止: 直近の verifier clean を機械要求する（drift残りの完了を防ぐ）
       if (!force && a.state.last_verifier?.level !== "clean") {
         if (server) {
@@ -299,7 +312,10 @@ async function goalAction(
             `goal "${a.goal.title}" は直近 verifier clean がありません。このまま完了すると self-graded 完了になりますが、人間の明示判断として強制完了しますか？`,
           );
           if (approved) {
-            const done2 = state.completeGoal(root);
+            const done2 = state.completeGoal(root, {
+              forced: true,
+              diff_gate: diffGate,
+            });
             return done2
               ? `completed: "${done2.goal.title}" (forced via elicitation)`
               : "no active goal";
@@ -310,7 +326,17 @@ async function goalAction(
           "小diffで verifier fan-out が不要なら、人間の明示的な判断がある場合のみ force: true を使ってください。"
         );
       }
-      const done = state.completeGoal(root);
+      if (mismatch && !force) {
+        return (
+          "error: 検証後に差分が変わっています（verifier clean の時点と不一致）。" +
+          "graphhopper_verifier_set で再検証してから complete してください。" +
+          "差分が問題ないと人間が判断した場合のみ force: true を使ってください（監査ログに diff_gate: forced が残ります）。"
+        );
+      }
+      const done = state.completeGoal(root, {
+        forced: force === true,
+        diff_gate: diffGate,
+      });
       return done
         ? `completed: "${done.goal.title}"${force ? " (forced)" : ""}${drv}`
         : "no active goal";
@@ -551,12 +577,12 @@ async function routerCheck(root: string): Promise<ToolOut> {
   };
 }
 
-function verifierSet(
+async function verifierSet(
   root: string,
   results: state.VerifierResult[],
   reason: string,
   model?: string,
-): ToolOut {
+): Promise<ToolOut> {
   const active = state.getActive(root);
   const rejected = state.checkVerifierResults(results, {
     entryRoute: active?.state.entry_route ?? null,
@@ -564,6 +590,13 @@ function verifierSet(
   });
   if (rejected) return { text: rejected, data: { level: "error" } };
   const decided = state.aggregateVerdicts(results);
+  // 検証した差分の指紋（design g-mwd3n5bo）
+  const baseline =
+    active?.state.router.baseline_rev ??
+    (await state.captureBaselineRev($, root));
+  const diffHash =
+    state.getStashDiffHash(root) ??
+    (await state.computeDiffHash($, root, baseline));
   const result = state.setVerifierVerdict(root, {
     level: decided.level,
     reason,
@@ -571,6 +604,7 @@ function verifierSet(
     lens: results.map((r) => r.lens),
     model,
     models: results.map((r) => r.model ?? model ?? null),
+    diff_hash: diffHash,
   });
   const data = {
     level: decided.level,
@@ -1018,6 +1052,11 @@ const TOOL_DEFS: ToolDef[] = [
           text: "error: diff取得失敗（VCS不在またはbaseline不正）",
           data: { path: "", lines: 0, baseline: "" },
         };
+      // verifier が読む入力を固定する（design g-mwd3n5bo）
+      state.setStashDiffHash(
+        ctx.root,
+        await state.computeDiffHash($, ctx.root, baseline),
+      );
       return {
         text: [
           `diff stashed: ${stashed.path} (${stashed.lines} lines)`,
@@ -1258,7 +1297,8 @@ const TOOL_DEFS: ToolDef[] = [
       },
       required: ["level"],
     },
-    run: (a, ctx) => verifierSet(ctx.root, a.results as state.VerifierResult[], a.reason, a.model),
+    run: async (a, ctx) =>
+      verifierSet(ctx.root, a.results as state.VerifierResult[], a.reason, a.model),
   },
   {
     name: "graphhopper_critic_set",

@@ -171,8 +171,30 @@ export function registerCoreTools(
                 "小diffで verifier fan-out が不要なら、人間の明示的な判断がある場合のみ force: true を使ってください。",
             );
           }
+          // 検証後の変更検知（design g-mwd3n5bo）。両方の指紋が取れて不一致なら止める
+          const baseline =
+            a.state.router.baseline_rev ??
+            (await state.captureBaselineRev($, root));
+          const currentHash = await state.computeDiffHash($, root, baseline);
+          const verifiedHash = a.state.last_verifier?.diff_hash ?? null;
+          const mismatch =
+            !!currentHash && !!verifiedHash && currentHash !== verifiedHash;
+          if (mismatch && !args.force) {
+            return text(
+              "error: 検証後に差分が変わっています（verifier clean の時点と不一致）。graphhopper_verifier_set で再検証してから complete してください。" +
+                "差分が問題ないと人間が判断した場合のみ force: true を使ってください（監査ログに diff_gate: forced が残ります）。",
+            );
+          }
+          const diffGate = mismatch
+            ? "forced"
+            : currentHash && verifiedHash
+              ? "ok"
+              : "unavailable";
           const restored = await finishCascade(gh);
-          const done = state.completeGoal(root);
+          const done = state.completeGoal(root, {
+            forced: args.force === true,
+            diff_gate: diffGate,
+          });
           return text(
             done
               ? `completed: "${done.goal.title}"${args.force ? " (forced)" : ""}${restored ? `\n${restored}` : ""}`

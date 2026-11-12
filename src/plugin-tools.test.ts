@@ -18,7 +18,14 @@ import { registerOpsTools } from "../.opencode/plugins/graphhopper/tools-ops";
 import { readHandoff, handoffPath } from "./handoff";
 import { resumeGoal } from "./state";
 import { formatScoreboard } from "./scoreboard-format";
-import { pauseGoal, planPath, readTodos, startGoal } from "./state";
+import {
+  computeDiffHash,
+  pauseGoal,
+  planPath,
+  readTodos,
+  setVerifierVerdict,
+  startGoal,
+} from "./state";
 
 interface ToolDef {
   name: string;
@@ -51,6 +58,63 @@ function textOf(out: unknown): string {
 const DESIGN_WITH_TASKS = compliantDesignDoc({
   title: "plugin test",
   tasks: ["- [ ] T1（判断1）: 実装する", "- [ ] T2（判断1）: テストを書く"],
+});
+
+describe("plugin tool: complete の diff hash ゲート（design g-mwd3n5bo）", () => {
+  test("検証後に差分が変わると拒否し、force で通り goal_complete に残る", async () => {
+    const { $ } = await import("bun");
+    const root = tmpRoot();
+    await $`git init -q ${root}`.quiet();
+    await $`git -C ${root} config user.email t@t`.quiet();
+    await $`git -C ${root} config user.name t`.quiet();
+    await Bun.write(`${root}/a.txt`, "one\n");
+    await $`git -C ${root} add -A`.quiet();
+    await $`git -C ${root} commit -qm init`.quiet();
+    const rev = (await $`git -C ${root} rev-parse HEAD`.text()).trim();
+
+    startGoal(root, "t", "s1");
+    setVerifierVerdict(root, {
+      level: "clean",
+      reason: "ok",
+      target: null,
+      lens: ["general"],
+      diff_hash: await computeDiffHash($, root, rev),
+    });
+    await Bun.write(`${root}/a.txt`, "one\ntwo\n");
+
+    const t = tools(root).get("graphhopper_goal");
+    const refused = await t!.execute({ action: "complete" }, { sessionID: "s1" });
+    expect(textOf(refused)).toContain("検証後に差分が変わっています");
+
+    const forced = await t!.execute(
+      { action: "complete", force: true },
+      { sessionID: "s1" },
+    );
+    expect(textOf(forced)).toContain("completed");
+
+    const events = readFileSync(join(root, ".graphhopper", "history.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const done = events.find((e) => e.type === "goal_complete");
+    expect(done?.forced).toBe(true);
+    expect(done?.diff_gate).toBe("forced");
+  });
+
+  test("VCS が無い環境ではゲートは素通りする（fail-open）", async () => {
+    const root = tmpRoot();
+    startGoal(root, "t", "s1");
+    setVerifierVerdict(root, {
+      level: "clean",
+      reason: "ok",
+      target: null,
+      lens: ["general"],
+      diff_hash: null,
+    });
+    const t = tools(root).get("graphhopper_goal");
+    const out = await t!.execute({ action: "complete" }, { sessionID: "s1" });
+    expect(textOf(out)).toContain("completed");
+  });
 });
 
 describe("plugin tool: resume の catalog 警告（design g-mw8xvsg8）", () => {

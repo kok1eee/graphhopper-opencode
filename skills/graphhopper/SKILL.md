@@ -43,6 +43,8 @@ cascade の切替先（baseline/escalate/quality 等）も deny で拒否され�
 （goal 終了時の復元は通す）。CI は `bun scripts/gen-agents.ts --check-policy` で
 `.graphhopper/config.example.json` を源に catalog と cascade 設定を検査する。
 ローカルでは global catalog（`~/.config/opencode/agents`）も存在すれば検査する（`[global]` ラベル）。
+verifier clean の後に差分を変えると `complete` は止まる（検証時点の diff の sha1 と照合）。
+再検証するか、人間の判断で `force: true`（`goal_complete` に `diff_gate: forced`）。
 
 ## フェーズ
 

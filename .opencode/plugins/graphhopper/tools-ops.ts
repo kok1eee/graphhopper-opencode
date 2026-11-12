@@ -87,6 +87,8 @@ export function registerOpsTools(
       const baseline = active.state.router.baseline_rev ?? (await state.captureBaselineRev($, root));
       const stashed = await state.stashDiff($, root, baseline, active.goal.id);
       if (!stashed) return text("error: diff取得失敗（VCS不在またはbaseline不正）");
+      // verifier が読む入力を固定する（design g-mwd3n5bo）。全文 diff の指紋を退避
+      state.setStashDiffHash(root, await state.computeDiffHash($, root, baseline));
       return text(
         [
           `diff stashed: ${stashed.path} (${stashed.lines} lines)`,
@@ -133,6 +135,13 @@ export function registerOpsTools(
       });
       if (rejected) return text(rejected);
       const decided = state.aggregateVerdicts(results);
+      // 検証した差分の指紋（stash 時点。無ければ現在の全文 diff）
+      const baseline =
+        active?.state.router.baseline_rev ??
+        (await state.captureBaselineRev($, root));
+      const diffHash =
+        state.getStashDiffHash(root) ??
+        (await state.computeDiffHash($, root, baseline));
       const result = state.setVerifierVerdict(root, {
         level: decided.level,
         reason: args.reason,
@@ -140,6 +149,7 @@ export function registerOpsTools(
         lens: results.map((r) => r.lens),
         model: args.model,
         models: results.map((r) => r.model ?? args.model ?? null),
+        diff_hash: diffHash,
       });
       if (result.last_verifier?.level === "clean") {
         return text(

@@ -31,7 +31,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { decodeUtf8Strict } from "./hashedit";
+import { decodeUtf8Strict, sha1Hex } from "./hashedit";
 import {
   addTodo,
   applyMark,
@@ -148,6 +148,9 @@ export interface VerifierVerdict {
   /** lens並列の実行モデル（混成run用。欠測・旧eventは [model] fallback）。
    * 長さは lens と一致させる（setVerifierVerdict がpad/truncateする） */
   models?: (string | null)[];
+  /** 検証した差分の sha1（design g-mwd3n5bo）。null/欠測＝計算不能。
+   * complete 時に現在の差分と照合し、変わっていれば再検証を要求する */
+  diff_hash?: string | null;
   at: string;
 }
 
@@ -295,6 +298,9 @@ export interface LoopState {
   /** goal start時の未コミット脏れファイル集合（正規化済み）。deep判定の差分基準。
    * null＝legacy/未測定→deepなし。snapshotInitialDiffFilesがstart時に記録する */
   initial_diff_files: string[] | null;
+  /** diff_stash 時点の全文 diff の sha1（design g-mwd3n5bo）。verifier が読んだ入力を
+   * 固定するための退避値。resume/新goal でクリアする */
+  stash_diff_hash: string | null;
   /** 入口判定のroute。null＝full（未呼び出し・legacy）。light/advised→full昇格のみ可 */
   entry_route: EntryRoute | null;
   /** 入口判定の難易度。null＝未判定（昇格しない） */
@@ -817,7 +823,15 @@ export type HistoryEvent =
       stage: "requested" | "reviewing" | "done";
       reason: string;
     }
-  | { type: "goal_complete"; goal: string; score?: number | null }
+  | {
+      type: "goal_complete";
+      goal: string;
+      score?: number | null;
+      /** force で完了したか（design g-mwd3n5bo） */
+      forced?: boolean;
+      /** 差分ゲートの結果。unavailable＝ハッシュが取れずゲート不能 */
+      diff_gate?: "ok" | "forced" | "unavailable";
+    }
   | { type: "phase"; goal: string; from: Phase; to: Phase; notes?: string }
   | {
       type: "router_check";
@@ -1159,6 +1173,7 @@ function emptyState(): LoopState {
     escalated_at: null,
     initial_diff_lines: null,
     initial_diff_files: null,
+    stash_diff_hash: null,
     updated_at: new Date().toISOString(),
   };
 }
@@ -1337,6 +1352,7 @@ export function resumeGoal(
         edit_streak: 0,
         last_diff_lines: null,
         diff_stall: 0,
+        stash_diff_hash: null,
         last_stuck_reasons: [],
         // 上限ガードは数え直す（loop_stop_count の恒久予算は維持）
         guard: {
@@ -1377,7 +1393,10 @@ export function resumeGoal(
   return r;
 }
 
-export function completeGoal(root: string): ActiveLoop | null {
+export function completeGoal(
+  root: string,
+  opts?: { forced?: boolean; diff_gate?: "ok" | "forced" | "unavailable" },
+): ActiveLoop | null {
   const r = mutateActive(root, () => ({
     goal: { status: "done", done_at: new Date().toISOString() },
     state: {
@@ -1398,7 +1417,13 @@ export function completeGoal(root: string): ActiveLoop | null {
     r.goal.score = score;
     // goal_complete＋goal_summaryの2行1append（片側欠けの窓を1箇所に限定）
     recordEventBatch(root, [
-      { type: "goal_complete", goal: r.goal.id, score: score.value },
+      {
+        type: "goal_complete",
+        goal: r.goal.id,
+        score: score.value,
+        ...(opts?.forced ? { forced: true } : {}),
+        ...(opts?.diff_gate ? { diff_gate: opts.diff_gate } : {}),
+      },
       buildGoalSummary(root, r.goal.id, { score: score.value }),
     ]);
     // diff退避を掃除（.graphhopper/tmp。蓄積＋古いpath誤読の防止）
@@ -2298,6 +2323,46 @@ export async function stashDiff(
     return null;
   }
   return null;
+}
+
+/**
+ * baseline からの全文 diff の sha1（design g-mwd3n5bo）。
+ * 実効diff（stashDiff）と違い初期脏れも含む: goal 中にそのファイルを直した場合も検知するため。
+ * VCS 不能・baseline 不正は null（ゲートは fail-open）。
+ */
+export async function computeDiffHash(
+  shell: Shell,
+  root: string,
+  baseline: string | null,
+): Promise<string | null> {
+  if (!baseline || !isValidBaselineRev(baseline)) return null;
+  try {
+    const r = await shell`jj diff --from ${baseline} --color=never`
+      .cwd(root)
+      .nothrow()
+      .quiet();
+    if (r.exitCode === 0) return sha1Hex(r.stdout.toString());
+  } catch {
+    // git にフォールバック
+  }
+  try {
+    const r = await shell`git diff ${baseline}`.cwd(root).nothrow().quiet();
+    if (r.exitCode === 0) return sha1Hex(r.stdout.toString());
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/** diff_stash 時点の指紋を保存する（verifier_set が verdict へ写す） */
+export function setStashDiffHash(root: string, hash: string | null): void {
+  const state = readState(root);
+  writeState(root, { ...state, stash_diff_hash: hash });
+}
+
+/** diff_stash 時点の指紋（未 stash は null） */
+export function getStashDiffHash(root: string): string | null {
+  return readState(root).stash_diff_hash;
 }
 
 export function recordRouterCheck(
