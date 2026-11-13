@@ -190,6 +190,19 @@ describe("graphhopper-mcp goal往復", () => {
     await client.close();
   });
 
+  test("MCP start は意図ログを作らず status にも出ない", async () => {
+    const client = await linked();
+    const root = freshRoot();
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const r = await client.callTool({ name, arguments: { ...args, root } });
+      const c = r.content as { type: string; text: string }[];
+      return c[0]?.text ?? "";
+    };
+    await call("graphhopper_goal", { action: "start", title: "t", session_id: "s1" });
+    expect(await call("graphhopper_status", {})).not.toContain("intent:");
+    await client.close();
+  });
+
   test("検証後に差分が変わると complete を拒否（diff hash ゲート）", async () => {
     const client = await linked();
     const root = freshRoot();

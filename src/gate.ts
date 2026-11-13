@@ -278,6 +278,12 @@ export function designGateRefusal(
   );
 }
 
+/** 意図ログは goal 開始時の一次情報なので、全 phase で編集を拒否する（design g-mwebh9vl） */
+export function isIntentLogPath(filePath: string): boolean {
+  const p = filePath.replace(/\\/g, "/");
+  return /(^|\/)\.graphhopper\/plans\/[^/]+\.intent\.md$/.test(p);
+}
+
 export function designDocLockedRefusal(
   toolName: string | undefined,
   filePath: string,
@@ -761,6 +767,9 @@ export function goalResumeContext(
     s.fail_streak > 0 ? `- fail_streak: ${s.fail_streak}` : null,
     s.last_verifier ? `- last_verifier: ${s.last_verifier.level} (${s.last_verifier.reason})` : null,
     `- design doc: .graphhopper/plans/${goal.id}.md（designing終了後は不変）`,
+    s.intent_path
+      ? `- intent log: ${s.intent_path}（goal開始時の会話。critic/requirement/general lens 用）`
+      : null,
     state.planLogExists(root, goal.id)
       ? `- log: .graphhopper/plans/${goal.id}.log.md（決定の経緯・棄却した代替案）`
       : null,

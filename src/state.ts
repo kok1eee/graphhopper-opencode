@@ -94,6 +94,8 @@ export interface GoalSnapshot {
   initial_diff_lines: number | null;
   /** goal start時の脏れファイル集合。deep判定の差分基準として退避する */
   initial_diff_files: string[] | null;
+  /** goal 開始時の会話から作った意図ログの path（design g-mwebh9vl）。null＝未作成 */
+  intent_path: string | null;
 }
 
 /** goal出来栄えの機械採点。式はv1で固定し、breakdownで透明化する（調整は式ごと変える） */
@@ -301,6 +303,8 @@ export interface LoopState {
   /** diff_stash 時点の全文 diff の sha1（design g-mwd3n5bo）。verifier が読んだ入力を
    * 固定するための退避値。resume/新goal でクリアする */
   stash_diff_hash: string | null;
+  /** goal 開始時の会話から作った意図ログの path（design g-mwebh9vl）。null＝未作成 */
+  intent_path: string | null;
   /** 入口判定のroute。null＝full（未呼び出し・legacy）。light/advised→full昇格のみ可 */
   entry_route: EntryRoute | null;
   /** 入口判定の難易度。null＝未判定（昇格しない） */
@@ -751,6 +755,9 @@ export function designTemplate(goalId: string, title: string): string {
   return [
     `# design: ${title} (${goalId})`,
     ``,
+    `> 意図ログ: .graphhopper/plans/${goalId}.intent.md（goal 開始時の会話。無ければ capture 失敗）`,
+    `> critic と requirement/general lens はこれを読み、design の前提がユーザーの意図からズレていないかを見る。`,
+    ``,
     `## 1. goal理解`,
     ``,
     `（何を・なぜやるか。1〜3文）`,
@@ -794,6 +801,11 @@ export function scaffoldDesignDoc(root: string, goalId: string, title: string): 
  * design_gate_allow の prefix (`.graphhopper/plans/`) に含まれるため、designing中も常時書き込み可能。 */
 export function planLogPath(root: string, goalId: string): string {
   return join(dir(root), "plans", `${goalId}.log.md`);
+}
+
+/** goal 開始時の会話から作る意図ログの path（design g-mwebh9vl） */
+export function intentPath(root: string, goalId: string): string {
+  return join(dir(root), "plans", `${goalId}.intent.md`);
 }
 
 export function planLogExists(root: string, goalId: string): boolean {
@@ -1174,6 +1186,7 @@ function emptyState(): LoopState {
     initial_diff_lines: null,
     initial_diff_files: null,
     stash_diff_hash: null,
+    intent_path: null,
     updated_at: new Date().toISOString(),
   };
 }
@@ -1319,6 +1332,7 @@ export function pauseGoal(root: string): ActiveLoop | null {
         notes: state.notes,
         initial_diff_lines: state.initial_diff_lines,
         initial_diff_files: state.initial_diff_files,
+        intent_path: state.intent_path,
       },
     },
     // 人間による明示的な操作なのでloop停止フラグも解除（pause自体が駆動を止める）
@@ -1378,6 +1392,7 @@ export function resumeGoal(
               // 旧snapshot（field無し）→null＝legacy扱い
               initial_diff_lines: snap.initial_diff_lines ?? null,
               initial_diff_files: snap.initial_diff_files ?? null,
+              intent_path: snap.intent_path ?? null,
             }
           : {}),
       },
@@ -1438,7 +1453,7 @@ export function archiveGoalFiles(root: string, goalId: string): void {
   const pairs: [string, string][] = [
     [todosPath(root, goalId), join(dirname(todosPath(root, goalId)), "archive", `${goalId}.json`)],
   ];
-  for (const ext of [".md", ".log.md"]) {
+  for (const ext of [".md", ".log.md", ".intent.md"]) {
     const src = join(dirname(planPath(root, goalId)), `${goalId}${ext}`);
     pairs.push([src, join(dirname(src), "archive", `${goalId}${ext}`)]);
   }
@@ -2363,6 +2378,12 @@ export function setStashDiffHash(root: string, hash: string | null): void {
 /** diff_stash 時点の指紋（未 stash は null） */
 export function getStashDiffHash(root: string): string | null {
   return readState(root).stash_diff_hash;
+}
+
+/** 意図ログの path を保存する（design g-mwebh9vl） */
+export function setIntentPath(root: string, path: string | null): void {
+  const state = readState(root);
+  writeState(root, { ...state, intent_path: path });
 }
 
 export function recordRouterCheck(

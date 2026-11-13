@@ -9,7 +9,13 @@
  */
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { compliantDesignDoc } from "./design-fixture";
 import { join } from "node:path";
@@ -39,15 +45,15 @@ function tmpRoot(): string {
 }
 
 /** plugin の tool を fake editor で登録し、名前で取り出す */
-function tools(root: string): Map<string, ToolDef> {
+function tools(root: string, ctx: unknown = {}): Map<string, ToolDef> {
   const map = new Map<string, ToolDef>();
   const editor = {
     add: (t: Record<string, unknown>) => {
       map.set(t.name as string, t as unknown as ToolDef);
     },
   };
-  // ctx は core tool では root 以外に使わない（session 取得は optional）
-  registerCoreTools(editor as never, { ctx: {} as never, root });
+  // ctx は status/intent capture で session API を触る場合だけ差し替える
+  registerCoreTools(editor as never, { ctx: ctx as never, root });
   return map;
 }
 
@@ -58,6 +64,61 @@ function textOf(out: unknown): string {
 const DESIGN_WITH_TASKS = compliantDesignDoc({
   title: "plugin test",
   tasks: ["- [ ] T1（判断1）: 実装する", "- [ ] T2（判断1）: テストを書く"],
+});
+
+describe("plugin tool: goal start の意図ログ（design g-mwebh9vl）", () => {
+  test("start で intent.md を作り、start 応答と status に path を出す", async () => {
+    const root = tmpRoot();
+    const ctx = {
+      session: {
+        context: async () => [
+          { type: "user", text: "こうしたい" },
+          {
+            type: "assistant",
+            content: [
+              { type: "text", text: "こうしましょう" },
+              { type: "tool", text: "ignored" },
+            ],
+          },
+          { type: "user", text: "[graphhopper] 内部注入" },
+        ],
+      },
+    };
+    const t = tools(root, ctx).get("graphhopper_goal");
+    const out = await t!.execute({ action: "start", title: "t" }, { sessionID: "s1" });
+    expect(textOf(out)).toContain("intent:");
+
+    const dir = join(root, ".graphhopper", "plans");
+    const file = readdirSync(dir).find((f) => f.endsWith(".intent.md"));
+    expect(file).toBeDefined();
+    const body = readFileSync(join(dir, file!), "utf8");
+    expect(body).toContain("me: こうしたい");
+    expect(body).toContain("assistant: こうしましょう");
+    expect(body).not.toContain("ignored");
+    expect(body).not.toContain("内部注入");
+
+    const status = await tools(root, ctx)
+      .get("graphhopper_status")!
+      .execute({}, { sessionID: "s1" });
+    expect(textOf(status)).toContain("intent:");
+  });
+
+  test("session.context が失敗しても start は成功し、intent は作られない", async () => {
+    const root = tmpRoot();
+    const ctx = {
+      session: {
+        context: async () => {
+          throw new Error("boom");
+        },
+      },
+    };
+    const t = tools(root, ctx).get("graphhopper_goal");
+    const out = await t!.execute({ action: "start", title: "t" }, { sessionID: "s1" });
+    expect(textOf(out)).toContain("goal started");
+    expect(textOf(out)).not.toContain("intent:");
+    const dir = join(root, ".graphhopper", "plans");
+    expect(readdirSync(dir).some((f) => f.endsWith(".intent.md"))).toBe(false);
+  });
 });
 
 describe("plugin tool: complete の diff hash ゲート（design g-mwd3n5bo）", () => {

@@ -12,6 +12,7 @@ import {
   type SessionMessageLike,
   CONTINUATION_MARKER,
   aggregateVerdicts,
+  archiveGoalFiles,
   canonicalJSON,
   checkStuck,
   checkVerifierResults,
@@ -49,6 +50,7 @@ import {
   resetLoopForClear,
   resumeGoal,
   setCriticVerdict,
+  setIntentPath,
   setPhase,
   startDiscover,
   startGoal,
@@ -2450,5 +2452,28 @@ describe("goal の decision_id（セッション限定）", () => {
     await logDecision(root, decide("cccc3333", "sess-C", true));
     const c = startGoal(root, "goal C", "sess-C");
     expect(c.state.decision_id).toBeNull();
+  });
+});
+
+describe("意図ログの state 連携（design g-mwebh9vl）", () => {
+  test("pause→resume で intent_path が復元される", () => {
+    const root = tmpRoot();
+    startGoal(root, "t", "s1");
+    setIntentPath(root, "/x/intent.md");
+    pauseGoal(root);
+    const r = resumeGoal(root, "s1");
+    expect(r?.state.intent_path).toBe("/x/intent.md");
+  });
+
+  test("archiveGoalFiles は .intent.md も archive へ移す", () => {
+    const root = tmpRoot();
+    const g = startGoal(root, "t", "s1").goal;
+    const p = join(root, ".graphhopper", "plans", `${g.id}.intent.md`);
+    writeFileSync(p, "me: x\n", "utf8");
+    archiveGoalFiles(root, g.id);
+    expect(existsSync(p)).toBe(false);
+    expect(
+      existsSync(join(root, ".graphhopper", "plans", "archive", `${g.id}.intent.md`)),
+    ).toBe(true);
   });
 });

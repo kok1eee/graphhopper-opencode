@@ -4,6 +4,8 @@
  * v1 src/index.ts の同名 tool execute 本体を v2 形 (JSON Schema＋{content}) に移植。
  */
 import { $ } from "bun";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import {
   autoEscalateOnStuck,
   checkPhaseMove,
@@ -22,6 +24,7 @@ import {
 } from "../../../src/decision";
 import { finishCascade, maybeRequestCheckpoint, syncCascade } from "./cascade";
 import { ensureEntryDecision } from "../../../src/entry-decide";
+import { formatIntentLine, renderIntent } from "../../../src/intent";
 import { catalogPolicyWarning } from "../../../src/bake";
 import * as state from "../../../src/state";
 import { readRun, summarizeRun } from "../../../src/workflow";
@@ -113,6 +116,33 @@ export function registerCoreTools(
           } catch {
             // 測定不能は無視（initial null＝旧挙動）
           }
+          // 意図ログ（design g-mwebh9vl）: goal 開始時点の会話を話者ラベル付きで保存。
+          // 取得失敗・oversize は null のまま（start は止めない）
+          let intentNote = "";
+          try {
+            if (sessionID) {
+              const msgs = (await gh.ctx.session.context({
+                sessionID,
+              })) as unknown as Parameters<typeof renderIntent>[0];
+              const rendered = renderIntent(msgs ?? [], {
+                goalId: a.goal.id,
+                title: a.goal.title,
+                sessionID,
+              });
+              if (rendered) {
+                const path = state.intentPath(root, a.goal.id);
+                mkdirSync(dirname(path), { recursive: true });
+                const tmp = `${path}.tmp`;
+                writeFileSync(tmp, rendered, "utf8");
+                renameSync(tmp, path);
+                state.setIntentPath(root, path);
+                intentNote = formatIntentLine(path);
+              }
+            }
+          } catch (err) {
+            // capture 失敗は start を止めない（理由だけ残す）
+            console.warn(`graphhopper: intent capture に失敗: ${String(err)}`);
+          }
           const started = state.getActive(root) ?? a;
           const cfg = state.readConfig(root);
           const cascadeBase = await syncCascade(gh);
@@ -125,7 +155,7 @@ export function registerCoreTools(
               ? `pending entry_route=${started.state.entry_route} を消費`
               : "pending無し→full（未判定・legacy）扱い";
           return text(
-            `goal started: "${started.goal.title}" (${started.goal.id})\n${consumed}${started.state.difficulty ? ` / difficulty=${started.state.difficulty}` : ""}\nphase: designing${cascadeNote ? `\n${cascadeNote}` : ""}\n次: ${effectivePhaseAction("designing", started.state.entry_route)}`,
+            `goal started: "${started.goal.title}" (${started.goal.id})\n${consumed}${started.state.difficulty ? ` / difficulty=${started.state.difficulty}` : ""}\nphase: designing${cascadeNote ? `\n${cascadeNote}` : ""}${intentNote ? `\n${intentNote}` : ""}\n次: ${effectivePhaseAction("designing", started.state.entry_route)}`,
           );
         }
         case "pause": {
@@ -235,6 +265,7 @@ export function registerCoreTools(
           a.state.initial_diff_lines !== null && a.state.initial_diff_lines !== undefined
             ? `initial_dirt: ${a.state.initial_diff_lines} lines（goal start時の未コミット分。実効diffから除外）`
             : null,
+          a.state.intent_path ? formatIntentLine(a.state.intent_path) : null,
           a.state.last_verifier
             ? `last_verifier: level=${a.state.last_verifier.level} target=${a.state.last_verifier.target ?? "-"} lens=${a.state.last_verifier.lens.join(",") || "-"}${lensModels ? ` models=${lensModels}` : ""} reason=${a.state.last_verifier.reason}`
             : "last_verifier: (none)",

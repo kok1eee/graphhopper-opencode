@@ -22,9 +22,11 @@ import {
   effectivePhaseAction,
   ESCALATE_NEXT,
   isGateTargetTool,
+  isIntentLogPath,
   PHASE_ACTION_BRIEF,
   PONYTAIL_BRIEF,
 } from "../../../src/gate";
+import { INTENT_MAX_FETCH_CHARS } from "../../../src/intent";
 import { describeModelDenial } from "../../../src/model-policy";
 import { PONYTAIL_RULES } from "../../../src/ponytail-rules";
 import { resolveCompactDb, runCompactGate } from "../../../src/compact";
@@ -69,7 +71,7 @@ const SYSTEM_GUIDE_IDLE = `## graphhopper（常駐・goal進行中はphase指示
  * TAIL_LIMIT: loop検知窓 + echo用履歴 + margin。SAMPLING 概念は廃止
  * (毎回全文のため sampling/full の区別が無い)。oversizeSticky は維持。 */
 const TAIL_LIMIT = 50;
-const MAX_FETCH_CHARS = 2_000_000;
+const MAX_FETCH_CHARS = INTENT_MAX_FETCH_CHARS;
 let oversizeSticky = false;
 
 /* system注入節約用の記憶 (v1 と同型。再起動・compact後は消失しfull再送) */
@@ -270,6 +272,18 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
     const cfg = state.readConfig(root);
     const filePath = resolveFilePath((e as { input?: unknown }).input);
     if (!filePath) return;
+    // 意図ログは goal 開始時の一次情報なので、全 phase で書き換えを拒否する（design g-mwebh9vl）
+    if (isIntentLogPath(filePath)) {
+      state.recordEvent(root, {
+        type: "design_gate_block",
+        goal: active.goal.id,
+        tool: toolName,
+        path: filePath,
+      });
+      throw new Error(
+        `Refused: ${e.tool} to ${filePath} is blocked because the intent log is an immutable record of the conversation at goal start.`,
+      );
+    }
     if (isDesignGateBlocked(root, cfg, active.state.phase, filePath)) {
       state.recordEvent(root, { type: "design_gate_block", goal: active.goal.id, tool: toolName, path: filePath });
       throw new Error(designGateRefusal(e.tool, filePath, cfg.design_gate_allow));

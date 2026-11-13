@@ -79,6 +79,13 @@ polish前にlens編成の助言が欲しい場合のみ使う（現行routerは�
   resume 時に catalog へ model_allow/model_deny 違反のモデルが焼かれていると、応答に警告が付く（焼き直して新規セッション）。
   **cascade の切替先（baseline/escalate/quality 等）も同じ deny で拒否される**。拒否時は
   切り替えず `failed` を返す（同じ拒否は1 goal 1回だけ報告）。goal 終了時の復元は拒否しない。
+  **意図ログ**（design g-mwebh9vl）: goal 開始時の会話が
+  `.graphhopper/plans/<goal>.intent.md` に `me:` / `assistant:` ラベル付きで保存される
+  （plugin 経路のみ。MCP は作らない）。critic と requirement/general lens はこれを読み、
+  design や実装がユーザーの意図からズレていないかを見る。behavior/progress lens と
+  実装 subagent には渡さない（決定を再審議して止まるため）。既知のキーはマスクするが
+  best-effort で、会話は verifier/critic のモデル提供元に送られる。コンパクション境界より
+  前の履歴は取れないことがある。
   **verifier clean の後に差分を変えると `complete` は止まる**（design g-mwd3n5bo）。
   `verifier_set` が検証時点の全文 diff の sha1 を記録し、complete 時に現在値と照合する。
   止められたら再検証する（`graphhopper_verifier_set`）。人間が問題ないと判断した場合だけ

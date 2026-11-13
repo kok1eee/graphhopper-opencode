@@ -48,6 +48,7 @@ import {
   autoEscalateOnStuck,
   extractTasks,
   foreignBoundNote,
+  isIntentLogPath,
   parseEntryRoute,
 } from "./gate";
 import { readGraphhopperHash, runGraphhopperEdit } from "./gate";
@@ -61,6 +62,7 @@ import {
   selectLenses,
 } from "./decision";
 import { catalogPolicyWarning } from "./bake";
+import { formatIntentLine } from "./intent";
 import * as state from "./state";
 import { invokeStructured } from "./invoke";
 import { formatScoreboard } from "./scoreboard-format";
@@ -170,6 +172,7 @@ function statusText(root: string): string {
     a.state.initial_diff_lines !== undefined
       ? `initial_dirt: ${a.state.initial_diff_lines} lines（goal start時の未コミット分。実効diffから除外）`
       : null,
+    a.state.intent_path ? formatIntentLine(a.state.intent_path) : null,
     a.state.last_verifier
       ? `last_verifier: level=${a.state.last_verifier.level} target=${a.state.last_verifier.target ?? "-"} lens=${a.state.last_verifier.lens.join(",") || "-"}${lensModels ? ` models=${lensModels}` : ""} reason=${a.state.last_verifier.reason}`
       : "last_verifier: (none)",
@@ -1588,6 +1591,18 @@ const TOOL_DEFS: ToolDef[] = [
       const gateActive = state.getActive(root);
       if (gateActive) {
         const cfg = state.readConfig(root);
+        if (isIntentLogPath(a.filePath)) {
+          state.recordEvent(root, {
+            type: "design_gate_block",
+            goal: gateActive.goal.id,
+            tool: "graphhopper_edit",
+            path: a.filePath,
+          });
+          return {
+            text: `error: Refused: graphhopper_edit to ${a.filePath} is blocked because the intent log is an immutable record of the conversation at goal start.`,
+            data: { ok: false },
+          };
+        }
         if (state.isDesignGateBlocked(root, cfg, gateActive.state.phase, a.filePath)) {
           state.recordEvent(root, {
             type: "design_gate_block",

@@ -24,6 +24,7 @@ import { applySingleEdit, decodeUtf8Strict, sha1Hex, verifyHash } from "./hashed
 import {
   checkHashEditAccess,
   isGateTargetTool,
+  isIntentLogPath,
   readGraphhopperHash,
   runGraphhopperEdit,
 } from "./gate";
@@ -168,6 +169,16 @@ describe("design gate（hash_edit経路も同型）", () => {
     expect(
       isDesignDocLocked("/r", "implementing", "g-x", ".graphhopper/plans/g-x.log.md"),
     ).toBe(false);
+  });
+});
+
+describe("intent log の保護（design g-mwebh9vl）", () => {
+  test("plans配下の *.intent.md だけを対象にする", () => {
+    expect(isIntentLogPath(".graphhopper/plans/g-x.intent.md")).toBe(true);
+    expect(isIntentLogPath("/r/.graphhopper/plans/g-x.intent.md")).toBe(true);
+    expect(isIntentLogPath(".graphhopper/plans/g-x.log.md")).toBe(false);
+    expect(isIntentLogPath("docs/x.intent.md")).toBe(false);
+    expect(isIntentLogPath(".graphhopper/plans/sub/x.intent.md")).toBe(false);
   });
 });
 
