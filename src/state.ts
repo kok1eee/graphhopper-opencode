@@ -96,6 +96,10 @@ export interface GoalSnapshot {
   initial_diff_files: string[] | null;
   /** goal 開始時の会話から作った意図ログの path（design g-mwebh9vl）。null＝未作成 */
   intent_path: string | null;
+  /** ルール文書の usability レビュー結果（design g-mwfltxyt）。null＝未記録 */
+  usability_review: UsabilityVerdict | null;
+  /** goal 開始時の baseline rev（commit）。usability と diff hash の基準に使う */
+  start_baseline_rev: string | null;
 }
 
 /** goal出来栄えの機械採点。式はv1で固定し、breakdownで透明化する（調整は式ごと変える） */
@@ -153,6 +157,18 @@ export interface VerifierVerdict {
   /** 検証した差分の sha1（design g-mwd3n5bo）。null/欠測＝計算不能。
    * complete 時に現在の差分と照合し、変わっていれば再検証を要求する */
   diff_hash?: string | null;
+  at: string;
+}
+
+/** ルール文書の usability レビュー結果（design g-mwfltxyt） */
+export interface UsabilityVerdict {
+  level: "clean" | "drift" | "skipped";
+  reason: string;
+  /** レビュー対象の文書（repo 相対）。skipped でも自動記録する */
+  files: string[];
+  /** 対象文書の内容の sha1（review 後の変更検知用）。null＝計算不能 */
+  doc_hash: string | null;
+  model?: string | null;
   at: string;
 }
 
@@ -305,6 +321,10 @@ export interface LoopState {
   stash_diff_hash: string | null;
   /** goal 開始時の会話から作った意図ログの path（design g-mwebh9vl）。null＝未作成 */
   intent_path: string | null;
+  /** ルール文書の usability レビュー結果（design g-mwfltxyt）。null＝未記録 */
+  usability_review: UsabilityVerdict | null;
+  /** goal 開始時の baseline rev（commit）。usability と diff hash の基準に使う */
+  start_baseline_rev: string | null;
   /** 入口判定のroute。null＝full（未呼び出し・legacy）。light/advised→full昇格のみ可 */
   entry_route: EntryRoute | null;
   /** 入口判定の難易度。null＝未判定（昇格しない） */
@@ -836,6 +856,13 @@ export type HistoryEvent =
       reason: string;
     }
   | {
+      type: "usability_verdict";
+      goal: string;
+      level: "clean" | "drift" | "skipped";
+      files: string[];
+      reason: string;
+    }
+  | {
       type: "goal_complete";
       goal: string;
       score?: number | null;
@@ -1187,6 +1214,8 @@ function emptyState(): LoopState {
     initial_diff_files: null,
     stash_diff_hash: null,
     intent_path: null,
+    usability_review: null,
+    start_baseline_rev: null,
     updated_at: new Date().toISOString(),
   };
 }
@@ -1333,6 +1362,8 @@ export function pauseGoal(root: string): ActiveLoop | null {
         initial_diff_lines: state.initial_diff_lines,
         initial_diff_files: state.initial_diff_files,
         intent_path: state.intent_path,
+        usability_review: state.usability_review,
+        start_baseline_rev: state.start_baseline_rev,
       },
     },
     // 人間による明示的な操作なのでloop停止フラグも解除（pause自体が駆動を止める）
@@ -1393,6 +1424,8 @@ export function resumeGoal(
               initial_diff_lines: snap.initial_diff_lines ?? null,
               initial_diff_files: snap.initial_diff_files ?? null,
               intent_path: snap.intent_path ?? null,
+              usability_review: snap.usability_review ?? null,
+              start_baseline_rev: snap.start_baseline_rev ?? null,
             }
           : {}),
       },
@@ -2384,6 +2417,70 @@ export function getStashDiffHash(root: string): string | null {
 export function setIntentPath(root: string, path: string | null): void {
   const state = readState(root);
   writeState(root, { ...state, intent_path: path });
+}
+
+/** 対象ファイルの内容の sha1（usability の review 後変更検知。design g-mwfltxyt） */
+export function hashFiles(root: string, files: string[]): string | null {
+  try {
+    const parts = [...files]
+      .sort()
+      .map((f) => `${f}\n${readFileSync(join(root, f), "utf8")}`);
+    return sha1Hex(parts.join("\n---\n"));
+  } catch {
+    return null;
+  }
+}
+
+/** baseline の単一解決（start 優先）。diff hash と usability の基準を揃える */
+export async function resolveBaseline(
+  shell: Shell,
+  root: string,
+  s: {
+    start_baseline_rev: string | null;
+    router: { baseline_rev: string | null };
+  } | null,
+): Promise<string | null> {
+  return (
+    s?.start_baseline_rev ??
+    s?.router.baseline_rev ??
+    (await captureBaselineRev(shell, root))
+  );
+}
+
+/** usability レビュー後に文書が変わったか（status 表示用） */
+export function usabilityStale(root: string): boolean {
+  const u = readState(root).usability_review;
+  if (!u || !u.doc_hash || u.files.length === 0) return false;
+  return hashFiles(root, u.files) !== u.doc_hash;
+}
+
+/** goal 開始時の baseline rev を保存する（design g-mwfltxyt） */
+export function setStartBaselineRev(root: string, rev: string | null): void {
+  const state = readState(root);
+  writeState(root, { ...state, start_baseline_rev: rev });
+}
+
+/** usability レビュー結果を保存する（design g-mwfltxyt） */
+export function setUsabilityVerdict(
+  root: string,
+  verdict: Omit<UsabilityVerdict, "at">,
+): LoopState {
+  const state = readState(root);
+  const next: LoopState = {
+    ...state,
+    usability_review: { ...verdict, at: new Date().toISOString() },
+  };
+  writeState(root, next);
+  if (state.goal_id) {
+    recordEvent(root, {
+      type: "usability_verdict",
+      goal: state.goal_id,
+      level: verdict.level,
+      files: verdict.files,
+      reason: verdict.reason,
+    });
+  }
+  return next;
 }
 
 export function recordRouterCheck(

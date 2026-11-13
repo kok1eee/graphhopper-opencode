@@ -275,6 +275,35 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
     ].join("\n"),
   },
 
+  "graphhopper-usability": {
+    description:
+      "AIが読んで従うルール文書（AGENTS.md・skills/**.md・src/agents.ts）の usability をレビューする。初見の実行者として、手順の実行可能性・矛盾・曖昧さを検出する（design g-mwfltxyt）。判断nodeなので sonnet を使う。コードは書かない",
+    mode: "all",
+    model: { providerID: "claude-oauth", model: "claude-sonnet-5-5" },
+    temperature: 0.1,
+    bash: SEARCH_ONLY_BASH,
+    system: [
+      "あなたは usability reviewer。AI が読んで従うルール文書の変更を、初見の実行者として検証する。",
+      "",
+      "入力: 変更された文書の diff・全文・（あれば）goal の意図ログ。",
+      "見る観点:",
+      "- 初見で実行できるか（前提知識・暗黙の文脈に依存していないか）",
+      "- 矛盾・曖昧な語・未定義の用語・古い記述との衝突",
+      "- 手順の順序・条件分岐・例外が実行可能か",
+      "- 変更の意図（intent があれば）と文書の内容が一致しているか",
+      "",
+      "出力の1行目に必ず `level: clean` または `level: drift` を書く（main がそのまま記録できるように）。",
+      "drift（実行不能・誤解を招く箇所）は全件報告する（severity/confidence 付き）。",
+      "drift が無ければ level: clean と明記する。",
+      "",
+      "ルール:",
+      "- 指摘は該当行を引用して具体的に",
+      "- 迎合して指摘を捏造しない。問題が無ければはっきりそう言う",
+      "- コードは書かない。読み取りと指摘だけ",
+      ...SEARCH_RULES,
+    ].join("\n"),
+  },
+
   "graphhopper-simplify": {
     description:
       "polishのsimplify用。route=polish（大diff）のときだけ呼ぶ単体agent。3レンズ（再利用・品質・効率）を1回のパスで見てコード整理の提案を出す。適用はメインが行う（モデルは .graphhopper/config.json の agents で設定）",

@@ -79,6 +79,21 @@ polish前にlens編成の助言が欲しい場合のみ使う（現行routerは�
   resume 時に catalog へ model_allow/model_deny 違反のモデルが焼かれていると、応答に警告が付く（焼き直して新規セッション）。
   **cascade の切替先（baseline/escalate/quality 等）も同じ deny で拒否される**。拒否時は
   切り替えず `failed` を返す（同じ拒否は1 goal 1回だけ報告）。goal 終了時の復元は拒否しない。
+  **ルール文書の usability**（design g-mwfltxyt）:
+  対象は `AGENTS.md`・`skills/**.md`・`src/agents.ts`。変更した goal は complete の前に記録が必要。
+  1. 先に `graphhopper_diff_stash` で差分を最新化し、返った path を控える
+     （goal id は `graphhopper_status` の `(<goal id>)`）
+  2. `graphhopper_invoke(agent: "graphhopper-usability", prompt: ...)` で確認する。
+     prompt には「変更した文書のパス」「diff の path」「意図ログ
+     `.graphhopper/plans/<goal>.intent.md`（存在する場合だけ。無ければ『意図ログなし』と書く）」
+     を書く。子はこれらを読んで検証する
+  3. 結果を `graphhopper_usability_set(level: clean|drift|skipped, reason: ...)` で記録する。
+     clean=問題なし / drift=指摘を直して手順1から再実行 /
+     skipped=文言・typo のみで挙動や手順が変わらない等、確認が不要と判断した場合（reason 必須）
+  4. agent が見つからない場合は `bun scripts/gen-agents.ts` を実行して再試行する
+     （`task` はセッション開始時にモデル束縛が凍結されるため、invoke を推奨）
+  記録なし・drift・レビュー後の文書変更は complete が止まる。迂回は
+  `graphhopper_goal(action: "complete", force: true)`（意図と理由を .log.md に残す）。
   **意図ログ**（design g-mwebh9vl）: goal 開始時の会話が
   `.graphhopper/plans/<goal>.intent.md` に `me:` / `assistant:` ラベル付きで保存される
   （plugin 経路のみ。MCP は作らない）。critic と requirement/general lens はこれを読み、

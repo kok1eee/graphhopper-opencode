@@ -48,8 +48,11 @@ import {
   autoEscalateOnStuck,
   extractTasks,
   foreignBoundNote,
+  formatUsabilityLine,
   isIntentLogPath,
   parseEntryRoute,
+  policyDocsChanged,
+  usabilityGateRefusal,
 } from "./gate";
 import { readGraphhopperHash, runGraphhopperEdit } from "./gate";
 import { ensureEntryDecision } from "./entry-decide";
@@ -173,6 +176,7 @@ function statusText(root: string): string {
       ? `initial_dirt: ${a.state.initial_diff_lines} lines（goal start時の未コミット分。実効diffから除外）`
       : null,
     a.state.intent_path ? formatIntentLine(a.state.intent_path) : null,
+    formatUsabilityLine(a.state.usability_review, state.usabilityStale(root)),
     a.state.last_verifier
       ? `last_verifier: level=${a.state.last_verifier.level} target=${a.state.last_verifier.target ?? "-"} lens=${a.state.last_verifier.lens.join(",") || "-"}${lensModels ? ` models=${lensModels}` : ""} reason=${a.state.last_verifier.reason}`
       : "last_verifier: (none)",
@@ -223,6 +227,7 @@ async function goalAction(
       try {
         const rev = await state.captureBaselineRev($, root);
         if (rev) {
+          state.setStartBaselineRev(root, rev);
           state.snapshotInitialDirt(
             root,
             await state.measureDiffLines($, root, rev),
@@ -294,10 +299,23 @@ async function goalAction(
     case "complete": {
       const a = state.getActive(root);
       if (!a) return "no active goal";
+      // ルール文書の usability ゲート（design g-mwfltxyt）。verifier clean より前に判定する
+      {
+        const base = await state.resolveBaseline($, root, a.state);
+        const docs = policyDocsChanged(
+          await state.measureChangedFiles($, root, base),
+          a.state.initial_diff_files,
+        );
+        const docsHash = docs.length > 0 ? state.hashFiles(root, docs) : null;
+        const refusal = usabilityGateRefusal(
+          a.state.usability_review,
+          docs,
+          docsHash,
+        );
+        if (refusal && !force) return refusal;
+      }
       // 検証後の変更検知（design g-mwd3n5bo）
-      const baseline =
-        a.state.router.baseline_rev ??
-        (await state.captureBaselineRev($, root));
+      const baseline = await state.resolveBaseline($, root, a.state);
       const currentHash = await state.computeDiffHash($, root, baseline);
       const verifiedHash = a.state.last_verifier?.diff_hash ?? null;
       const mismatch =
@@ -530,9 +548,7 @@ async function routerCheck(root: string): Promise<ToolOut> {
     };
   }
   const cfg = state.readConfig(root);
-  const baseline =
-    active.state.router.baseline_rev ??
-    (await state.captureBaselineRev($, root));
+  const baseline = await state.resolveBaseline($, root, active.state);
   const measured = await state.measureDiffLines($, root, baseline);
   const diffLines = state.effectiveDiffLines(
     measured,
@@ -594,9 +610,7 @@ async function verifierSet(
   if (rejected) return { text: rejected, data: { level: "error" } };
   const decided = state.aggregateVerdicts(results);
   // 検証した差分の指紋（design g-mwd3n5bo）
-  const baseline =
-    active?.state.router.baseline_rev ??
-    (await state.captureBaselineRev($, root));
+  const baseline = await state.resolveBaseline($, root, active?.state ?? null);
   const diffHash =
     state.getStashDiffHash(root) ??
     (await state.computeDiffHash($, root, baseline));
@@ -1046,9 +1060,7 @@ const TOOL_DEFS: ToolDef[] = [
           text: "error: no active goal",
           data: { path: "", lines: 0, baseline: "" },
         };
-      const baseline =
-        active.state.router.baseline_rev ??
-        (await state.captureBaselineRev($, ctx.root));
+      const baseline = await state.resolveBaseline($, ctx.root, active.state);
       const stashed = await state.stashDiff($, ctx.root, baseline, active.goal.id);
       if (!stashed)
         return {
@@ -1302,6 +1314,55 @@ const TOOL_DEFS: ToolDef[] = [
     },
     run: async (a, ctx) =>
       verifierSet(ctx.root, a.results as state.VerifierResult[], a.reason, a.model),
+  },
+  {
+    name: "graphhopper_usability_set",
+    description:
+      "ルール文書（AGENTS.md・skills/**.md・src/agents.ts）を変更した goal の usability レビュー結果を記録する（design g-mwfltxyt）。clean / drift / skipped（reason 必須）。complete は対象文書の変更に対してこの記録を要求する",
+    inputSchema: {
+      type: "object",
+      properties: {
+        level: { type: "string", enum: ["clean", "drift", "skipped"] },
+        reason: { type: "string", description: "確認の要約、または skipped の理由（必須）" },
+        model: { type: "string", description: "レビューを実行したモデル（省略時は config 既定）" },
+        root: ROOT_PROP,
+      },
+      required: ["level", "reason"],
+    },
+    schema: z.object({
+      level: z.enum(["clean", "drift", "skipped"]),
+      reason: z.string(),
+      model: z.string().optional(),
+      root: rootZ,
+    }),
+    outputSchema: { type: "object", properties: { level: { type: "string" }, files: { type: "array", items: { type: "string" } } } },
+    run: async (a, ctx) => {
+      const active = state.getActive(ctx.root);
+      if (!active) return { text: "error: no active goal", data: { level: "error", files: [] } };
+      const reason = String(a.reason ?? "").trim();
+      if (!reason)
+        return {
+          text: "error: reason は必須です（skipped も理由を書く）",
+          data: { level: "error", files: [] },
+        };
+      const baseline = await state.resolveBaseline($, ctx.root, active.state);
+      const files = policyDocsChanged(
+        await state.measureChangedFiles($, ctx.root, baseline),
+        active.state.initial_diff_files,
+      );
+      const docHash = files.length > 0 ? state.hashFiles(ctx.root, files) : null;
+      state.setUsabilityVerdict(ctx.root, {
+        level: a.level,
+        reason,
+        files,
+        doc_hash: docHash,
+        model: a.model ?? null,
+      });
+      return {
+        text: `usability: ${a.level}（${files.length} docs${files.length ? `: ${files.join(", ")}` : ""}）`,
+        data: { level: a.level, files },
+      };
+    },
   },
   {
     name: "graphhopper_critic_set",

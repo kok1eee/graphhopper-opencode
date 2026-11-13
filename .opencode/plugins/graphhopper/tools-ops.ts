@@ -6,7 +6,13 @@
  * handoff の候補列挙は known-sessions sidecar を使う (H2。session.list は v2 plugin API に無い)。
  */
 import { $ } from "bun";
-import { effectivePhaseAction, goalResumeContext, readGraphhopperHash, runGraphhopperEdit } from "../../../src/gate";
+import {
+  effectivePhaseAction,
+  goalResumeContext,
+  policyDocsChanged,
+  readGraphhopperHash,
+  runGraphhopperEdit,
+} from "../../../src/gate";
 import { INTERNAL_PROMPT_METADATA_KEY } from "../../../src/entry-decide";
 import { latestSummary } from "../../../src/compaction-store";
 import * as handoff from "../../../src/handoff";
@@ -39,7 +45,7 @@ export function registerOpsTools(
       const active = state.getActive(root);
       if (!active) return text("error: no active goal");
       const cfg = state.readConfig(root);
-      const baseline = active.state.router.baseline_rev ?? (await state.captureBaselineRev($, root));
+      const baseline = await state.resolveBaseline($, root, active.state);
       const measured = await state.measureDiffLines($, root, baseline);
       const diffLines = state.effectiveDiffLines(measured, active.state.initial_diff_lines);
       const route: state.RouterRoute = diffLines > cfg.router_threshold_lines ? "polish" : "advisor";
@@ -84,7 +90,7 @@ export function registerOpsTools(
     execute: async () => {
       const active = state.getActive(root);
       if (!active) return text("error: no active goal");
-      const baseline = active.state.router.baseline_rev ?? (await state.captureBaselineRev($, root));
+      const baseline = await state.resolveBaseline($, root, active.state);
       const stashed = await state.stashDiff($, root, baseline, active.goal.id);
       if (!stashed) return text("error: diff取得失敗（VCS不在またはbaseline不正）");
       // verifier が読む入力を固定する（design g-mwd3n5bo）。全文 diff の指紋を退避
@@ -136,9 +142,7 @@ export function registerOpsTools(
       if (rejected) return text(rejected);
       const decided = state.aggregateVerdicts(results);
       // 検証した差分の指紋（stash 時点。無ければ現在の全文 diff）
-      const baseline =
-        active?.state.router.baseline_rev ??
-        (await state.captureBaselineRev($, root));
+      const baseline = await state.resolveBaseline($, root, active?.state ?? null);
       const diffHash =
         state.getStashDiffHash(root) ??
         (await state.computeDiffHash($, root, baseline));
@@ -164,6 +168,47 @@ export function registerOpsTools(
           decided.target === "implementing"
             ? "次: graphhopper_phase(phase: 'implementing') で巻き戻し"
             : "次: 人間の hand-back を待つ（design/requirementsは自動で戻らない）",
+        ].join("\n"),
+      );
+    },
+  });
+
+  editor.add({
+    name: "graphhopper_usability_set",
+    description:
+      "ルール文書（AGENTS.md・skills/**.md・src/agents.ts）を変更した goal の usability レビュー結果を記録する（design g-mwfltxyt）。clean=確認して問題なし / drift=要修正 / skipped=不要と判断（reason 必須）。complete は対象文書の変更に対してこの記録を要求する",
+    input: S.obj(
+      {
+        level: S.enumOf(["clean", "drift", "skipped"]),
+        reason: S.str("確認の要約、または skipped の理由（必須）"),
+        model: S.optStr("レビューを実行したモデル（省略時は config 既定）"),
+      },
+      ["level", "reason"],
+    ),
+    execute: async (args: { level: "clean" | "drift" | "skipped"; reason: string; model?: string }) => {
+      const active = state.getActive(root);
+      if (!active) return text("error: no active goal");
+      const reason = String(args.reason ?? "").trim();
+      if (!reason) return text("error: reason は必須です（skipped も理由を書く）");
+      const baseline = await state.resolveBaseline($, root, active.state);
+      const files = policyDocsChanged(
+        await state.measureChangedFiles($, root, baseline),
+        active.state.initial_diff_files,
+      );
+      const docHash = files.length > 0 ? state.hashFiles(root, files) : null;
+      const result = state.setUsabilityVerdict(root, {
+        level: args.level,
+        reason,
+        files,
+        doc_hash: docHash,
+        model: args.model ?? null,
+      });
+      return text(
+        [
+          `usability: ${args.level}（${files.length} docs${files.length ? `: ${files.join(", ")}` : ""}）`,
+          result.usability_review?.level === "drift"
+            ? "次: 指摘を直し、graphhopper_invoke(agent: 'graphhopper-usability') で再確認して clean を記録"
+            : "次: complete へ",
         ].join("\n"),
       );
     },

@@ -57,6 +57,16 @@ function tools(root: string, ctx: unknown = {}): Map<string, ToolDef> {
   return map;
 }
 
+/** ops 系（verifier_set / usability_set / invoke など）を fake editor で登録する */
+function opsTools(root: string, ctx: unknown = {}): Map<string, ToolDef> {
+  const map = new Map<string, ToolDef>();
+  registerOpsTools({ add: (t: Record<string, unknown>) => void map.set(t.name as string, t as unknown as ToolDef) } as never, {
+    ctx: ctx as never,
+    root,
+  });
+  return map;
+}
+
 function textOf(out: unknown): string {
   return (out as { content?: string })?.content ?? "";
 }
@@ -64,6 +74,93 @@ function textOf(out: unknown): string {
 const DESIGN_WITH_TASKS = compliantDesignDoc({
   title: "plugin test",
   tasks: ["- [ ] T1（判断1）: 実装する", "- [ ] T2（判断1）: テストを書く"],
+});
+
+describe("plugin tool: usability ゲート（design g-mwfltxyt）", () => {
+  test("skipped は reason 必須、clean は status に出る", async () => {
+    const root = tmpRoot();
+    startGoal(root, "t", "s1");
+    const t = opsTools(root).get("graphhopper_usability_set");
+    const empty = await t!.execute({ level: "skipped", reason: "  " }, { sessionID: "s1" });
+    expect(textOf(empty)).toContain("reason は必須");
+
+    const ok = await t!.execute(
+      { level: "skipped", reason: "typo のみ" },
+      { sessionID: "s1" },
+    );
+    expect(textOf(ok)).toContain("usability: skipped");
+    const status = await tools(root)
+      .get("graphhopper_status")!
+      .execute({}, { sessionID: "s1" });
+    expect(textOf(status)).toContain("usability: skipped");
+  });
+
+  test("ルール文書を変えた goal は記録なしで complete できず、記録後は通る", async () => {
+    const { $ } = await import("bun");
+    const root = tmpRoot();
+    await $`git init -q ${root}`.quiet();
+    await $`git -C ${root} config user.email t@t`.quiet();
+    await $`git -C ${root} config user.name t`.quiet();
+    await Bun.write(`${root}/a.txt`, "one\n");
+    // 実 repo と同じく .graphhopper/ は ignore する（state 書き込みを diff に含めない）
+    await Bun.write(`${root}/.gitignore`, ".graphhopper/\n");
+    await $`git -C ${root} add -A`.quiet();
+    await $`git -C ${root} commit -qm init`.quiet();
+
+    startGoal(root, "t", "s1");
+    mkdirSync(`${root}/skills/x`, { recursive: true });
+    await Bun.write(`${root}/skills/x/SKILL.md`, "# rule\n");
+    // git の diff は untracked を拾わないため index に載せる（実運用は jj なので不要）
+    await $`git -C ${root} add -A`.quiet();
+    await opsTools(root)
+      .get("graphhopper_verifier_set")!
+      .execute(
+        { results: [{ lens: "general", level: "clean" }], reason: "ok" },
+        { sessionID: "s1" },
+      );
+
+    const goal = tools(root).get("graphhopper_goal");
+    expect(textOf(await goal!.execute({ action: "complete" }, { sessionID: "s1" }))).toContain(
+      "ルール文書が変更されています",
+    );
+
+    await opsTools(root)
+      .get("graphhopper_usability_set")!
+      .execute({ level: "clean", reason: "問題なし" }, { sessionID: "s1" });
+    expect(textOf(await goal!.execute({ action: "complete" }, { sessionID: "s1" }))).toContain(
+      "completed",
+    );
+  });
+});
+
+describe("plugin tool: usability ゲートの force 迂回（design g-mwfltxyt）", () => {
+  test("記録なしでも force: true で完了できる", async () => {
+    const { $ } = await import("bun");
+    const root = tmpRoot();
+    await $`git init -q ${root}`.quiet();
+    await $`git -C ${root} config user.email t@t`.quiet();
+    await $`git -C ${root} config user.name t`.quiet();
+    await Bun.write(`${root}/a.txt`, "one\n");
+    await Bun.write(`${root}/.gitignore`, ".graphhopper/\n");
+    await $`git -C ${root} add -A`.quiet();
+    await $`git -C ${root} commit -qm init`.quiet();
+
+    startGoal(root, "t", "s1");
+    mkdirSync(`${root}/skills/x`, { recursive: true });
+    await Bun.write(`${root}/skills/x/SKILL.md`, "# rule\n");
+    await $`git -C ${root} add -A`.quiet();
+    await opsTools(root)
+      .get("graphhopper_verifier_set")!
+      .execute(
+        { results: [{ lens: "general", level: "clean" }], reason: "ok" },
+        { sessionID: "s1" },
+      );
+
+    const goal = tools(root).get("graphhopper_goal");
+    expect(
+      textOf(await goal!.execute({ action: "complete", force: true }, { sessionID: "s1" })),
+    ).toContain("completed");
+  });
 });
 
 describe("plugin tool: goal start の意図ログ（design g-mwebh9vl）", () => {

@@ -52,6 +52,8 @@ import {
   setCriticVerdict,
   setIntentPath,
   setPhase,
+  setStartBaselineRev,
+  setUsabilityVerdict,
   startDiscover,
   startGoal,
   stopLoopByPause,
@@ -2455,6 +2457,27 @@ describe("goal の decision_id（セッション限定）", () => {
   });
 });
 
+describe("baseline の一元解決（design g-mwfltxyt）", () => {
+  test("start > router > capture の順で解決する", async () => {
+    const s = await import("./state");
+    const noShell = undefined as unknown as Parameters<typeof s.resolveBaseline>[0];
+    const root = tmpRoot();
+    expect(
+      await s.resolveBaseline(noShell, root, {
+        start_baseline_rev: "a",
+        router: { baseline_rev: "b" },
+      }),
+    ).toBe("a");
+    expect(
+      await s.resolveBaseline(noShell, root, {
+        start_baseline_rev: null,
+        router: { baseline_rev: "b" },
+      }),
+    ).toBe("b");
+    expect(await s.resolveBaseline(noShell, root, null)).toBeNull();
+  });
+});
+
 describe("意図ログの state 連携（design g-mwebh9vl）", () => {
   test("pause→resume で intent_path が復元される", () => {
     const root = tmpRoot();
@@ -2463,6 +2486,24 @@ describe("意図ログの state 連携（design g-mwebh9vl）", () => {
     pauseGoal(root);
     const r = resumeGoal(root, "s1");
     expect(r?.state.intent_path).toBe("/x/intent.md");
+  });
+
+  test("pause→resume で usability_review と start_baseline_rev が復元される", () => {
+    const root = tmpRoot();
+    startGoal(root, "t", "s1");
+    setStartBaselineRev(root, "abc123");
+    setUsabilityVerdict(root, {
+      level: "clean",
+      reason: "ok",
+      files: ["AGENTS.md"],
+      doc_hash: "h1",
+      model: null,
+    });
+    pauseGoal(root);
+    const r = resumeGoal(root, "s1");
+    expect(r?.state.usability_review?.level).toBe("clean");
+    expect(r?.state.usability_review?.files).toEqual(["AGENTS.md"]);
+    expect(r?.state.start_baseline_rev).toBe("abc123");
   });
 
   test("archiveGoalFiles は .intent.md も archive へ移す", () => {

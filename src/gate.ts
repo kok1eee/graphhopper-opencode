@@ -278,6 +278,77 @@ export function designGateRefusal(
   );
 }
 
+/** AI が読んで従うルール文書か（usability 確認の対象。design g-mwfltxyt 判断1）。
+ * 生成物 .opencode/agents/*.md は含めない（src/agents.ts が単一源泉） */
+export function isPolicyDocPath(filePath: string): boolean {
+  const p = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (/(^|\/)AGENTS\.md$/.test(p)) return true;
+  if (/(^|\/)skills\/(?:[^/]+\/)*[^/]+\.md$/.test(p)) return true;
+  if (/(^|\/)src\/agents\.ts$/.test(p)) return true;
+  return false;
+}
+
+/** 変更ファイルからルール文書だけを抽出する（goal 開始前からの dirty は除外。判断8） */
+export function policyDocsChanged(
+  files: string[],
+  initialFiles: string[] | null | undefined,
+): string[] {
+  const norm = (p: string): string => p.replace(/\\/g, "/").replace(/^\.\//, "");
+  const init = new Set((initialFiles ?? []).map(norm));
+  return [...new Set(files.map(norm))].filter(
+    (f) => isPolicyDocPath(f) && !init.has(f),
+  );
+}
+
+/** usability ゲート（design g-mwfltxyt 判断4, 5）。
+ * 対象文書が変わっていなければ null。記録なし・drift・レビュー後の変更は拒否文。 */
+export function usabilityGateRefusal(
+  review: {
+    level: "clean" | "drift" | "skipped";
+    reason: string;
+    files: string[];
+    doc_hash: string | null;
+  } | null,
+  docsChanged: string[],
+  currentHash: string | null,
+): string | null {
+  if (docsChanged.length === 0) return null;
+  const list =
+    docsChanged.slice(0, 5).join(", ") +
+    (docsChanged.length > 5 ? ` ほか${docsChanged.length - 5}件` : "");
+  if (!review) {
+    return (
+      `error: ルール文書が変更されています（${list}）。` +
+      "graphhopper-usability で確認して graphhopper_usability_set に記録するか、" +
+      "不要と判断した理由を skipped で記録してください（force: true で完了も可）。"
+    );
+  }
+  if (review.level === "drift") {
+    return `error: usability レビューが drift です（${review.reason}）。指摘を直して再実行し、graphhopper_usability_set で clean を記録してください。`;
+  }
+  const uncovered = docsChanged.filter((f) => !review.files.includes(f));
+  if (uncovered.length > 0) {
+    return `error: usability レビューの対象に含まれない文書が変更されています（${uncovered.join(", ")}）。再実行して記録し直してください（force: true で完了も可）。`;
+  }
+  if (!review.doc_hash) {
+    return "error: usability レビューの指紋が記録されていません。再実行して記録し直してください（force: true で完了も可）。";
+  }
+  if (currentHash && review.doc_hash !== currentHash) {
+    return "error: usability レビューの後にルール文書が変わっています。再実行して記録し直してください（force: true で完了も可）。";
+  }
+  return null;
+}
+
+/** status 用の1行（文言の単一源泉）。stale＝レビュー後に文書が変わった */
+export function formatUsabilityLine(
+  review: { level: string; reason: string; files: string[] } | null,
+  stale: boolean,
+): string {
+  if (!review) return "usability: (none)";
+  const files = review.files.length ? ` (${review.files.join(", ")})` : "";
+  return `usability: ${review.level}${stale ? "（レビュー後に変更あり）" : ""} — ${review.reason}${files}`;
+}
+
 /** 意図ログは goal 開始時の一次情報なので、全 phase で編集を拒否する（design g-mwebh9vl） */
 export function isIntentLogPath(filePath: string): boolean {
   const p = filePath.replace(/\\/g, "/");

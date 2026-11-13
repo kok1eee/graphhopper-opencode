@@ -12,7 +12,10 @@ import {
   effectivePhaseAction,
   ESCALATE_NEXT,
   EVAL_MANAGED_NOTE,
+  formatUsabilityLine,
   parseEntryRoute,
+  policyDocsChanged,
+  usabilityGateRefusal,
 } from "../../../src/gate";
 import {
   decideRoute,
@@ -110,6 +113,7 @@ export function registerCoreTools(
           try {
             const rev = await state.captureBaselineRev($, root);
             if (rev) {
+              state.setStartBaselineRev(root, rev);
               state.snapshotInitialDirt(root, await state.measureDiffLines($, root, rev));
               state.snapshotInitialDiffFiles(root, await state.measureChangedFiles($, root, rev));
             }
@@ -195,6 +199,21 @@ export function registerCoreTools(
           const a = state.getActive(root);
           if (!a) return text("no active goal");
           clearWaitTimer(sessionID);
+          // ルール文書の usability ゲート（design g-mwfltxyt）。verifier clean より前に判定する
+          {
+            const baseline = await state.resolveBaseline($, root, a.state);
+            const docs = policyDocsChanged(
+              await state.measureChangedFiles($, root, baseline),
+              a.state.initial_diff_files,
+            );
+            const currentHash = docs.length > 0 ? state.hashFiles(root, docs) : null;
+            const refusal = usabilityGateRefusal(
+              a.state.usability_review,
+              docs,
+              currentHash,
+            );
+            if (refusal && !args.force) return text(refusal);
+          }
           if (!args.force && a.state.last_verifier?.level !== "clean") {
             return text(
               "error: complete には直近の graphhopper_verifier_set（集約 clean）が必要です（self-graded 完了は禁止）。" +
@@ -202,9 +221,7 @@ export function registerCoreTools(
             );
           }
           // 検証後の変更検知（design g-mwd3n5bo）。両方の指紋が取れて不一致なら止める
-          const baseline =
-            a.state.router.baseline_rev ??
-            (await state.captureBaselineRev($, root));
+          const baseline = await state.resolveBaseline($, root, a.state);
           const currentHash = await state.computeDiffHash($, root, baseline);
           const verifiedHash = a.state.last_verifier?.diff_hash ?? null;
           const mismatch =
@@ -266,6 +283,10 @@ export function registerCoreTools(
             ? `initial_dirt: ${a.state.initial_diff_lines} lines（goal start時の未コミット分。実効diffから除外）`
             : null,
           a.state.intent_path ? formatIntentLine(a.state.intent_path) : null,
+          formatUsabilityLine(
+            a.state.usability_review,
+            state.usabilityStale(root),
+          ),
           a.state.last_verifier
             ? `last_verifier: level=${a.state.last_verifier.level} target=${a.state.last_verifier.target ?? "-"} lens=${a.state.last_verifier.lens.join(",") || "-"}${lensModels ? ` models=${lensModels}` : ""} reason=${a.state.last_verifier.reason}`
             : "last_verifier: (none)",

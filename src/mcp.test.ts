@@ -57,6 +57,7 @@ describe("graphhopper-mcp tool一覧", () => {
         "graphhopper_set_eval",
         "graphhopper_status",
         "graphhopper_todo",
+        "graphhopper_usability_set",
         "graphhopper_verifier_set",
       ].sort(),
     );
@@ -187,6 +188,38 @@ describe("graphhopper-mcp goal往復", () => {
     expect(await call("graphhopper_goal", { action: "complete" })).toContain(
       "error: complete には直近の graphhopper_verifier_set",
     );
+    await client.close();
+  });
+
+  test("ルール文書を変えた goal は usability 記録なしで complete を拒否", async () => {
+    const client = await linked();
+    const root = freshRoot();
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const r = await client.callTool({ name, arguments: { ...args, root } });
+      const c = r.content as { type: string; text: string }[];
+      return c[0]?.text ?? "";
+    };
+    await $`git init -q ${root}`.quiet();
+    await $`git -C ${root} config user.email t@t`.quiet();
+    await $`git -C ${root} config user.name t`.quiet();
+    await Bun.write(`${root}/a.txt`, "one\n");
+    await Bun.write(`${root}/.gitignore`, ".graphhopper/\n");
+    await $`git -C ${root} add -A`.quiet();
+    await $`git -C ${root} commit -qm init`.quiet();
+
+    await call("graphhopper_goal", { action: "start", title: "t", session_id: "s1" });
+    await Bun.write(`${root}/skills/x/SKILL.md`, "# rule\n");
+    await $`git -C ${root} add -A`.quiet();
+    await call("graphhopper_verifier_set", {
+      results: [{ lens: "general", level: "clean" }],
+      reason: "ok",
+    });
+    expect(await call("graphhopper_goal", { action: "complete" })).toContain(
+      "ルール文書が変更されています",
+    );
+    expect(
+      await call("graphhopper_goal", { action: "complete", force: true }),
+    ).toContain("completed");
     await client.close();
   });
 

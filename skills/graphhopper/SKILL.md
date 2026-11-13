@@ -43,6 +43,19 @@ cascade の切替先（baseline/escalate/quality 等）も deny で拒否され�
 （goal 終了時の復元は通す）。CI は `bun scripts/gen-agents.ts --check-policy` で
 `.graphhopper/config.example.json` を源に catalog と cascade 設定を検査する。
 ローカルでは global catalog（`~/.config/opencode/agents`）も存在すれば検査する（`[global]` ラベル）。
+**ルール文書の usability**（`AGENTS.md` / `skills/**.md` / `src/agents.ts` を変えた goal）:
+- 確認: 先に `graphhopper_diff_stash` で差分を最新化し、返った path を控える
+  （goal id は `graphhopper_status` の `(<goal id>)`）。次に
+  `graphhopper_invoke(agent: "graphhopper-usability", prompt: ...)` を呼び、prompt に
+  「変更した文書のパス」「diff の path」「意図ログ `.graphhopper/plans/<goal>.intent.md`
+  （存在する場合だけ。無ければその旨を書く）」を渡す
+- 記録: `graphhopper_usability_set(level: clean|drift|skipped, reason)`
+- drift は直して `graphhopper_diff_stash` から再実行 / skipped は理由必須
+  （例: 文言・typo のみで挙動や手順が変わらない）
+- 記録なし・drift・レビュー後の変更は `complete` が止まる。迂回は
+  `graphhopper_goal(action: "complete", force: true)`
+- agent が見つからない場合は `bun scripts/gen-agents.ts` を実行して再試行
+  （`task` はセッション開始時にモデル束縛が凍結されるため invoke 推奨）
 goal 開始時の会話は `.graphhopper/plans/<goal>.intent.md` に `me:`/`assistant:` 付きで保存される。
 critic と requirement/general lens はこれを読む（behavior/progress と実装 subagent には渡さない）。
 verifier clean の後に差分を変えると `complete` は止まる（検証時点の diff の sha1 と照合）。
