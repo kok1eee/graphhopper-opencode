@@ -223,6 +223,25 @@ describe("graphhopper-mcp goal往復", () => {
     await client.close();
   });
 
+  test("MCP start(strong) はフラグを立てて status に出る", async () => {
+    const client = await linked();
+    const root = freshRoot();
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const r = await client.callTool({ name, arguments: { ...args, root } });
+      const c = r.content as { type: string; text: string }[];
+      return c[0]?.text ?? "";
+    };
+    const out = await call("graphhopper_goal", {
+      action: "start",
+      title: "t",
+      session_id: "s1",
+      strong: true,
+    });
+    expect(out).toContain("strong: on");
+    expect(await call("graphhopper_status", {})).toContain("strong: on");
+    await client.close();
+  });
+
   test("MCP start は意図ログを作らず status にも出ない", async () => {
     const client = await linked();
     const root = freshRoot();

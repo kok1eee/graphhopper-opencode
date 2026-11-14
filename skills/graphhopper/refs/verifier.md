@@ -79,6 +79,10 @@ polish前にlens編成の助言が欲しい場合のみ使う（現行routerは�
   resume 時に catalog へ model_allow/model_deny 違反のモデルが焼かれていると、応答に警告が付く（焼き直して新規セッション）。
   **cascade の切替先（baseline/escalate/quality 等）も同じ deny で拒否される**。拒否時は
   切り替えず `failed` を返す（同じ拒否は1 goal 1回だけ報告）。goal 終了時の復元は拒否しない。
+  **strong モード**（design g-mwfnlpr9）: `graphhopper_goal(action: "start", strong: true)` で
+  main セッションを goal の間ずっと強いモデルにする。解決順（cascade.strong→expert→escalate）、
+  checkpoint=reviewing の扱い、deny 時、cascade 無効時、MCP の挙動は
+  SKILL.md の「strong モード」節を単一源泉として参照（ここには重複して書かない）。
   **ルール文書の usability**（design g-mwfltxyt）:
   対象は `AGENTS.md`・`skills/**.md`・`src/agents.ts`。変更した goal は complete の前に記録が必要。
   1. 先に `graphhopper_diff_stash` で差分を最新化し、返った path を控える

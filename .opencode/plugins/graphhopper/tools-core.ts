@@ -86,11 +86,16 @@ export function registerCoreTools(
           description:
             "complete 時に verifier 未clearでも強制完了する、または resume 時に loop_stop_max のブロックを明示的に無視する（人間の判断が見える場合のみ。監査ログに loop_resume_forced が記録される）",
         },
+        strong: {
+          type: "boolean",
+          description:
+            "action=start のとき、goal の間ずっと強いモデル（cascade.strong→expert→escalate）で回す。cascade が無効なら効かない",
+        },
       },
       ["action"],
     ),
     execute: async (input: unknown, context: unknown) => {
-      const args = input as { action: string; title?: string; force?: boolean };
+      const args = input as { action: string; title?: string; force?: boolean; strong?: boolean };
       const sessionID = sess(gh, context as Ctx);
       switch (args.action) {
         case "start": {
@@ -109,7 +114,9 @@ export function registerCoreTools(
            * （route は変えない。entry_route は route_set / fail-safe に委ねる。
            *   d1 の待ち時間を goal start に載せないので await しない。記録は best-effort） */
           void ensureEntryDecision(root, sessionID || null, args.title);
-          const a = state.startGoal(root, args.title, sessionID);
+          const a = state.startGoal(root, args.title, sessionID, {
+            strong: args.strong === true,
+          });
           try {
             const rev = await state.captureBaselineRev($, root);
             if (rev) {
@@ -158,8 +165,13 @@ export function registerCoreTools(
             started.state.entry_route !== null && started.state.entry_route !== undefined
               ? `pending entry_route=${started.state.entry_route} を消費`
               : "pending無し→full（未判定・legacy）扱い";
+          const strongNote = args.strong
+            ? cfg.cascade.enabled
+              ? "strong: on（goal の間は cascade.strong→expert→escalate）"
+              : "strong: 指定されたが cascade が無効のため効かない"
+            : "";
           return text(
-            `goal started: "${started.goal.title}" (${started.goal.id})\n${consumed}${started.state.difficulty ? ` / difficulty=${started.state.difficulty}` : ""}\nphase: designing${cascadeNote ? `\n${cascadeNote}` : ""}${intentNote ? `\n${intentNote}` : ""}\n次: ${effectivePhaseAction("designing", started.state.entry_route)}`,
+            `goal started: "${started.goal.title}" (${started.goal.id})\n${consumed}${started.state.difficulty ? ` / difficulty=${started.state.difficulty}` : ""}\nphase: designing${cascadeNote ? `\n${cascadeNote}` : ""}${strongNote ? `\n${strongNote}` : ""}${intentNote ? `\n${intentNote}` : ""}\n次: ${effectivePhaseAction("designing", started.state.entry_route)}`,
           );
         }
         case "pause": {
@@ -276,6 +288,7 @@ export function registerCoreTools(
           `phase: ${a.state.phase}`,
           `session: ${a.state.session_id ?? "unbound"}`,
           `entry_route: ${a.state.entry_route ?? "full（未判定・legacy）"}${a.state.escalated_at ? `（${a.state.escalated_at}にlight/advised→full昇格）` : ""}`,
+          ...(a.state.strong_mode ? ["strong: on（cascade.strong→expert→escalate）"] : []),
           a.state.router.route
             ? `router: route=${a.state.router.route} diff_lines=${a.state.router.diff_lines} checked_at=${a.state.router.checked_at}${a.state.router.deep ? ` deep (${a.state.router.deep_reason})` : ""}`
             : "router: (not checked)",

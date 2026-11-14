@@ -112,6 +112,22 @@ describe("resolveLevel", () => {
     expect(resolveLevel({ difficulty: null, failStreak: 0, currentLevel: null, config }).level).toBe("baseline");
   });
 
+  test("strongMode は difficulty に関係なく escalated", () => {
+    const r = resolveLevel({
+      difficulty: "easy",
+      failStreak: 0,
+      currentLevel: null,
+      config,
+      strongMode: true,
+    });
+    expect(r.level).toBe("escalated");
+    expect(r.reason).toContain("strong");
+    // strong でなく、easy なら baseline のまま
+    expect(
+      resolveLevel({ difficulty: "easy", failStreak: 0, currentLevel: null, config }).level,
+    ).toBe("baseline");
+  });
+
   test("閾値0以下なら fail では昇格しない", () => {
     const r = resolveLevel({
       difficulty: "normal",
@@ -416,6 +432,43 @@ describe("resolveTargetModel（phase 連動）", () => {
     const r = resolveTargetModel({ phase: "implementing", level: "escalated", config: withPhase });
     expect(r.source).toBe("level");
     expect(r.ref?.id).toBe("claude-sonnet-5-5");
+  });
+
+  test("strong は phase_models を無視して strong→expert→escalate を使う", () => {
+    const cfg: CascadeConfig = {
+      ...config,
+      expert: "claude-oauth/claude-opus-5-5",
+      phase_models: { designing: "main" },
+    };
+    const r = resolveTargetModel({
+      phase: "designing",
+      level: "escalated",
+      config: cfg,
+      main: { providerID: "me", id: "original" },
+      strong: true,
+    });
+    expect(r.source).toBe("level");
+    expect(r.ref?.id).toBe("claude-opus-5-5");
+    // strong でなければ main（restore）が優先される
+    const normal = resolveTargetModel({
+      phase: "designing",
+      level: "escalated",
+      config: cfg,
+      main: { providerID: "me", id: "original" },
+    });
+    expect(normal.source).toBe("main");
+  });
+
+  test("strong でも checkpoint=reviewing は main を優先する", () => {
+    const r = resolveTargetModel({
+      phase: "implementing",
+      level: "escalated",
+      config: { ...config, expert: "claude-oauth/claude-opus-5-5" },
+      main: { providerID: "me", id: "original" },
+      checkpoint: "reviewing",
+      strong: true,
+    });
+    expect(r.source).toBe("main");
   });
 
   test("不正な phase 指定は level にフォールバック", () => {

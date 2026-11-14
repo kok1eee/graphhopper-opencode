@@ -100,6 +100,8 @@ export interface GoalSnapshot {
   usability_review: UsabilityVerdict | null;
   /** goal 開始時の baseline rev（commit）。usability と diff hash の基準に使う */
   start_baseline_rev: string | null;
+  /** goal start の strong: true（goal の間だけ強いモデルで回す） */
+  strong_mode: boolean;
 }
 
 /** goal出来栄えの機械採点。式はv1で固定し、breakdownで透明化する（調整は式ごと変える） */
@@ -325,6 +327,8 @@ export interface LoopState {
   usability_review: UsabilityVerdict | null;
   /** goal 開始時の baseline rev（commit）。usability と diff hash の基準に使う */
   start_baseline_rev: string | null;
+  /** goal start の strong: true（goal の間だけ強いモデルで回す） */
+  strong_mode: boolean;
   /** 入口判定のroute。null＝full（未呼び出し・legacy）。light/advised→full昇格のみ可 */
   entry_route: EntryRoute | null;
   /** 入口判定の難易度。null＝未判定（昇格しない） */
@@ -356,6 +360,8 @@ export interface CascadeConfig {
   second?: string;
   /** お手上げ段（oracle 用）のモデル（省略時は escalate にフォールバック） */
   expert?: string;
+  /** strong モード（goal start の strong: true）で使うモデル。省略時は expert→escalate */
+  strong?: string;
   /** 昇格する難易度 */
   escalate_on: Difficulty[];
   /** 連続失敗がこの数に達したら難易度に関係なく昇格（0以下で無効） */
@@ -833,7 +839,7 @@ export function planLogExists(root: string, goalId: string): boolean {
 }
 
 export type HistoryEvent =
-  | { type: "goal_start"; goal: string; title: string }
+  | { type: "goal_start"; goal: string; title: string; strong?: boolean }
   | { type: "goal_pause"; goal: string }
   | { type: "goal_resume"; goal: string }
   | { type: "cascade_switch"; goal: string; from: string; to: string; phase: Phase; reason: string }
@@ -1216,6 +1222,7 @@ function emptyState(): LoopState {
     intent_path: null,
     usability_review: null,
     start_baseline_rev: null,
+    strong_mode: false,
     updated_at: new Date().toISOString(),
   };
 }
@@ -1268,6 +1275,7 @@ export function startGoal(
   root: string,
   title: string,
   sessionID: string,
+  opts?: { strong?: boolean },
 ): ActiveLoop {
   const goals = readGoals(root);
   const goal: Goal = {
@@ -1288,6 +1296,7 @@ export function startGoal(
     ...emptyState(),
     goal_id: goal.id,
     session_id: sessionID,
+    strong_mode: opts?.strong === true,
   };
   // pending entry_route（route_set先行）の消費。無ければnull＝full。
   // directはpendingを書かない（historyのみ）ため消費集合に入れない
@@ -1309,7 +1318,12 @@ export function startGoal(
   }
   clearPendingRoute(root);
   writeState(root, next);
-  recordEvent(root, { type: "goal_start", goal: goal.id, title: goal.title });
+  recordEvent(root, {
+    type: "goal_start",
+    goal: goal.id,
+    title: goal.title,
+    ...(opts?.strong === true ? { strong: true } : {}),
+  });
   if (next.entry_route) {
     recordEvent(root, {
       type: "entry_route",
@@ -1364,6 +1378,7 @@ export function pauseGoal(root: string): ActiveLoop | null {
         intent_path: state.intent_path,
         usability_review: state.usability_review,
         start_baseline_rev: state.start_baseline_rev,
+        strong_mode: state.strong_mode,
       },
     },
     // 人間による明示的な操作なのでloop停止フラグも解除（pause自体が駆動を止める）
@@ -1426,6 +1441,7 @@ export function resumeGoal(
               intent_path: snap.intent_path ?? null,
               usability_review: snap.usability_review ?? null,
               start_baseline_rev: snap.start_baseline_rev ?? null,
+              strong_mode: snap.strong_mode ?? false,
             }
           : {}),
       },
@@ -1451,6 +1467,7 @@ export function completeGoal(
       phase: "done",
       loop_streak: 0,
       loop_stopped: false,
+      strong_mode: false,
     },
   }));
   if (r) {
@@ -1704,6 +1721,7 @@ export function clearActiveGoal(root: string): Goal | null {
     loop_streak: 0,
     loop_stopped: false,
     loop_stop_count: 0,
+    strong_mode: false,
   });
   return goal;
 }

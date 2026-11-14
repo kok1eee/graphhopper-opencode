@@ -168,6 +168,7 @@ function statusText(root: string): string {
     `phase: ${a.state.phase}`,
     `session: ${a.state.session_id ?? "unbound"}`,
     `entry_route: ${a.state.entry_route ?? "full（未判定・legacy）"}${a.state.escalated_at ? `（${a.state.escalated_at}にlight/advised→full昇格）` : ""}`,
+    ...(a.state.strong_mode ? ["strong: on（cascade.strong→expert→escalate）"] : []),
     a.state.router.route
       ? `router: route=${a.state.router.route} diff_lines=${a.state.router.diff_lines} checked_at=${a.state.router.checked_at}${a.state.router.deep ? ` deep (${a.state.router.deep_reason})` : ""}`
       : "router: (not checked)",
@@ -207,9 +208,9 @@ async function goalAction(
   root: string,
   sessionID: string,
   action: "start" | "pause" | "resume" | "complete" | "clear",
-  opts: { title?: string; force?: boolean; server?: Server },
+  opts: { title?: string; force?: boolean; strong?: boolean; server?: Server },
 ): Promise<string> {
-  const { title, force, server } = opts;
+  const { title, force, strong, server } = opts;
   // 単一driver警告は操作前に判定する（pause等でbindが変わる前の値を読む）
   const drv = driverNote(root, sessionID);
   switch (action) {
@@ -223,7 +224,7 @@ async function goalAction(
       // （route は変えない。entry_route は route_set / fail-safe に委ねる。
       //   d1 の待ち時間を goal start に載せないので await しない。記録は best-effort）
       void ensureEntryDecision(root, sessionID || null, title);
-      const a = state.startGoal(root, title, sessionID);
+      const a = state.startGoal(root, title, sessionID, { strong });
       try {
         const rev = await state.captureBaselineRev($, root);
         if (rev) {
@@ -248,10 +249,15 @@ async function goalAction(
         started.state.entry_route !== undefined
           ? `pending entry_route=${started.state.entry_route} を消費`
           : "pending無し→full（未判定・legacy）扱い";
+      const strongNote = strong
+        ? state.readConfig(root).cascade.enabled
+          ? "strong: on（plugin の次の sync で cascade.strong→expert→escalate に切り替わる）"
+          : "strong: 指定されたが cascade が無効のため効かない"
+        : "";
       const unbound =
         !sessionID &&
         "\n(note: session_id 未指定のため未バインド。継続注入・stuck計数を有効にするには session_id を指定して resume で bind せよ)";
-      return `goal started: "${started.goal.title}" (${started.goal.id})\n${consumed}\nphase: designing\n次: ${effectivePhaseAction("designing", started.state.entry_route)}${unbound ?? ""}`;
+      return `goal started: "${started.goal.title}" (${started.goal.id})\n${consumed}${strongNote ? `\n${strongNote}` : ""}\nphase: designing\n次: ${effectivePhaseAction("designing", started.state.entry_route)}${unbound ?? ""}`;
     }
     case "pause": {
       const a = state.pauseGoal(root);
@@ -727,6 +733,10 @@ const TOOL_DEFS: ToolDef[] = [
         action: { type: "string", enum: ["start", "pause", "resume", "complete", "clear"] },
         title: { type: "string", description: "action=start のとき必須。goal の題名" },
         force: { type: "boolean" },
+        strong: {
+          type: "boolean",
+          description: "action=start のとき、goal の間ずっと強いモデル（cascade.strong→expert→escalate）で回す。MCP ではフラグのみで、切替は plugin の sync 時",
+        },
         root: ROOT_PROP,
         session_id: SESSION_PROP,
       },
@@ -736,6 +746,7 @@ const TOOL_DEFS: ToolDef[] = [
       action: z.enum(["start", "pause", "resume", "complete", "clear"]),
       title: z.string().optional(),
       force: z.boolean().optional(),
+      strong: z.boolean().optional(),
       root: rootZ,
       session_id: sessionZ,
     }),
@@ -757,6 +768,7 @@ const TOOL_DEFS: ToolDef[] = [
       const text = await goalAction(root, sessionOf(a.session_id), a.action, {
         title: a.title,
         force: a.force,
+        strong: a.strong,
         server: ctx.server,
       });
       return { text, data: goalData(root, a.action, text) };

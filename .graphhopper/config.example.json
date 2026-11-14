@@ -9,6 +9,7 @@
     "escalate": "claude-oauth/claude-sonnet-5-5",
     "second": "opencode-go/deepseek-v4.1-flash",
     "expert": "claude-oauth/claude-opus-5-5",
+    "strong": "claude-oauth/claude-opus-5-5",
     "agents": {
       "quality": {
         "graphhopper-verifier": "claude-oauth/claude-sonnet-5-5",

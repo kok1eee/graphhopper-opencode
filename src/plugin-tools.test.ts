@@ -29,6 +29,7 @@ import {
   pauseGoal,
   planPath,
   readTodos,
+  readState,
   setVerifierVerdict,
   startGoal,
 } from "./state";
@@ -74,6 +75,40 @@ function textOf(out: unknown): string {
 const DESIGN_WITH_TASKS = compliantDesignDoc({
   title: "plugin test",
   tasks: ["- [ ] T1（判断1）: 実装する", "- [ ] T2（判断1）: テストを書く"],
+});
+
+describe("plugin tool: strong モード（design g-mwfnlpr9）", () => {
+  test("start(strong) で strong_mode が入り status に出る", async () => {
+    const root = tmpRoot();
+    const goal = tools(root).get("graphhopper_goal");
+    const out = await goal!.execute(
+      { action: "start", title: "t", strong: true },
+      { sessionID: "s1" },
+    );
+    expect(textOf(out)).toContain("strong: on");
+    const status = await tools(root)
+      .get("graphhopper_status")!
+      .execute({}, { sessionID: "s1" });
+    expect(textOf(status)).toContain("strong: on");
+  });
+
+  test("complete で strong_mode が false に戻る", async () => {
+    const root = tmpRoot();
+    await tools(root)
+      .get("graphhopper_goal")!
+      .execute({ action: "start", title: "t", strong: true }, { sessionID: "s1" });
+    await opsTools(root)
+      .get("graphhopper_verifier_set")!
+      .execute(
+        { results: [{ lens: "general", level: "clean" }], reason: "ok" },
+        { sessionID: "s1" },
+      );
+    const out = await tools(root)
+      .get("graphhopper_goal")!
+      .execute({ action: "complete" }, { sessionID: "s1" });
+    expect(textOf(out)).toContain("completed");
+    expect(readState(root).strong_mode).toBe(false);
+  });
 });
 
 describe("plugin tool: usability ゲート（design g-mwfltxyt）", () => {

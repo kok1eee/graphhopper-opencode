@@ -56,6 +56,26 @@ cascade の切替先（baseline/escalate/quality 等）も deny で拒否され�
   `graphhopper_goal(action: "complete", force: true)`
 - agent が見つからない場合は `bun scripts/gen-agents.ts` を実行して再試行
   （`task` はセッション開始時にモデル束縛が凍結されるため invoke 推奨）
+**strong モード**（設計が重い goal を最初から強いモデルで回す）:
+- 費用: 全 phase で main が強いモデルになるためトークン費用は増える。設計が重い goal だけに使う
+- 指定: `graphhopper_goal(action: "start", title: "...", strong: true)` のみ。
+  goal 開始後には切り替えられない（start 時の一発指定）
+- 効果: **main セッションだけ**。subagent のモデル割当（cascade.agents.quality）は変えない
+- 対象: 全 phase。ただし `cascade.checkpoint: true` の途中確認（checkpoint=reviewing）では
+  一時的に main（goal 開始時のモデル）に戻り、次の sync（plugin の phase 遷移または idle）で strong に戻る
+- 解決順: `~/.config/opencode/graphhopper.json` の `cascade` 配下で
+  `strong` → `expert` → `escalate` の順。例: `"strong": "claude-oauth/claude-opus-5-5"`。
+  未設定なら `expert`、それも無ければ `escalate`
+- `cascade.phase_models` は strong 中は無視する（strong が target のモデルを決める）
+- deny: 解決したモデルが `model_deny` に当たると、通常の cascade と同じく切り替えず failed を返す
+  （次の候補へは進まない）。config を見直す
+- 無効時: `cascade.enabled: false` なら strong は効かない。goal は開始され、start 応答に注意が出る
+- 終了: `complete`（force 含む）と `clear` で解除され、`cascade.restore`（内部状態。設定キーではなく
+  goal 開始時のモデル）に戻る
+- MCP: フラグを立てるだけで、切替は plugin の sync（同じセッションの次の phase/idle）で起きる。
+  plugin が動いていない環境では切り替わらない
+- 通常昇格（difficulty/fail_streak）とは独立。strong は target のモデルだけを変え、
+  `cascade.escalate` の設定は変えない
 goal 開始時の会話は `.graphhopper/plans/<goal>.intent.md` に `me:`/`assistant:` 付きで保存される。
 critic と requirement/general lens はこれを読む（behavior/progress と実装 subagent には渡さない）。
 verifier clean の後に差分を変えると `complete` は止まる（検証時点の diff の sha1 と照合）。
