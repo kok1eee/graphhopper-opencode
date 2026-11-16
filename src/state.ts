@@ -1493,6 +1493,8 @@ export function completeGoal(
     ]);
     // diff退避を掃除（.graphhopper/tmp。蓄積＋古いpath誤読の防止）
     removeStashedDiff(root, r.goal.id);
+    removeDiag(root, r.goal.id);
+    removeVerifyResults(root, r.goal.id);
     archiveGoalFiles(root, r.goal.id);
   }
   return r;
@@ -1712,6 +1714,8 @@ export function clearActiveGoal(root: string): Goal | null {
   writeGoals(root, goals);
   // diff退避を掃除（completeGoalと同型）
   removeStashedDiff(root, goal.id);
+  removeDiag(root, goal.id);
+  removeVerifyResults(root, goal.id);
   const s = readState(root);
   writeState(root, {
     ...s,
@@ -2639,6 +2643,26 @@ export interface VerifierResult {
   model?: string | null;
 }
 
+/* verifier の lens 編成（単一源泉。design g-mwiocibp 判断5）。
+ * route=polish（大diff）は3lens、route=advisor（小diff）はgeneral×1。
+ * 入口route が light/advised で非昇格なら general×1 のみ、
+ * 昇格済み（escalated_at あり）は3lens 必須 —— いずれも checkVerifierResults の
+ * 規則と同じ順で判定するので、この関数の出力は必ず検査を通る（テストで全組み合わせ固定）。
+ * simplify は route=polish のときだけ必要（条件分岐node。SKILL.md polish節）。 */
+export function planVerifier(opts: {
+  route: RouterRoute | null;
+  entryRoute: EntryRoute | null;
+  escalated: boolean;
+}): { lenses: VerifierLens[]; simplify: boolean } {
+  const three: VerifierLens[] = ["requirement", "behavior", "progress"];
+  const simplify = opts.route === "polish";
+  if (opts.escalated) return { lenses: three, simplify };
+  if (opts.entryRoute === "light" || opts.entryRoute === "advised") {
+    return { lenses: ["general"], simplify };
+  }
+  return { lenses: simplify ? three : ["general"], simplify };
+}
+
 /** verifier_set 入力の検証。通れば null、ダメならエラー文（tool がそのまま返す）。
  * self-graded 完了防止の機械ゲート（旧 lens 空拒否の後継）。
  * opts.entryRoute: light/advised非昇格はgeneral×1のみ可、昇格後は3lens必須。
@@ -2648,7 +2672,7 @@ export function checkVerifierResults(
   opts?: { entryRoute?: EntryRoute | null; escalated?: boolean },
 ): string | null {
   if (!Array.isArray(results) || results.length === 0) {
-    return "error: results が空です。graphhopper_verifier_set は task(subagent_type: 'graphhopper-verifier') を実際に呼んだ後にしか記録できません（self-graded完了を防ぐための機械的ゲート）。route=advisorでも最低1回、'general' lens で呼んでください。";
+    return "error: results が空です。graphhopper_verifier_set は verifier（graphhopper_verify または graphhopper_invoke）を実際に呼んだ後にしか記録できません（self-graded完了を防ぐための機械的ゲート）。route=advisorでも最低1回、'general' lens で呼んでください。";
   }
   const known: VerifierLens[] = [
     "requirement",
@@ -3247,6 +3271,193 @@ export function setEvalCmd(root: string, cmd: string): LoopState {
 export interface EvalResult {
   ok: boolean;
   output: string;
+}
+
+/* ==================================================================
+ * 診断ファイル（design g-mwiocibp 判断2）
+ * polish の verifier に渡す型・lint 診断の証拠。shell は execute から
+ * 呼べないため tool 側で実行・保存し、path を返す（path の渡し忘れ防止）。
+ * 実行するのは eval_cmd のみ（任意コマンドを許すと「通るだけのコマンド」で
+ * clean な証拠を捏造できる）。合否は eval_cmd の exit code で決める。
+ * ================================================================== */
+
+/** 診断の上限。idle eval は上限なしだが、tool call の中で走る diag は
+ * ハングするとモデルのバッチごと止めるため打ち切る */
+export const DIAG_TIMEOUT_MS = 600_000;
+/** 診断ファイルに残す出力の末尾行数（全文は読ませない） */
+export const DIAG_TAIL_LINES = 200;
+
+export function diagPath(root: string, goalId: string): string {
+  return join(dir(root), "tmp", `diag-${goalId}.txt`);
+}
+
+/** 診断ファイルの掃除（complete/clear時。退避diffと同じタイミング） */
+export function removeDiag(root: string, goalId: string): void {
+  if (!/^g-[0-9a-z]+$/.test(goalId)) return;
+  try {
+    unlinkSync(diagPath(root, goalId));
+  } catch {
+    // 存在しない・権限なし等は無視
+  }
+}
+
+export type DiagStatus = "passed" | "failed" | "unset" | "timeout";export interface DiagRun {
+  status: DiagStatus;
+  command: string | null;
+  exitCode: number | null;
+  output: string;
+}
+
+/** eval_cmd を実行する（diag 専用。fail_streak 等の eval 記録には触れない） */
+export async function runDiagCommand(
+  root: string,
+  cmd: string | null,
+  timeoutMs: number = DIAG_TIMEOUT_MS,
+): Promise<DiagRun> {
+  if (!cmd) return { status: "unset", command: null, exitCode: null, output: "" };
+  let proc: ReturnType<typeof Bun.spawn>;
+  try {
+    proc = Bun.spawn(["sh", "-c", cmd], {
+      cwd: root,
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "ignore",
+    });
+  } catch (e) {
+    return {
+      status: "failed",
+      command: cmd,
+      exitCode: null,
+      output: e instanceof Error ? e.message : String(e),
+    };
+  }
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    try {
+      proc.kill("SIGKILL");
+    } catch {
+      // kill失敗は無視（timeout の事実はファイルに残る）
+    }
+  }, timeoutMs);
+  const [out, err] = await Promise.all([
+    new Response(proc.stdout as ReadableStream).text(),
+    new Response(proc.stderr as ReadableStream).text(),
+  ]);
+  const code = await proc.exited;
+  clearTimeout(timer);
+  const output = [out, err].filter(Boolean).join("\n");
+  if (timedOut) return { status: "timeout", command: cmd, exitCode: null, output };
+  return { status: code === 0 ? "passed" : "failed", command: cmd, exitCode: code, output };
+}
+
+/** 診断結果を .graphhopper/tmp/diag-<goal>.txt に書く（verifier が読む）。
+ * diff 指紋は実行後に取る（eval が整形・生成物で作業ツリーを変えても、
+ * 直後の diff_stash と指紋が揃う）。 */
+export function writeDiagFile(
+  root: string,
+  goalId: string,
+  run: DiagRun,
+  diffHash: string | null,
+): { path: string; lines: number } {
+  const path = diagPath(root, goalId);
+  mkdirSync(dirname(path), { recursive: true });
+  const tail = run.output.split("\n").slice(-DIAG_TAIL_LINES).join("\n");
+  const body = [
+    `# diagnostics: ${goalId} (${new Date().toISOString()})`,
+    "",
+    "## 実行",
+    run.command ? `command: ${run.command}` : "command: (eval_cmd 未設定)",
+    `status: ${run.status}`,
+    run.exitCode === null ? "" : `exit=${run.exitCode}`,
+    `diff_hash: ${diffHash ?? "(VCS不能)"}`,
+    "",
+    run.status === "unset"
+      ? "## 診断未実行（eval_cmd 未設定）\n\nこの goal は機械判定のコマンドを設定していない。診断は証拠として使えない。"
+      : `## 出力（末尾 ${DIAG_TAIL_LINES} 行）\n\n${tail}`,
+    "",
+  ]
+    .filter((l) => l !== "")
+    .join("\n");
+  writeFileSync(path, body, "utf8");
+  return { path, lines: body.split("\n").length };
+}
+
+export function readDiagDiffHash(root: string, goalId: string): string | null {
+  try {
+    const raw = readFileSync(diagPath(root, goalId), "utf8");
+    const m = raw.match(/^diff_hash: ([0-9a-f]{40})$/m);
+    return m?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function diagExists(root: string, goalId: string): boolean {
+  return existsSync(diagPath(root, goalId));
+}
+
+/* ==================================================================
+ * verify の lens 結果 sidecar（design g-mwiocibp 判断3）
+ * graphhopper_verify が lens ごとの判定を保存し、2回目以降の呼び出しで
+ * 同じ diff 指紋なら合成して返す（モデルが前回の判定を書き写さないため）。
+ * diff が変わっていたら合成しない（古い判定を新しい diff の証拠にしない）。
+ * ================================================================== */
+
+export interface SavedLensResult {
+  lens: VerifierLens;
+  level: VerdictLevel;
+  target?: DriftTarget;
+  model?: string;
+  summary: string;
+}
+
+export interface SavedVerify {
+  diff_hash: string;
+  results: SavedLensResult[];
+}
+
+export function verifyResultsPath(root: string, goalId: string): string {
+  return join(dir(root), "tmp", `verify-${goalId}.json`);
+}
+
+export function removeVerifyResults(root: string, goalId: string): void {
+  if (!/^g-[0-9a-z]+$/.test(goalId)) return;
+  try {
+    unlinkSync(verifyResultsPath(root, goalId));
+  } catch {
+    // 存在しない・権限なし等は無視
+  }
+}
+
+export function readSavedVerify(root: string, goalId: string): SavedVerify | null {
+  try {
+    const raw = JSON.parse(readFileSync(verifyResultsPath(root, goalId), "utf8")) as unknown;
+    const v = raw as { diff_hash?: unknown; results?: unknown };
+    if (typeof v.diff_hash !== "string" || !Array.isArray(v.results)) return null;
+    return v as unknown as SavedVerify;
+  } catch {
+    return null;
+  }
+}
+
+export function writeSavedVerify(root: string, goalId: string, data: SavedVerify): void {
+  const path = verifyResultsPath(root, goalId);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(data, null, 2), "utf8");
+}
+
+/** 同じ diff 指紋の保存結果だけを合成する（違えば今回の結果だけを残す） */
+export function mergeSavedVerify(
+  prev: SavedVerify | null,
+  diffHash: string,
+  next: SavedLensResult[],
+): SavedLensResult[] {
+  if (!prev || prev.diff_hash !== diffHash) return next;
+  const byLens = new Map<VerifierLens, SavedLensResult>();
+  for (const r of prev.results) byLens.set(r.lens, r);
+  for (const r of next) byLens.set(r.lens, r);
+  return [...byLens.values()];
 }
 
 /** eval_cmd をシェルで実際に実行し、exit codeで機械的に合否判定する（自己申告に依存しない） */

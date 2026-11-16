@@ -24,16 +24,18 @@ graphhopper本体（Claude Code版）の3相グラフをopencodeに移植した�
 | 大diff整理 | simplify（route=polishのみ） | 提案のみ。適用はメイン |
 
 独立した問いなら並列に投げ、メインが統合する。判断は増やさない（council再発防止）。
-subagent呼び出しは `task(subagent_type: ...)` が既定（文脈共有・TUI可視）。
-**opencode 2.3.0 以降、`task()` はバックグラウンド**（即座にセッションIDを返し、結果は後で届く）。
-結果が届く前に `verifier_set` / `critic_set` / `usability_set` を呼ばないこと。
-同期が必要な場面（結果を待ってすぐ記録する）では `graphhopper_invoke` を使う（`opencode run` を待つ）。
-ただしagent→モデル束縛はセッション開始時に凍結されるため、(1)モデル割当を変えたら
+**opencode 2本立て**: `task()`/`subagent` は TUI からは呼べるが **`execute` のカタログには無い**。
+2.3.0 以降 `task()` はバックグラウンド（結果は後で届く）なので、判定を待って記録する経路
+（verifier）は `graphhopper_verify`（lens ごとに `opencode run` を待つ）か
+`graphhopper_invoke`（1件ずつ）を使う。**polish/verify の手順は Code Mode のレシピに固定済み**
+（refs/verifier.md）。設計レビュー（critic）・調査（researcher/librarian）・簡易な相談は
+`graphhopper_invoke` で同期実行できる（`task()` でもよいが、結果が届く前に `critic_set` /
+`usability_set` を呼ばないこと）。
+agent→モデル束縛はセッション開始時に凍結されるため、(1)モデル割当を変えたら
 新規セッションで始める（resume・再起動では直らない）(2)最初の子でDB上のモデルを
 確認してから本流しする。(2)で割当と違うモデルが動いたら、そのセッションでは
-`graphhopper_invoke` を使う（毎回configを読み直す）。枠切れ時（MiniMax等の
-quota枯渇）のみ `task()`＋親継承を許す（親がOAuthなら$0。結果のmodelは
-verifier_set等に明示し、復旧したらinvokeに戻す）。
+`graphhopper_invoke` を使う（毎回configを読み直す）。枠切れ時のみ `task()`＋親継承を許す
+（親がOAuthなら$0。結果のmodelは verifier_set 等に明示し、復旧したら invoke に戻す）。
 `graphhopper_invoke` の `model` は config の `model_allow` / `model_deny` で
 機械的に検査される。deny 一致は拒否して止まる（フォールバックしない）。高額モデル
 （Go の Kimi/GPT 等、月枠が小さいもの）は deny に入れる。
@@ -53,6 +55,8 @@ cascade の切替先（baseline/escalate/quality 等）も deny で拒否され�
   「変更した文書のパス」「diff の path」「意図ログ `.graphhopper/plans/<goal>.intent.md`
   （存在する場合だけ。無ければその旨を書く）」を渡す
 - 記録: `graphhopper_usability_set(level: clean|drift|skipped, reason)`
+- 順序: usability は `recipe: tail` の**前**に済ませる（指摘で文書を直すと差分が変わり、
+  diff ゲートの再検証が要るため）。`tail` は最終版で1回だけ回す
 - drift は直して `graphhopper_diff_stash` から再実行 / skipped は理由必須
   （例: 文言・typo のみで挙動や手順が変わらない）
 - 記録なし・drift・レビュー後の変更は `complete` が止まる。迂回は
@@ -154,40 +158,35 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
   design.md の「実装タスク列」セクションが designing→implementing 遷移時に todo ストアへ seed される。
   **未完了タスク（pending / in_progress）が残ると polish へ遷移できない**（eval_cmd 通過でも同じ）。
   完了が済んだら必ず `graphhopper_todo` を呼ぶこと
-- goal中のsource編集は `graphhopper_hash` でhash取得→ `graphhopper_edit`（hash検証付き）を使え。
-  素のedit/writeはフォールバック。拒否（throw）はhash再取得の合図
-- 詰まったら `task(subagent_type: "graphhopper-researcher")` で並列調査。
-  外部公式doc裏付けが必要なら `task(subagent_type: "graphhopper-librarian")` を使う
+- goal中のsource編集は `graphhopper_hash` でsha1取得→ `graphhopper_edit`（hash検証付き）を使え。
+  素のedit/writeはフォールバック。拒否（throw）はhash再取得の合図。複数ファイルは
+  [refs/implementing.md](refs/implementing.md) の `hash` → `edit` レシピで1バッチにできる
+- 詰まったら `graphhopper_invoke(agent: "graphhopper-researcher")` で並列調査。
+  外部公式doc裏付けが必要なら `graphhopper-librarian` を使う
 > 詳細は [refs/implementing.md](refs/implementing.md) を読め（implementingに入ったら必読）
 
 ### polish
 
-`graphhopper_router_check` の `route` に従う。**simplify は route=polish（大diff）のときだけ
-実行**する条件分岐 node（graph engineering）。simplify = 実装は奇麗か / verifier = 要件と合っているか。
+**Code Mode のレシピを実行する**（`execute` の中で `tools.*` を await する）。手順は散文で
+追わず、[refs/verifier.md](refs/verifier.md) の `recipe: start` と `recipe: tail` を上から順に貼る。
 
-#### simplify（route=polish のみ・単体 agent）
+- route=advisor（小diff）: `start` ＋ `tail` を連結して**1バッチ**
+- route=polish（大diff）: `start` を実行（simplify の提案が返る）→ 提案を適用 → `tail` を実行（2バッチ）
+- simplify は route=polish のときだけの条件分岐 node（`router_check` の `simplify` が真）。
+  agent は提案のみ、適用はメインが Read と edit で行う（interface・signature・新規依存は high 扱いで人間確認）
+- **第三者チェック（verifier）は省略できない**。`verifier_set` は results が空だと機械的に拒否する
+- `light`/`advised` で route=polish になると `router_check` が自動昇格し `escalated: true` を返す。
+  その場合レシピは打ち切られ、designing に戻る（design 肉付け＋critic 1回＋3lens）
+- ルール文書（`AGENTS.md` / `skills/**.md` / `src/agents.ts`）を変えた goal は、`tail` の前に
+  usability を済ませる（指摘で文書を直すと差分が変わり、diff ゲートの再検証が要るため）
 
-- **route=polish（diff > threshold）のときだけ**実行。route=advisor（小diff）はスキップ
-- メインが `graphhopper_diff_stash` でdiffを退避（verifierと同一ファイルを共用。再取得しない）
-  → 返却pathを渡す（inline 展開は main context を汚すので禁止）
-- `task(subagent_type: "graphhopper-simplify")` を**1回**呼ぶ（3レンズ統合の単体 agent）
-- **agent は提案者**: findings を `[severity] file:line — 指摘 (suggestion: ...)` で返すだけ。
-  **適用はメインが行う**（agent は edit と shell ツールが使えない）
-- **適用ルール**（メイン側）:
-  - 各 finding を該当ファイルで Read して裏付け（Iron Law）
-  - critical: 挙動不変・局所的なものだけ自動適用（typo / rename / 冗長中間変数削除）。
-    interface 変更・signature 変更・新規依存追加は high 扱いで人間に提示
-  - high: 人間に確認してから修正
-  - medium / note: 報告のみ（恒久記録はしない。graphhopper の goal は verifier clean で完結）
-- 適用後は `eval_cmd` を**再実行**して機械確認してから verifier に進む（simplify 後の未検証コードで done を出さない）
-- route は simplify 前の記録値に固定。simplify 後に diff を再測定して route を変えない
-
-> selectorの詳細は [refs/verifier.md](refs/verifier.md) を読め（polishに入ったら必読）
-> 詳細は [refs/verifier.md](refs/verifier.md) を読め（polishに入ったら必読）
+> レシピ（start / tail）、simplify の適用ルール、診断、モデル割当、usability、意図ログ、
+> diff ゲートは [refs/verifier.md](refs/verifier.md) を読め（polishに入ったら必読）
 
 ### done
 
-- `集約 clean` が記録されていれば `graphhopper_phase(phase: "done")` → `graphhopper_goal(action: "complete")`
+- `集約 clean` が記録されていれば `graphhopper_goal(action: "complete")` を呼ぶ（done への遷移は
+  completeGoal が行う。`phase(done)` を先に呼ぶと、complete が拒否されたときに done から戻れない）
 - self-graded完了は禁止（`graphhopper_goal(complete)` は直近verifierがcleanでないとエラーを返す）
 
 ## handoff（進捗メモで新しい会話へ引き継ぐ）

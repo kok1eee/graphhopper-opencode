@@ -65,6 +65,16 @@ export function text(content: string): { content: string } {
   return { content };
 }
 
+/** output スキーマ付きの tool result（Code Mode の structured return。design g-mwiocibp 判断1）。
+ * output は JS から読む値、content は人間向けの1〜2行。null のフィールドは省略する
+ * （JSON Schema の nullable を使わず、レシピ側は undefined として扱う）。 */
+export function structured<T extends object>(
+  output: T,
+  content: string,
+): { output: T; content: string } {
+  return { output, content };
+}
+
 /* ---------- known-sessions (handoff H2 代替) ----------
  * v2 の plugin SessionDomain に `list` は無いため、graphhopper_* tool が
  * 呼ばれた session を sidecar に記録し、handoff の候補列挙に使う。

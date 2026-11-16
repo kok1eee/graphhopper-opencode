@@ -9,7 +9,7 @@ global `~/.config/opencode/AGENTS.md` (CodeGraph / graft-first / rg制限) を�
   (v1 global plugin が `.graphhopper/` を誤ランタイムで駆動する)。
 - eval: `bun test && npx tsc --noEmit` (green を維持)。
 - graphhopper ループは止まらず最後まで進める:
-  - verifier が clean なら、同じターン内で `graphhopper_verifier_set`（`reason` 必須）→ `graphhopper_phase(done)` → `graphhopper_goal(complete)` まで続ける。途中で報告して止まらない。
+  - verifier が clean なら、同じターン内で `graphhopper_verifier_set`（`reason` 必須）→ `graphhopper_goal(complete)` まで続ける（done への遷移は complete が行う）。途中で報告して止まらない。
   - opencode では graphhopper は plugin のみ（`mcp.graphhopper` は無効。MCP コードは他 client 用に残す）。
   - `execute` 内の呼び方: graphhopper の tool は `tools.graphhopper_goal(...)` のようにフラットに呼ぶ（`tools.graphhopper.graphhopper_goal` ではない）。
   - `shell` は `execute` の中では呼べない。直接ツールとして呼ぶ。

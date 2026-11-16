@@ -10,6 +10,7 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -642,5 +643,427 @@ describe("plugin: handoff（ファイル書き出し型）", () => {
     await run(m, {}, "ses_a");
     expect((await run(m, { action: "clear" }, "ses_a")).content).toContain("削除");
     expect(readHandoff(root)).toBeNull();
+  });
+});
+
+describe("plugin: 構造化 return（design g-mwiocibp 判断1・5）", () => {
+  type Out = { output: Record<string, unknown>; content: string };
+  const outOf = (r: unknown): Out => r as Out;
+
+  /** git repo を作り、start 後に tracked ファイルを汚す（実効diffを作る） */
+  async function gitRootWithDiff(lines: number): Promise<string> {
+    const { $ } = await import("bun");
+    const root = tmpRoot();
+    await $`git init -q ${root}`.quiet();
+    await $`git -C ${root} config user.email t@t`.quiet();
+    await $`git -C ${root} config user.name t`.quiet();
+    writeFileSync(join(root, "a.txt"), "x\n");
+    writeFileSync(join(root, ".gitignore"), ".graphhopper/\n");
+    await $`git -C ${root} add -A`.quiet();
+    await $`git -C ${root} commit -qm init`.quiet();
+    startGoal(root, "structured", "s1");
+    writeFileSync(join(root, "a.txt"), Array(lines).fill("y").join("\n") + "\n");
+    return root;
+  }
+
+  test("hash は output で sha1 を返し、読めないファイルは throw する", async () => {
+    const root = tmpRoot();
+    writeFileSync(join(root, "a.txt"), "hello\n");
+    const m = opsTools(root);
+    const r = await m.get("graphhopper_hash")!.execute({ filePath: "a.txt" }, { sessionID: "s1" });
+    const o = outOf(r).output as { sha1: string; size: number; path: string; mtime: string };
+    expect(o.sha1).toMatch(/^[0-9a-f]{40}$/);
+    expect(o.path).toBe("a.txt");
+    expect(o.size).toBe(6);
+    expect(typeof o.mtime).toBe("string");
+    await expect(
+      m.get("graphhopper_hash")!.execute({ filePath: "nope.txt" }, { sessionID: "s1" }),
+    ).rejects.toThrow(/hash取得失敗/);
+  });
+
+  test("verifier_set は空 results を throw し、clean は output.level=clean", async () => {
+    const root = tmpRoot();
+    startGoal(root, "vs", "s1");
+    const m = opsTools(root);
+    const t = m.get("graphhopper_verifier_set")!;
+    await expect(t.execute({ results: [], reason: "x" }, { sessionID: "s1" })).rejects.toThrow(
+      /results が空です/,
+    );
+    const r = outOf(
+      await t.execute({ results: [{ lens: "general", level: "clean" }], reason: "ok" }, { sessionID: "s1" }),
+    );
+    expect(r.output["level"]).toBe("clean");
+    expect(r.output["target"]).toBeUndefined();
+    expect(r.output["lens"]).toEqual(["general"]);
+    expect(r.content).toContain("clean");
+  });
+
+  test("router_check は route/lenses/simplify を output で返す（polish）", async () => {
+    const root = await gitRootWithDiff(450);
+    const r = outOf(
+      await opsTools(root).get("graphhopper_router_check")!.execute({}, { sessionID: "s1" }),
+    );
+    expect(r.output["route"]).toBe("polish");
+    expect(r.output["escalated"]).toBe(false);
+    expect(r.output["lenses"]).toEqual(["requirement", "behavior", "progress"]);
+    expect(r.output["simplify"]).toBe(true);
+    expect(typeof r.output["diff_lines"]).toBe("number");
+    expect(r.content).toContain("route: polish");
+  });
+
+  test("router_check は small diff で advisor/general×1", async () => {
+    const root = await gitRootWithDiff(3);
+    const r = outOf(
+      await opsTools(root).get("graphhopper_router_check")!.execute({}, { sessionID: "s1" }),
+    );
+    expect(r.output["route"]).toBe("advisor");
+    expect(r.output["lenses"]).toEqual(["general"]);
+    expect(r.output["simplify"]).toBe(false);
+  });
+
+  test("router_check は light＋大diffで昇格し escalated=true（レシピ打ち切り）", async () => {
+    const { $ } = await import("bun");
+    const root = tmpRoot();
+    await $`git init -q ${root}`.quiet();
+    await $`git -C ${root} config user.email t@t`.quiet();
+    await $`git -C ${root} config user.name t`.quiet();
+    writeFileSync(join(root, "a.txt"), "x\n");
+    writeFileSync(join(root, ".gitignore"), ".graphhopper/\n");
+    await $`git -C ${root} add -A`.quiet();
+    await $`git -C ${root} commit -qm init`.quiet();
+    startGoal(root, "esc", "s1");
+    const { bindEntryRoute, getActive } = await import("./state");
+    bindEntryRoute(root, "light");
+    writeFileSync(join(root, "a.txt"), Array(450).fill("y").join("\n") + "\n");
+    const r = outOf(
+      await opsTools(root).get("graphhopper_router_check")!.execute({}, { sessionID: "s1" }),
+    );
+    expect(r.output["escalated"]).toBe(true);
+    expect(r.output["lenses"]).toEqual(["requirement", "behavior", "progress"]);
+    expect(r.content).toContain("自動昇格");
+    const active = getActive(root)!;
+    expect(active.state.phase).toBe("designing");
+    expect(active.state.entry_route).toBe("full");
+  });
+
+  test("diff_stash は path/lines/baseline を output で返す", async () => {
+    const root = await gitRootWithDiff(5);
+    const r = outOf(
+      await opsTools(root).get("graphhopper_diff_stash")!.execute({}, { sessionID: "s1" }),
+    );
+    expect(String(r.output["path"])).toContain(".graphhopper/tmp/gh-verify-");
+    expect(Number(r.output["lines"])).toBeGreaterThan(0);
+    expect(typeof r.output["baseline"]).toBe("string");
+    expect(readFileSync(String(r.output["path"]), "utf8")).toContain("+");
+  });
+});
+
+describe("plugin: graphhopper_diag（design g-mwiocibp 判断2）", () => {
+  type Out = { output: Record<string, unknown>; content: string };
+  const outOf = (r: unknown): Out => r as Out;
+
+  async function gitRoot(): Promise<string> {
+    const { $ } = await import("bun");
+    const root = tmpRoot();
+    await $`git init -q ${root}`.quiet();
+    await $`git -C ${root} config user.email t@t`.quiet();
+    await $`git -C ${root} config user.name t`.quiet();
+    writeFileSync(join(root, "a.txt"), "x\n");
+    writeFileSync(join(root, ".gitignore"), ".graphhopper/\n");
+    await $`git -C ${root} add -A`.quiet();
+    await $`git -C ${root} commit -qm init`.quiet();
+    return root;
+  }
+
+  test("eval_cmd 未設定なら unset のファイルを作り、eval のカウンタを動かさない", async () => {
+    const root = await gitRoot();
+    startGoal(root, "diag unset", "s1");
+    const before = readState(root);
+    const historyLines = () => {
+      const p = join(root, ".graphhopper", "history.jsonl");
+      return existsSync(p) ? readFileSync(p, "utf8").split("\n").filter(Boolean).length : 0;
+    };
+    const h0 = historyLines();
+    const r = outOf(await opsTools(root).get("graphhopper_diag")!.execute({}, { sessionID: "s1" }));
+    expect(r.output["status"]).toBe("unset");
+    const path = String(r.output["path"]);
+    expect(path).toContain(".graphhopper/tmp/diag-");
+    expect(readFileSync(path, "utf8")).toContain("診断未実行");
+    // eval の記録（fail_streak・指紋・eval_run イベント）に触れない
+    const after = readState(root);
+    expect(after.fail_streak).toBe(before.fail_streak);
+    expect(after.last_eval_fingerprint).toBe(before.last_eval_fingerprint);
+    expect(historyLines()).toBe(h0);
+  });
+
+  test("passed は exit_code=0 と diff_hash を返し、ファイルに出力を残す", async () => {
+    const root = await gitRoot();
+    startGoal(root, "diag pass", "s1");
+    // set_eval は core tool 側にあるため、state を直接使って確実に設定する
+    const { setEvalCmd } = await import("./state");
+    setEvalCmd(root, "echo diag-ok");
+    const r = outOf(await opsTools(root).get("graphhopper_diag")!.execute({}, { sessionID: "s1" }));
+    expect(r.output["status"]).toBe("passed");
+    expect(r.output["exit_code"]).toBe(0);
+    expect(String(r.output["diff_hash"])).toMatch(/^[0-9a-f]{40}$/);
+    const body = readFileSync(String(r.output["path"]), "utf8");
+    expect(body).toContain("diag-ok");
+    expect(body).toContain("command: echo diag-ok");
+  });
+
+  test("failed は exit_code を返し、tail に出力が入る", async () => {
+    const root = await gitRoot();
+    startGoal(root, "diag fail", "s1");
+    const { setEvalCmd } = await import("./state");
+    setEvalCmd(root, "echo boom >&2; exit 3");
+    const r = outOf(await opsTools(root).get("graphhopper_diag")!.execute({}, { sessionID: "s1" }));
+    expect(r.output["status"]).toBe("failed");
+    expect(r.output["exit_code"]).toBe(3);
+    expect(String(r.output["tail"])).toContain("boom");
+    expect(r.content).toContain("診断失敗");
+  });
+
+  test("timeout は status=timeout で理由を残す", async () => {
+    const root = await gitRoot();
+    startGoal(root, "diag timeout", "s1");
+    const st = await import("./state");
+    const run = await st.runDiagCommand(root, "sleep 5", 100);
+    expect(run.status).toBe("timeout");
+    expect(run.exitCode).toBeNull();
+    const w = st.writeDiagFile(root, st.getActive(root)!.goal.id, run, null);
+    expect(readFileSync(w.path, "utf8")).toContain("status: timeout");
+  });
+
+  test("complete で diag と verify の sidecar が消える", async () => {
+    const root = await gitRoot();
+    const started = startGoal(root, "diag cleanup", "s1");
+    const gid = started.goal.id;
+    const st = await import("./state");
+    st.writeDiagFile(root, gid, { status: "passed", command: "true", exitCode: 0, output: "" }, null);
+    st.writeSavedVerify(root, gid, { diff_hash: "x", results: [] });
+    expect(existsSync(st.diagPath(root, gid))).toBe(true);
+    expect(existsSync(st.verifyResultsPath(root, gid))).toBe(true);
+    st.clearActiveGoal(root);
+    expect(existsSync(st.diagPath(root, gid))).toBe(false);
+    expect(existsSync(st.verifyResultsPath(root, gid))).toBe(false);
+  });
+});
+
+describe("plugin: verify の sidecar 合成（design g-mwiocibp 判断3）", () => {
+  test("同じ diff 指紋のときだけ前回結果を合成する", async () => {
+    const st = await import("./state");
+    const prev = {
+      diff_hash: "h1",
+      results: [
+        { lens: "requirement" as const, level: "clean" as const, summary: "a" },
+        { lens: "behavior" as const, level: "clean" as const, summary: "b" },
+      ],
+    };
+    const next = [
+      { lens: "behavior" as const, level: "drift" as const, target: "implementing" as const, summary: "b2" },
+      { lens: "progress" as const, level: "clean" as const, summary: "c" },
+    ];
+    const merged = st.mergeSavedVerify(prev, "h1", next);
+    expect(merged.map((r) => r.lens).sort()).toEqual(["behavior", "progress", "requirement"]);
+    expect(merged.find((r) => r.lens === "behavior")!.level).toBe("drift");
+    // 指紋が違えば合成しない（古い判定を新しい diff の証拠にしない）
+    expect(st.mergeSavedVerify(prev, "h2", next).map((r) => r.lens)).toEqual([
+      "behavior",
+      "progress",
+    ]);
+    expect(st.mergeSavedVerify(null, "h1", next).map((r) => r.lens)).toEqual([
+      "behavior",
+      "progress",
+    ]);
+  });
+});
+
+describe("plugin: graphhopper_verify（design g-mwiocibp 判断3・4）", () => {
+  type Out = { output: Record<string, unknown>; content: string };
+  const outOf = (r: unknown): Out => r as Out;
+
+  /** fake verifier バイナリ。lens ごとに stdout を返す（prompt から lens を判別） */
+  function fakeVerifier(dir: string, body: string): string {
+    const bin = join(dir, "fake-opencode");
+    writeFileSync(bin, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+    return bin;
+  }
+
+  async function readyGoal(cmd = "true"): Promise<{ root: string; gid: string }> {
+    const { $ } = await import("bun");
+    const root = tmpRoot();
+    await $`git init -q ${root}`.quiet();
+    await $`git -C ${root} config user.email t@t`.quiet();
+    await $`git -C ${root} config user.name t`.quiet();
+    writeFileSync(join(root, "a.txt"), "x\n");
+    writeFileSync(join(root, ".gitignore"), ".graphhopper/\n");
+    await $`git -C ${root} add -A`.quiet();
+    await $`git -C ${root} commit -qm init`.quiet();
+    const started = startGoal(root, "verify", "s1");
+    const gid = started.goal.id;
+    const st = await import("./state");
+    writeFileSync(planPath(root, gid), compliantDesignDoc({ title: "verify", tasks: ["- [ ] T1（判断1）: x"] }), "utf8");
+    writeFileSync(join(root, "a.txt"), "x\n" + Array(5).fill("y").join("\n") + "\n");
+    st.setEvalCmd(root, cmd);
+    const m = opsTools(root);
+    await m.get("graphhopper_diag")!.execute({}, { sessionID: "s1" });
+    await m.get("graphhopper_diff_stash")!.execute({}, { sessionID: "s1" });
+    return { root, gid };
+  }
+
+  test("clean 判定を読んで results を返し、missing は空", async () => {
+    const dir = tmpRoot();
+    const bin = fakeVerifier(dir, `echo "findings: []"; echo '\`\`\`json'; echo '{"level":"clean","summary":"driftなし"}'; echo '\`\`\`'`);
+    const prev = process.env["GH_OPENCODE_BIN"];
+    process.env["GH_OPENCODE_BIN"] = bin;
+    try {
+      const { root } = await readyGoal();
+      const r = outOf(await opsTools(root).get("graphhopper_verify")!.execute({ delayMs: 0 }, { sessionID: "s1" }));
+      const results = r.output["results"] as { lens: string; level: string }[];
+      expect(results).toHaveLength(1);
+      expect(results[0]).toMatchObject({ lens: "general", level: "clean" });
+      expect(r.output["missing"]).toEqual([]);
+      expect(String(r.output["diff_hash"])).toMatch(/^[0-9a-f]{40}$/);
+      expect(r.content).toContain("general=clean");
+      // 返した results は verifier_set にそのまま通る
+      const vs = outOf(
+        await opsTools(root).get("graphhopper_verifier_set")!.execute(
+          { results, reason: "driftなし" },
+          { sessionID: "s1" },
+        ),
+      );
+      expect(vs.output["level"]).toBe("clean");
+    } finally {
+      if (prev === undefined) delete process.env["GH_OPENCODE_BIN"];
+      else process.env["GH_OPENCODE_BIN"] = prev;
+    }
+  });
+
+  test("drift は target を取り、bodies に本文が入る（clean の本文は含めない）", async () => {
+    const dir = tmpRoot();
+    const bin = fakeVerifier(dir, `echo "finding: a.txt:1 ズレ"; echo '\`\`\`json'; echo '{"level":"drift","target":"implementing","summary":"1件"}'; echo '\`\`\`'`);
+    const prev = process.env["GH_OPENCODE_BIN"];
+    process.env["GH_OPENCODE_BIN"] = bin;
+    try {
+      const { root } = await readyGoal();
+      const r = outOf(await opsTools(root).get("graphhopper_verify")!.execute({ delayMs: 0 }, { sessionID: "s1" }));
+      expect((r.output["results"] as { target?: string }[])[0]?.target).toBe("implementing");
+      const bodies = r.output["bodies"] as { lens: string; body: string }[];
+      expect(bodies[0]?.lens).toBe("general");
+      expect(bodies[0]?.body).toContain("ズレ");
+    } finally {
+      if (prev === undefined) delete process.env["GH_OPENCODE_BIN"];
+      else process.env["GH_OPENCODE_BIN"] = prev;
+    }
+  });
+
+  test("フェンス無し・target 無しの drift は missing に入り、記録に進めない", async () => {
+    const dir = tmpRoot();
+    const bin = fakeVerifier(dir, `echo "drift maybe"`);
+    const prev = process.env["GH_OPENCODE_BIN"];
+    process.env["GH_OPENCODE_BIN"] = bin;
+    try {
+      const { root } = await readyGoal();
+      const r = outOf(await opsTools(root).get("graphhopper_verify")!.execute({ delayMs: 0 }, { sessionID: "s1" }));
+      expect(r.output["results"]).toEqual([]);
+      const missing = r.output["missing"] as { lens: string; reason: string }[];
+      expect(missing[0]?.lens).toBe("general");
+      expect(missing[0]?.reason).toContain("json");
+      expect(r.content).toContain("判定不能");
+    } finally {
+      if (prev === undefined) delete process.env["GH_OPENCODE_BIN"];
+      else process.env["GH_OPENCODE_BIN"] = prev;
+    }
+  });
+
+  test("前提: diag か diff_stash が無ければ throw、退避後に編集しても throw", async () => {
+    const { $ } = await import("bun");
+    const root = tmpRoot();
+    await $`git init -q ${root}`.quiet();
+    await $`git -C ${root} config user.email t@t`.quiet();
+    await $`git -C ${root} config user.name t`.quiet();
+    writeFileSync(join(root, "a.txt"), "x\n");
+    writeFileSync(join(root, ".gitignore"), ".graphhopper/\n");
+    await $`git -C ${root} add -A`.quiet();
+    await $`git -C ${root} commit -qm init`.quiet();
+    const gid = startGoal(root, "verify pre", "s1").goal.id;
+    writeFileSync(planPath(root, gid), compliantDesignDoc({ title: "v", tasks: ["- [ ] T1（判断1）: x"] }), "utf8");
+    writeFileSync(join(root, "a.txt"), "x\ny\n");
+    const m = opsTools(root);
+    await expect(m.get("graphhopper_verify")!.execute({}, { sessionID: "s1" })).rejects.toThrow(
+      /diff_stash/,
+    );
+    await m.get("graphhopper_diag")!.execute({}, { sessionID: "s1" });
+    await m.get("graphhopper_diff_stash")!.execute({}, { sessionID: "s1" });
+    // 退避後に編集したら止まる（古い diff を検証しない）
+    writeFileSync(join(root, "a.txt"), "x\ny\nz\n");
+    await expect(m.get("graphhopper_verify")!.execute({}, { sessionID: "s1" })).rejects.toThrow(
+      /編集された/,
+    );
+    // diag → diff_stash をやり直せば通る（前提の順序が固定されている）
+    await m.get("graphhopper_diag")!.execute({}, { sessionID: "s1" });
+    await m.get("graphhopper_diff_stash")!.execute({}, { sessionID: "s1" });
+    const dir = tmpRoot();
+    const bin = fakeVerifier(dir, `echo '\`\`\`json'; echo '{"level":"clean","summary":"ok"}'; echo '\`\`\`'`);
+    const prev = process.env["GH_OPENCODE_BIN"];
+    process.env["GH_OPENCODE_BIN"] = bin;
+    try {
+      const r = outOf(await m.get("graphhopper_verify")!.execute({ delayMs: 0 }, { sessionID: "s1" }));
+      expect(r.output["missing"]).toEqual([]);
+    } finally {
+      if (prev === undefined) delete process.env["GH_OPENCODE_BIN"];
+      else process.env["GH_OPENCODE_BIN"] = prev;
+    }
+  });
+});
+
+describe("verify: prompt 組み立てと判定の読み取り（純粋層）", () => {
+  test("lens 指示文＋path＋出力契約が入り、intent は requirement/general だけ", async () => {
+    const v = await import("./verify");
+    const root = tmpRoot();
+    const paths = {
+      designPath: "/r/design.md",
+      diffPath: "/r/diff.txt",
+      diagPath: "/r/diag.txt",
+      intentPath: "/r/intent.md",
+    };
+    const req = v.buildLensPrompt(root, "g-1", "requirement", v.lensPaths(root, "g-1", "requirement", paths));
+    expect(req).toContain("/r/design.md");
+    expect(req).toContain("/r/diff.txt");
+    expect(req).toContain("/r/diag.txt");
+    expect(req).toContain("出力形式（必須）");
+    // intent.md が実在しないので path は載らない（存在する場合だけ渡す）
+    expect(req).not.toContain("intent（意図ログ）");
+    const prog = v.buildLensPrompt(root, "g-1", "progress", v.lensPaths(root, "g-1", "progress", paths));
+    expect(prog).not.toContain("intent（意図ログ）");
+    expect(v.lensTakesIntent("general")).toBe(true);
+    expect(v.lensTakesIntent("behavior")).toBe(false);
+  });
+
+  test("parseLensVerdict: clean/drift/不正を切り分ける", async () => {
+    const v = await import("./verify");
+    expect(v.parseLensVerdict('foo\n```json\n{"level":"clean","summary":"ok"}\n```')).toEqual({
+      ok: true,
+      verdict: { level: "clean", summary: "ok" },
+    });
+    expect(
+      v.parseLensVerdict('```json\n{"level":"drift","target":"design","summary":"s"}\n```'),
+    ).toEqual({ ok: true, verdict: { level: "drift", target: "design", summary: "s" } });
+    expect(v.parseLensVerdict("no fence")).toMatchObject({ ok: false });
+    expect(v.parseLensVerdict('```json\n{"level":"drift","summary":"s"}\n```')).toMatchObject({
+      ok: false,
+    });
+    expect(v.parseLensVerdict('```json\n{"level":"clean"}\n```')).toMatchObject({ ok: false });
+    expect(v.parseLensVerdict('```json\n{"level":"maybe","summary":"s"}\n```')).toMatchObject({
+      ok: false,
+    });
+  });
+
+  test("invokeFailure: invoke 自身の失敗印だけを拾う（本文の error: 行は無視）", async () => {
+    const v = await import("./verify");
+    expect(v.invokeFailure("error: prompt too long (13000 > 12000)")).toBeTruthy();
+    expect(v.invokeFailure("本文\nerror: opencode run exited with code 143\nstderr")).toBeTruthy();
+    // verifier が findings の中で "error:" 行を引用しても判定不能にしない
+    expect(v.invokeFailure("finding: src/a.ts:1 で error: を握り潰す\n```json\n{}")).toBeNull();
   });
 });

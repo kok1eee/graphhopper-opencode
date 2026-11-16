@@ -10,6 +10,41 @@
   - 外部問いが内部findingsに依存するなら**直列**にする（researcherで対象ライブラリ・版を
     特定してからlibrarianにdocを引かせる。逆順・同時投げは版ズレの温床）
   - researcherは外部調査を自分でやらずlibrarian委譲を提案し、librarianは判断を含めない（境界の二重化）
+- **source編集は `hash` → `edit` のレシピで回す**（hash検証付き。素のedit/writeはフォールバック）。
+  `edit` の拒否は throw なので、**編集ごとに捕まえて「適用済み」と「失敗」を返す**
+  （途中まで適用された状態を取り違えない）。複数ファイルを1バッチで直せる:
+
+  ```js
+  // recipe: edit（implementing。execute に貼る）
+  const edits = [
+    { filePath: "src/a.ts", oldString: "…", newString: "…" },
+    { filePath: "src/b.ts", oldString: "…", newString: "…" },
+  ];
+  const applied = [];
+  for (const e of edits) {
+    try {
+      const h = await tools.graphhopper_hash({ filePath: e.filePath });
+      const r = await tools.graphhopper_edit({
+        filePath: e.filePath,
+        expectedHash: h.sha1,
+        oldString: e.oldString,
+        newString: e.newString,
+      });
+      // graphhopper_edit は output スキーマ無し＝文字列が返る。no-goal 時だけ error 文字列
+      if (typeof r === "string" && r.startsWith("error:")) throw new Error(r);
+      applied.push(e.filePath);
+    } catch (err) {
+      return { applied, failed: { filePath: e.filePath, reason: String(err?.message ?? err) } };
+    }
+  }
+  return { applied };
+  ```
+
+  - 同じファイルを続けて編集するときは、レシピのループが編集ごとに `hash` を取り直すので、
+    そのまま edits に並べてよい（ループの外で何か足す必要は無い）
+  - `failed` が返ったら applied の範囲だけ効いている。原因（hash 不一致＝別の変更が入った／
+    oldString が複数一致）を直して残りを再実行する
+  - `reason` が `no active goal` のときは、goal 外の作業なのでそのファイルだけ素の edit に落としてよい
 - **進捗タスクの完了申告（`graphhopper_todo`）**: design.md の「実装タスク列」セクションが
   designing→implementing 遷移時に todo ストア（`.graphhopper/todos/<goalId>.json`）へ seed される。
   タスクを1つ終えるたびに `graphhopper_todo(action: "done", id: "tN")` で申告する。
@@ -36,6 +71,7 @@
     - diff 停滞（`stuck_diff_stall` 既定4。ワーキングコピー差分が変わらない idle eval の連続。
       差分変化・eval pass でリセット。`checkStuck` で判定＝進捗停滞系）
   - 連続失敗が `max_eval_fails`（既定6）に達すると相談ではなく goal が pause する（giveUp）。修正して resume せよ
-- 全タスク実施したら `graphhopper_router_check` を呼ぶ（diffサイズを機械測定してrouteを決める）
+- 全タスクを completed か cancelled にしたら、refs/verifier.md の `recipe: start` を実行する
+  （`router_check` はレシピの中で呼ばれる。単独で先に呼ぶ必要はない）
 - goal start時に初期脏れ（前goal未コミット分）を自動snapshotし、遷移判定は実効diff（測定－初期値）で行う。
   statusの `initial_dirt` で確認可。実効0時は「未実装」と断定せず `router_check` 手動確認も可

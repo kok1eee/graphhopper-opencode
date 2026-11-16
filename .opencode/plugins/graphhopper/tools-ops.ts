@@ -10,19 +10,30 @@ import {
   effectivePhaseAction,
   goalResumeContext,
   policyDocsChanged,
-  readGraphhopperHash,
+  readGraphhopperHashValue,
   runGraphhopperEdit,
 } from "../../../src/gate";
 import { INTERNAL_PROMPT_METADATA_KEY } from "../../../src/entry-decide";
 import { latestSummary } from "../../../src/compaction-store";
 import * as handoff from "../../../src/handoff";
-import { invokeStructured } from "../../../src/invoke";
+import { MAX_TIMEOUT_MS, invokeStructured, resolveModel } from "../../../src/invoke";
 import { formatScoreboard } from "../../../src/scoreboard-format";
 import { catalogPolicyWarning } from "../../../src/bake";
+import { buildLensPrompt, invokeFailure, lensPaths, parseLensVerdict } from "../../../src/verify";
 import * as state from "../../../src/state";
-import { knownSessions, noteSession, S, text, type Gh } from "./shared";
+import { knownSessions, noteSession, S, structured, text, type Gh } from "./shared";
 
 type Ctx = { sessionID: string };
+
+/** verify の lens 1実行分（判定が読めなければ level なし＋reason） */
+interface LensRun {
+  lens: state.VerifierLens;
+  level?: state.VerdictLevel;
+  target?: state.DriftTarget;
+  summary?: string;
+  body: string;
+  reason?: string;
+}
 
 function sess(gh: Gh, context: Ctx): string {
   const id = String(context.sessionID ?? "");
@@ -39,11 +50,28 @@ export function registerOpsTools(
   editor.add({
     name: "graphhopper_router_check",
     description:
-      "diffサイズを機械測定してrouteを決める。route=advisor（小diff・graphhopper-verifierを1回だけ呼ぶ）/ route=polish（大diff・3lensでverifier fan-out）。implementing完了時、polishフェーズに入る前に呼ぶ。self-graded完了防止のため、advisorでも第三者チェック（verifier呼び出し）は省略できない",
+      "diffサイズを機械測定してrouteを決める（advisor=小diff: verifier general×1 / polish=大diff: simplify＋verifier 3lens）。implementing完了時に1回呼ぶ。返り値の lenses / simplify / escalated に従って refs/verifier.md のレシピを実行する（散文は読まなくてよい）。escalated=true ならその場でdesigningに巻き戻るので、レシピは打ち切る。self-graded完了防止のため、advisorでも第三者チェック（verifier）は省略できない",
     input: S.obj({}, []),
+    output: S.obj(
+      {
+        route: S.enumOf(["advisor", "polish"]),
+        diff_lines: S.num("実効diffの行数（初期dirty除外）"),
+        threshold: S.num("route判定の閾値"),
+        lenses: S.arrOf(
+          S.enumOf(["requirement", "behavior", "progress", "general"]),
+          "verifier に渡す lens（この編成で graphhopper_verifier_set が通る）",
+        ),
+        simplify: S.bool("simplify を先に実行するか（route=polish のみ true）"),
+        escalated: S.bool("light/advised→full の自動昇格が起きたか（true なら designing に戻る）"),
+        deep: S.bool("RISK_PATHS に触れたか（参考情報）"),
+        deep_reason: S.optStr("deep=true の理由（触れたriskファイル）"),
+        next: S.str("次にやること（1行）"),
+      },
+      ["route", "diff_lines", "threshold", "lenses", "simplify", "escalated", "deep", "next"],
+    ),
     execute: async () => {
       const active = state.getActive(root);
-      if (!active) return text("error: no active goal");
+      if (!active) throw new Error("no active goal");
       const cfg = state.readConfig(root);
       const baseline = await state.resolveBaseline($, root, active.state);
       const measured = await state.measureDiffLines($, root, baseline);
@@ -51,33 +79,43 @@ export function registerOpsTools(
       const route: state.RouterRoute = diffLines > cfg.router_threshold_lines ? "polish" : "advisor";
       const recorded = await state.recordRouterCheckWithRisk($, root, baseline, diffLines, route);
       const pre = state.getActive(root);
-      if (
+      const willEscalate =
         (pre?.state.entry_route === "light" || pre?.state.entry_route === "advised") &&
-        route === "polish"
-      ) {
+        route === "polish";
+      let next: string;
+      if (willEscalate) {
         const { ESCALATE_NEXT } = await import("../../../src/gate");
         state.escalateEntryRoute(root);
-        return text(
-          [
-            `diff_lines: ${diffLines} (threshold: ${cfg.router_threshold_lines})`,
-            "route: polish + light/advised→full自動昇格（designingに巻き戻し）。",
-            ESCALATE_NEXT,
-          ].join("\n"),
-        );
+        next = ESCALATE_NEXT;
+      } else if (route === "polish") {
+        next = "refs/verifier.md の polish レシピ: diff_stash → simplify → 適用 → diag → diff_stash → verify → verifier_set";
+      } else {
+        next = "refs/verifier.md の advisor レシピ: diag → diff_stash → verify → verifier_set → phase → goal";
       }
-      return text(
+      const after = state.getActive(root);
+      const plan = state.planVerifier({
+        route,
+        entryRoute: after?.state.entry_route ?? null,
+        escalated: !!after?.state.escalated_at,
+      });
+      return structured(
+        {
+          route,
+          diff_lines: diffLines,
+          threshold: cfg.router_threshold_lines,
+          lenses: plan.lenses,
+          simplify: plan.simplify,
+          escalated: willEscalate,
+          deep: recorded.router.deep,
+          ...(recorded.router.deep_reason ? { deep_reason: recorded.router.deep_reason } : {}),
+          next,
+        },
         [
-          `diff_lines: ${diffLines} (threshold: ${cfg.router_threshold_lines})`,
-          `route: ${route}`,
-          recorded.router.deep
-            ? `deep: ${recorded.router.deep_reason} — behavior lens（polish時）／general lens（advisor時）は休止中（verifier既定モデルの上書きは不要。詳細はSKILL refs/verifier.md）`
-            : null,
-          route === "polish"
-            ? "次: task(subagent_type: 'graphhopper-verifier') をrequirement/behavior/progressの3lensで呼び、graphhopper_verifier_setで記録する"
-            : "次: task(subagent_type: 'graphhopper-verifier') を1回、'general' lens（3観点を統合したレビュー）で呼び、graphhopper_verifier_set(results: [{lens: 'general', level}], reason: '要約1〜3文')で記録する（reason必須。自己レビューだけでの完了は不可）",
-        ]
-          .filter(Boolean)
-          .join("\n"),
+          `route: ${route} (${diffLines} lines, threshold ${cfg.router_threshold_lines})`,
+          `lenses: ${plan.lenses.join(",")}${plan.simplify ? " / simplify: yes" : ""}${
+            willEscalate ? " / 自動昇格してdesigningに戻った（レシピ打ち切り）" : ""
+          }`,
+        ].join("\n"),
       );
     },
   });
@@ -85,21 +123,27 @@ export function registerOpsTools(
   editor.add({
     name: "graphhopper_diff_stash",
     description:
-      "verifier fan-out用のdiff退避。baselineからの全文diffを.graphhopper/tmpに1回だけ置きpathを返す（3 lensへのinline 3重展開防止。子権限で読めるようrepo内配置）。router_check後に呼ぶ",
+      "verifier fan-out用のdiff退避。baselineからの全文diffを.graphhopper/tmpに1回だけ置きpathを返す（3 lensへのinline 3重展開防止。子権限で読めるようrepo内配置）。verify の直前に呼ぶ（simplify適用後・編集後は必ず取り直す）",
     input: S.obj({}, []),
+    output: S.obj(
+      {
+        path: S.str("退避したdiffのpath（verify に渡す。子セッションから読める）"),
+        lines: S.num("退避したdiffの行数"),
+        baseline: S.str("比較元のrev"),
+      },
+      ["path", "lines", "baseline"],
+    ),
     execute: async () => {
       const active = state.getActive(root);
-      if (!active) return text("error: no active goal");
+      if (!active) throw new Error("no active goal");
       const baseline = await state.resolveBaseline($, root, active.state);
       const stashed = await state.stashDiff($, root, baseline, active.goal.id);
-      if (!stashed) return text("error: diff取得失敗（VCS不在またはbaseline不正）");
+      if (!stashed) throw new Error("diff取得失敗（VCS不在またはbaseline不正）");
       // verifier が読む入力を固定する（design g-mwd3n5bo）。全文 diff の指紋を退避
       state.setStashDiffHash(root, await state.computeDiffHash($, root, baseline));
-      return text(
-        [
-          `diff stashed: ${stashed.path} (${stashed.lines} lines)`,
-          "各lensにはpathを渡し、inline展開禁止。読むのは差分範囲＋疑義点のみに留めよ。",
-        ].join("\n"),
+      return structured(
+        stashed,
+        `diff stashed: ${stashed.path} (${stashed.lines} lines)`,
       );
     },
   });
@@ -107,7 +151,7 @@ export function registerOpsTools(
   editor.add({
     name: "graphhopper_verifier_set",
     description:
-      'polish/advisorのverifier結果を記録する。各lensの結果をresultsに詰めるとlevel/targetは機械集約される（drift かつ target=implementing なら implementing に巻き戻し可能。target=design/requirementsは人間のhand-back待ち）。self-graded完了防止のため、resultsが空（=task(graphhopper-verifier)を一度も呼んでいない）場合はエラーになる。呼び出し例: {"results":[{"lens":"general","level":"clean"}],"reason":"要約1〜3文"}（キーは results[].lens / results[].level / results[].target / reason / model のみ。charter・verdict・note というキーは無い）',
+      'verifier結果を記録する（polish/advisor共通・唯一の記録入口）。resultsを渡すとlevel/targetは機械集約される（drift かつ target=implementing なら implementing に巻き戻し可能。target=design/requirementsは人間のhand-back待ち）。self-graded完了防止のため、resultsが空（=verifierを一度も呼んでいない）場合はエラーになる。graphhopper_verify の返り値 out.results をそのまま渡せる（呼び出し例: {"results":[{"lens":"general","level":"clean"}],"reason":"要約1〜3文"}）。キーは results[].lens / results[].level / results[].target / results[].model / reason / model のみ',
     input: S.obj(
       {
         results: S.arrOf(
@@ -120,12 +164,21 @@ export function registerOpsTools(
             },
             ["lens", "level"],
           ),
-          "実際にtask(graphhopper-verifier)を呼んで得た各lensの結果。route=advisorならgeneral 1件、route=polishならrequirement/behavior/progressの3件。level/targetの最終決定は機械集約（state.aggregateVerdicts）で行う",
+          "実際にverifier（graphhopper_verify または graphhopper_invoke）を呼んで得た各lensの結果。route=advisorならgeneral 1件、route=polishならrequirement/behavior/progressの3件。level/targetの最終決定は機械集約（state.aggregateVerdicts）で行う",
         ),
         reason: S.str("集約結果の要約（1〜3文。監査証跡のため必須）。採用基準自体は機械集約される"),
         model: S.optStr("判定を実行したモデル（例: x/provider-model。省略時はconfig既定で補完。成績表の帰属に使う）"),
       },
       ["results", "reason"],
+    ),
+    output: S.obj(
+      {
+        level: S.enumOf(["clean", "drift"], "機械集約された最終判定"),
+        target: S.enumOf(["implementing", "design", "requirements"], "drift時の巻き戻し先（clean時は省略）"),
+        lens: S.arrOf(S.str("lens名"), "記録した lens"),
+        next: S.str("次にやること（1行）"),
+      },
+      ["level", "lens", "next"],
     ),
     execute: async (input: unknown) => {
       const args = input as {
@@ -139,7 +192,7 @@ export function registerOpsTools(
         entryRoute: active?.state.entry_route ?? null,
         escalated: !!active?.state.escalated_at,
       });
-      if (rejected) return text(rejected);
+      if (rejected) throw new Error(rejected.replace(/^error:\s*/, ""));
       const decided = state.aggregateVerdicts(results);
       // 検証した差分の指紋（stash 時点。無ければ現在の全文 diff）
       const baseline = await state.resolveBaseline($, root, active?.state ?? null);
@@ -155,19 +208,30 @@ export function registerOpsTools(
         models: results.map((r) => r.model ?? args.model ?? null),
         diff_hash: diffHash,
       });
+      const lens = results.map((r) => r.lens);
       if (result.last_verifier?.level === "clean") {
-        return text(
-          "verifier verdict: clean\n同じターン内で続けること: graphhopper_phase(phase: 'done') → graphhopper_goal(action: 'complete')。途中で報告して止まらない。",
+        const next = "graphhopper_goal(action: 'complete')（done への遷移は complete が行う）";
+        return structured(
+          { level: "clean" as const, lens, next },
+          `verifier verdict: clean\n同じターン内で続けること: ${next}。途中で報告して止まらない。`,
         );
       }
-      return text(
+      const next =
+        decided.target === "implementing"
+          ? "graphhopper_phase(phase: 'implementing') で巻き戻す"
+          : "人間の hand-back を待つ（design/requirementsは自動で戻らない）";
+      return structured(
+        {
+          level: "drift" as const,
+          ...(decided.target ? { target: decided.target } : {}),
+          lens,
+          next,
+        },
         [
-          `verifier verdict: drift -> ${decided.target}`,
+          `verifier verdict: drift -> ${decided.target ?? "-"}`,
           `reason: ${args.reason}`,
           `lens: ${results.map((r) => `${r.lens}=${r.level}`).join(",")}`,
-          decided.target === "implementing"
-            ? "次: graphhopper_phase(phase: 'implementing') で巻き戻し"
-            : "次: 人間の hand-back を待つ（design/requirementsは自動で戻らない）",
+          `次: ${next}`,
         ].join("\n"),
       );
     },
@@ -255,12 +319,253 @@ export function registerOpsTools(
   });
 
   editor.add({
+    name: "graphhopper_diag",
+    description:
+      "型・lint 診断を1回実行し .graphhopper/tmp/diag-<goal>.txt に保存して path を返す（verifier の添付証拠。実行するのは eval_cmd のみ）。status=failed/timeout なら verifier を呼ばずに止まる（直すものがある証拠）。unset（eval_cmd 未設定）でもファイルは作り verifier は走る（診断の不在を clean の根拠にしない）。diff_stash の直前に呼ぶ",
+    input: S.obj({}, []),
+    output: S.obj(
+      {
+        path: S.str("診断ファイルのpath（verify が自動で読む。プロンプトに手書きしない）"),
+        status: S.enumOf(["passed", "failed", "unset", "timeout"]),
+        command: S.optStr("実行した eval_cmd（未設定なら省略）"),
+        exit_code: S.num("終了コード（timeout・起動失敗時は省略）"),
+        tail: S.str("出力の末尾（20行まで。失敗時にそのまま報告できる）"),
+        diff_hash: S.optStr("実行後のdiff指紋（VCS不能なら省略）"),
+      },
+      ["path", "status", "tail"],
+    ),
+    execute: async () => {
+      const active = state.getActive(root);
+      if (!active) throw new Error("no active goal");
+      const cmd = active.state.eval_cmd ?? null;
+      const run = await state.runDiagCommand(root, cmd);
+      const baseline = await state.resolveBaseline($, root, active.state);
+      const diffHash = await state.computeDiffHash($, root, baseline);
+      const written = state.writeDiagFile(root, active.goal.id, run, diffHash);
+      const tail = run.output.split("\n").slice(-20).join("\n").trim();
+      const label = {
+        passed: "診断passed",
+        failed: `診断失敗（exit ${run.exitCode ?? "?"}）`,
+        timeout: "診断失敗（timeout）",
+        unset: "診断未実行（eval_cmd 未設定）",
+      }[run.status];
+      return structured(
+        {
+          path: written.path,
+          status: run.status,
+          ...(run.command ? { command: run.command } : {}),
+          ...(run.exitCode === null ? {} : { exit_code: run.exitCode }),
+          tail,
+          ...(diffHash ? { diff_hash: diffHash } : {}),
+        },
+        run.status === "passed"
+          ? `${label}: ${written.path}`
+          : `${label}: ${written.path}\n${tail.split("\n").slice(-8).join("\n")}`,
+      );
+    },
+  });
+
+  editor.add({
+    name: "graphhopper_verify",
+    description:
+      "verifier を lens ごとに同期実行し、verifier_set にそのまま渡せる results を返す（記録はしない）。prompt（lens指示・design/intent/diff/diag のpath・出力契約）と起動ずらしはツール側で固定する。前提: 同じ diff で graphhopper_diag → graphhopper_diff_stash を済ませておくこと（指紋が3つ揃わなければ throw）。判定を読めなかった lens は missing に入る（results が欠けるので進めない）。一部 lens の再実行は lens で指定（同じ diff 指紋のときだけ保存済み結果と合成する）",
+    input: S.obj(
+      {
+        lens: S.arrOf(
+          S.enumOf(["requirement", "behavior", "progress", "general"]),
+          "実行する lens（省略時は router_check の編成。polish=3lens / advisor=general）",
+        ),
+        model: S.optStr("verifier のモデル上書き（provider/model）。config の model_allow/model_deny で検査される"),
+        timeoutMs: S.num("lens あたりの timeout ms（既定300000・上限300000）"),
+        delayMs: S.num("起動ずらしの間隔 ms（既定5000。claude-oauth の単一プロキシ対策）"),
+      },
+      [],
+    ),
+    output: S.obj(
+      {
+        results: S.arrOf(
+          S.obj(
+            {
+              lens: S.enumOf(["requirement", "behavior", "progress", "general"]),
+              level: S.enumOf(["clean", "drift"]),
+              target: S.enumOf(["implementing", "design", "requirements"]),
+              model: S.str("その lens を実行したモデル"),
+            },
+            ["lens", "level"],
+          ),
+          "verifier_set にそのまま渡せる results",
+        ),
+        summaries: S.arrOf(
+          S.obj({ lens: S.str("lens名"), summary: S.str("その lens の判定要約") }, ["lens", "summary"]),
+        ),
+        bodies: S.arrOf(
+          S.obj({ lens: S.str("lens名"), body: S.str("drift・判定不能だった lens の本文") }, ["lens", "body"]),
+          "drift と missing の lens だけ（clean の本文は含めない）",
+        ),
+        missing: S.arrOf(
+          S.obj(
+            { lens: S.str("lens名"), reason: S.str("読めなかった理由") },
+            ["lens", "reason"],
+          ),
+          "判定を読めなかった lens（空でなければ verifier_set に進まない）",
+        ),
+        lenses: S.arrOf(S.str("lens名"), "今回の編成（router_check と同じ）"),
+        diff_hash: S.str("検証した diff の指紋（verifier_set が記録する値）"),
+      },
+      ["results", "summaries", "bodies", "missing", "lenses", "diff_hash"],
+    ),
+    execute: async (input: unknown, context: unknown) => {
+      const args = input as {
+        lens?: state.VerifierLens[];
+        model?: string;
+        timeoutMs?: number;
+        delayMs?: number;
+      };
+      const active = state.getActive(root);
+      if (!active) throw new Error("no active goal");
+      const goalId = active.goal.id;
+      const plan = state.planVerifier({
+        route: active.state.router.route,
+        entryRoute: active.state.entry_route,
+        escalated: !!active.state.escalated_at,
+      });
+      const wanted = args.lens?.length ? args.lens : plan.lenses;
+
+      // 前提: diag と diff_stash が同じ差分に対して済んでいること
+      const baseline = await state.resolveBaseline($, root, active.state);
+      const current = await state.computeDiffHash($, root, baseline);
+      if (!current) throw new Error("diff指紋が取れない（VCS不在またはbaseline不正）");
+      const stashed = state.getStashDiffHash(root);
+      if (!stashed) throw new Error("先に graphhopper_diff_stash を呼べ（退避diffが無い）");
+      if (stashed !== current) {
+        throw new Error(
+          "退避した diff と現在の差分が違う（diff_stash の後に編集された）。graphhopper_diag → graphhopper_diff_stash をやり直せ",
+        );
+      }
+      if (!state.diagExists(root, goalId)) throw new Error("先に graphhopper_diag を呼べ（診断ファイルが無い）");
+      const diagHash = state.readDiagDiffHash(root, goalId);
+      if (diagHash !== current) {
+        throw new Error(
+          "診断が現在の差分より古い（diag の後に編集された）。graphhopper_diag → graphhopper_diff_stash をやり直せ",
+        );
+      }
+
+      const paths = {
+        designPath: state.planPath(root, goalId),
+        diffPath: state.stashedDiffPath(root, goalId),
+        diagPath: state.diagPath(root, goalId),
+        intentPath: state.intentPath(root, goalId),
+      };
+      const modelName = resolveModel(root, "graphhopper-verifier", args.model) ?? null;
+      const delay = Math.max(0, args.delayMs ?? 5000);
+      const timeout = args.timeoutMs ?? MAX_TIMEOUT_MS;
+      const signal = (context as { signal?: AbortSignal } | undefined)?.signal;
+
+      const runs = await Promise.all(
+        wanted.map(async (lens, i): Promise<LensRun> => {
+          const prompt = buildLensPrompt(root, goalId, lens, lensPaths(root, goalId, lens, paths));
+          const r = await invokeStructured(
+            {
+              agent: "graphhopper-verifier",
+              model: args.model,
+              prompt,
+              root,
+              timeoutMs: timeout,
+              delayMs: delay * i,
+            },
+            undefined,
+            { signal },
+          );
+          const broken = (reason: string): LensRun => ({ lens, body: r.output, reason });
+          if (r.cancelled) return broken("invoke がキャンセルされた");
+          if (r.timedOut) return broken(`timeout (${timeout}ms)`);
+          if (r.fallbackWarning) return broken("agent が既定にフォールバックした（判定を採用できない）");
+          const failed = invokeFailure(r.output);
+          if (failed) return broken(failed);
+          const parsed = parseLensVerdict(r.output);
+          if (!parsed.ok) return broken(parsed.reason);
+          return {
+            lens,
+            level: parsed.verdict.level,
+            ...(parsed.verdict.target ? { target: parsed.verdict.target } : {}),
+            summary: parsed.verdict.summary,
+            body: r.output,
+          };
+        }),
+      );
+
+      const missing = runs
+        .filter((x) => x.level === undefined)
+        .map((x) => ({ lens: x.lens, reason: x.reason ?? "判定不能" }));
+      const next: state.SavedLensResult[] = runs
+        .filter((x) => x.level !== undefined)
+        .map((x) => ({
+          lens: x.lens,
+          level: x.level as state.VerdictLevel,
+          ...(x.target ? { target: x.target as state.DriftTarget } : {}),
+          ...(modelName ? { model: modelName } : {}),
+          summary: x.summary ?? "",
+        }));
+      const merged = state.mergeSavedVerify(state.readSavedVerify(root, goalId), current, next).filter(
+        (r) => plan.lenses.includes(r.lens),
+      );
+      state.writeSavedVerify(root, goalId, { diff_hash: current, results: merged });
+      const covered = new Set(merged.map((r) => r.lens));
+      for (const lens of plan.lenses) {
+        if (!covered.has(lens) && !missing.some((m) => m.lens === lens)) {
+          missing.push({ lens, reason: "この diff ではまだ判定が無い（再実行せよ）" });
+        }
+      }
+
+      const bodies = runs
+        .filter((x) => x.level === undefined || x.level === "drift")
+        .map((x) => ({ lens: x.lens, body: x.body.slice(0, 6000) }));
+
+      return structured(
+        {
+          results: merged.map((r) => ({
+            lens: r.lens,
+            level: r.level,
+            ...(r.target ? { target: r.target } : {}),
+            ...(r.model ? { model: r.model } : {}),
+          })),
+          summaries: merged.map((r) => ({ lens: r.lens, summary: r.summary })),
+          bodies,
+          missing: missing.map(({ lens, reason }) => ({ lens, reason })),
+          lenses: plan.lenses,
+          diff_hash: current,
+        },
+        missing.length
+          ? `verify: 判定不能 ${missing.map((m) => `${m.lens}(${m.reason})`).join(", ")} — 記録せずに止まる`
+          : `verify: ${merged.map((r) => `${r.lens}=${r.level}`).join(", ")}（次: verifier_set に results を渡す）`,
+      );
+    },
+  });
+
+  editor.add({
     name: "graphhopper_hash",
-    description: "ファイルのsha1 + size + mtimeを返すread-only tool（graphhopper_editのexpectedHash取得用）",
+    description:
+      "ファイルのsha1 + size + mtimeを返すread-only tool（graphhopper_editのexpectedHash取得用）。返り値 out.sha1 を edit に渡す。refs/implementing.md のレシピで hash→edit を1バッチにできる",
     input: S.obj({ filePath: S.str("対象ファイルパス") }, ["filePath"]),
+    output: S.obj(
+      {
+        path: S.str("対象ファイルパス"),
+        sha1: S.str("内容のsha1（edit の expectedHash に渡す）"),
+        size: S.num("バイト数"),
+        mtime: S.str("更新時刻（ISO）"),
+      },
+      ["path", "sha1", "size", "mtime"],
+    ),
     execute: async (input: unknown) => {
       const args = input as { filePath: string };
-      return text(readGraphhopperHash(root, args.filePath));
+      try {
+        const h = readGraphhopperHashValue(root, args.filePath);
+        return structured(h, `${h.sha1} ${h.path} (${h.size} bytes)`);
+      } catch (e) {
+        throw new Error(
+          `hash取得失敗 ${args.filePath}: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
     },
   });
 

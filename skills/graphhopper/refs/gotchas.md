@@ -15,18 +15,19 @@
 - **critic を呼ばずに implementing に飛ばない**: `graphhopper-critic` は毎goal必ず1回呼ぶ（安価な常設node）。飛ばすと設計段階の要件漏れ・スコープ逸脱が implementing まで持ち越される。critic の指摘は design.md に反映してから遷移する
 - **route=polishなのに「念のため」でverifier fan-outを省略しない**: router_checkの判定はコード側の機械測定。無条件発火だったcouncilの再発防止はここで担保されている
 - **simplify の diff を inline で subagent に渡さない**: main context を汚す。`graphhopper_diff_stash` の返却pathで渡す（verifierと共用。agent は shell ツール不可なので自分で diff は取れない）
-- **route=advisor なのに simplify を実行しない**: simplify は route=polish（大diff）のときだけの条件分岐 node。advisor（小diff）ではスキップが正しい。逆に polish で飛ばすのも禁止
+- **route=advisor なのに simplify を実行しない**: simplify は route=polish（大diff）のときだけの条件分岐 node。advisor（小diff）ではスキップが正しい。逆に polish で飛ばすのも禁止（レシピは `router_check` の `simplify` で分岐する）
 - **1 goal 1 driver**: TUI bind中のgoalをMCP等別sessionから操作すると警告が出る（二重駆動防止）。
   意図的な引き継ぎなら session_id を指定して resume で bind し直す
 - **非法遷移は拒否される**: designing→implementing→polish→done のみ（polish→implementing巻き戻し可）。
   特に `setPhase(done)` の直指定は不可（doneはverifier clean後のcompleteのみ）
 - **simplify で critical を自動適用して設計を変えない**: interface / signature / 公開 API の振る舞いを変える提案は high 扱いで人間に提示。勝手に直すと design レベルの変更になる
-- **simplify 適用後に eval_cmd を再実行しないで verifier に進まない**: critical 適用でコードが再変更されている。機械確認してから verifier を呼ぶ
-- **route=advisorだからverifier呼び出し自体を省略しない**: 「小diffだから自分で見れば十分」は禁止。`graphhopper_verifier_set`はresultsが空だと機械的にエラーを返す（self-graded完了防止のゲート）ので、必ず `task(subagent_type: 'graphhopper-verifier')` を `general` lens（3観点統合）で1回呼んでから記録する
+- **simplify 適用後に eval_cmd を再実行しないで verifier に進まない**: critical 適用でコードが再変更されている。`recipe: tail` の `graphhopper_diag` が eval_cmd を回すので、`failed`/`timeout` でないことを見てから verifier に進む（`unset`＝eval_cmd 未設定でも verifier は走るが、診断の不在を clean の根拠にしない）
+- **route=advisorだからverifier呼び出し自体を省略しない**: 「小diffだから自分で見れば十分」は禁止。`graphhopper_verifier_set`はresultsが空だと機械的にエラーを返す（self-graded完了防止のゲート）ので、必ず `graphhopper_verify` を `general` lens（3観点統合）で1回呼んでから記録する。`graphhopper_invoke` で自前の results を作ると3指紋の照合をすり抜けるため、`verify` 自体が壊れている場合の例外に限る
 - **verifier fan-outへの指示を「重大な問題だけ報告」にしない**: 全件報告→機械集約が正しい順序（保守的な指示は再現率を落とす）。`results` に詰めるのは各lens の `level` そのまま（キーは `lens`/`level`/`target`。`charter`・`verdict`・`note` は存在しない）。メインの裁量でdriftを握り潰さない（集約ルールがコード側にあるため握り潰せない）
+- **`graphhopper_verify` の前提を飛ばさない**: 退避diff・診断・現在のdiffの指紋が3つ揃わないと throw する（design g-mwiocibp）。順序は `diag` → `diff_stash` → `verify` で固定。simplify を適用した後も同じ順で取り直す
 - **`graphhopper_attempt`を省略しない**: 呼ばなければfail_streakが0のまま止まり、詰まっていても oracle への相談が起動しない。実装試行のたびに毎回呼ぶ
 - **escalate: trueが出たのに自力でもう一度だけ試そうとしない**: 閾値はコード側の機械カウント。無視して回すと同じ失敗を繰り返すだけになりがちなので、必ずoracleに相談してから再試行する
 
-- **モデル割当を変えたらTUI再起動**: 実行中セッションのagent→モデル束縛は古いまま残る（`task()`は初回解決を維持し、config変更が伝播しない実証あり。K7は現行minimaxではなく旧haikuで走った）。`graphhopper_invoke` は毎回configを読み直すため新割当が効く。subagent呼び出しはinvokeを優先し、fan-out前は最初に1件だけ投げてDBでモデルを確認せよ
+- **モデル割当を変えたらTUI再起動**: 実行中セッションのagent→モデル束縛は古いまま残る（`task()`は初回解決を維持し、config変更が伝播しない実証あり）。`graphhopper_invoke` と `graphhopper_verify` は毎回configを読み直すため新割当が効く。subagent呼び出しはinvoke系を優先し、fan-out前は最初に1件だけ投げてDBでモデルを確認せよ
 
 - **config直書きはtmp+renameでatomicに**: `graphhopper.json` を直接dumpで書き換えると、同時刻のconfig読み出しとraceして壊れJSON→全agentモデル欠落→子が親mainを継承する。書換えは必ずtmp＋renameで行う

@@ -38,6 +38,7 @@ import {
   noteContinuation,
   noteEvalFingerprint,
   parseDiffShortstat,
+  planVerifier,
   pauseGoal,
   readConfig,
   readDiscover,
@@ -1026,6 +1027,50 @@ describe("verifier集約 aggregateVerdicts / checkVerifierResults", () => {
     expect(
       checkVerifierResults([{ lens: "general", level: "clean" }]),
     ).toBeNull();
+  });
+
+  test("planVerifier: 全組み合わせで checkVerifierResults を通る", () => {
+    const routes = [null, "advisor", "polish"] as const;
+    const entries = [null, "full", "light", "advised", "oracle", "direct"] as const;
+    for (const route of routes) {
+      for (const entryRoute of entries) {
+        for (const escalated of [false, true]) {
+          const plan = planVerifier({ route, entryRoute, escalated });
+          const results = plan.lenses.map((lens) => ({ lens, level: "clean" as const }));
+          expect(
+            checkVerifierResults(results, {
+              // 昇格後は entry_route が full に戻る（escalateEntryRoute）
+              entryRoute,
+              escalated,
+            }),
+          ).toBeNull();
+          // simplify は route=polish のときだけ
+          expect(plan.simplify).toBe(route === "polish");
+        }
+      }
+    }
+  });
+
+  test("planVerifier: 昇格済み・polishは3lens、light/advised非昇格はgeneral", () => {
+    expect(planVerifier({ route: "polish", entryRoute: "full", escalated: false }).lenses).toEqual([
+      "requirement",
+      "behavior",
+      "progress",
+    ]);
+    expect(planVerifier({ route: "advisor", entryRoute: null, escalated: true }).lenses).toEqual([
+      "requirement",
+      "behavior",
+      "progress",
+    ]);
+    expect(planVerifier({ route: "advisor", entryRoute: "light", escalated: false }).lenses).toEqual([
+      "general",
+    ]);
+    expect(planVerifier({ route: "polish", entryRoute: "light", escalated: false }).lenses).toEqual([
+      "general",
+    ]);
+    expect(planVerifier({ route: "advisor", entryRoute: "full", escalated: false }).lenses).toEqual([
+      "general",
+    ]);
   });
 });
 

@@ -9,134 +9,178 @@ polish前にlens編成の助言が欲しい場合のみ使う（現行routerは�
 3. `fallback=true`（key未設定・API失敗等＝判定不能）の場合は従来router（advisor/polish）を継続せよ（general倒しはしない）。
    採否の決定はmain。toolは判定を返すだけ（advisory-only）
 
-#### verifier（drift 検出）
+#### verify（Code Mode レシピ）
 
-`graphhopper_router_check` の `route` に従う。**いずれのrouteでも `graphhopper-verifier` への
-第三者チェックは省略できない**（`graphhopper_verifier_set` はresultsが空だとエラーを返す機械ゲートがある。
-自己レビューだけでのclean記録は不可能。level/targetの最終決定は機械集約される）:
+polish/verify は **Code Mode で実行する**。`execute` の中で `tools.*` を `await` する。
+`task()`/`subagent` は `execute` のカタログに無い（呼べない）。同期の verifier 呼び出しは
+`graphhopper_verify`（内部で `opencode run` を待つ）が担う。手順を散文で追わず、下の
+ブロックを**上から順に** `execute` に貼る。`return` は `execute` の戻り値になる。
 
-- **route=advisor**（小diff）: `task(subagent_type: "graphhopper-verifier")` を**1回だけ**、
-  `general` lens で呼ぶ。「実装がdesign.mdの意図から外れていないか・テストが実際のユーザーパスを
-  検証しているか・変更がgoalに収束しているか、3観点をまとめてレビューせよ」と渡す。
-  診断はメインが事前に1回実行し `.graphhopper/tmp/diag-<goal>.txt` に保存してpathを渡す
-  （verifierの個別実行はbash denyで禁止。inline添付は3重トークン再発のため禁止）。
-  verifierは添付診断を裏付け・反証に使え。LSPは補助線に留める（単一証拠源にしない）。
-  ただし診断クリーン≠driftなし（挙動driftは診断に出ない）。
-  添付が無ければ「診断未実行（理由）」を明記し、診断不在をcleanの根拠にしない。
-  周辺探索はgraft-first（漁り読み禁止。graft/diffが指した関数・テスト単位のReadは可）。
-  全文catして数える（cat | wc等）・同一範囲の再読は禁止。行特定はgrep/graftで行い、Readは1範囲1回。
-  findingsには証拠状態を必ず付ける（typesafe流・失敗原因分離）: `裏付けあり` /
-  `証拠不足` / `診断未実行` / `実行失敗`。原因不明のままlevelだけ付けない
-   結果を `graphhopper_verifier_set(results: [{lens: "general", level}], reason: ...)` で記録
-   （実行モデルがconfig既定と違う場合は `model` に明示。成績表の帰属に使う）
-- **2.3.0 以降の background subagent**: `task()` は即座にセッションIDを返し、結果は
-  後で親に届く。**結果が届く前に `graphhopper_verifier_set` を呼ばない**（未完了の結果を記録すると
-  self-graded と同じ穴になる）。同期して待ちたい場合は `graphhopper_invoke`（`opencode run` を spawn して待つ）
-  を使う。並列 fan-out は background のままでもよいが、集約は全員の報告が揃ってから行う
-- **route=polish**（大diff・閾値超）: adversarial verifier fan-out を行う
-  1. `task(subagent_type: "graphhopper-verifier")` を3回呼ぶ。それぞれ以下の lens 指示をプロンプトに含める:
-     - requirement: 「実装がdesign.mdの意図から外れていないか（実装漏れ・解釈ズレ・スコープ逸脱）を検証せよ」
-     - behavior: 「テストが実際のユーザーパスを検証しているか（モック過多・ハッピーパスのみ・エラー握り潰し）を疑え」
-     - progress: 「変更がgoalに収束しているか（堂々巡り・残骸・goal無関係な混入）を見よ。未完了タスクが残っていないか、cancelled の理由が妥当かも見よ」
-     進捗タスクの source of truth は `.graphhopper/todos/<goalId>.json`（design.md は planning 終端で immutable のため進捗の計測源にできない）。
-     goalId は `.graphhopper/state.json` の `goal_id`、または `.graphhopper/todos/` 配下の唯一のファイル名から解決せよ。
-     埋め込みは **MCP prompt 経路**（graphhopper-verifier-progress / -general がタスク一覧を直接埋め込む）。
-     **plugin 経路**（task 直呼び）は一覧を埋め込まず、verifier agent の preamble が
-     「progress / general lens では必ずこのストアを読む」と指示するので、
-     lens 自身が `.graphhopper/todos/<goalId>.json` を読む。
-     時間短縮のため3体は**並列**に投げてよい（MCP駆動では graphhopper_invoke を3連並列。入れ子のみ禁止）。
-     lens 指示文は MCP prompts（graphhopper-verifier-requirement/behavior/progress）にもある。
-     並列時の注意: 各invokeは独立 `opencode run`（自前server＋MCP付きの重い処理）のため、
-     同一モデル3連はprovider側rate limitのリトライ待ちになり得る。気になる場合は
-     `delayMs` で数秒ずつ起動をずらす。実行中はheartbeatログが出る。キャンセルは子に
-     伝播してkillされる（取り消し後の裏回りなし）。
-     推奨は3並列＋ずらし（delayMs 0/5000/10000）。直列は遅いだけで安全性は変わらない
-     - **並列 fan-out のモデルについて（2026-10-21 実測）**: `claude-oauth` はローカルプロキシ
-       （http://127.0.0.1:8787/v1）1台に載る。3 lens をここへ同時投入すると
-       `Timed out waiting for response headers` になりうる。**verifier の並列 fan-out は
-       claude-oauth 以外（現在は minimax/MiniMax-M3.1-Flash）に割当済み**。
-       claude-oauth 系を fan-out に入れる場合は、直列実行か delayMs ずらしで回避する。
-       低価格/free枠モデル（deepseek 等）を混ぜた同時実行も避ける（枠のレート制限で待ち時間が増える）。
-     - **simplify のモデル**: primary は `opencode-go/deepseek-v4.1-flash`（単発なので fan-out と違い
-       レート制限の逼迫を受けない）。**遅い/枠切れのときは `claude-oauth/claude-sonnet-5-5` に手動切替**。
-       割当表（`~/.config/opencode/graphhopper.json` の agents と `cascade.agents.quality`）を
-       書き換えて `bun scripts/gen-agents.ts` して再起動すれば反映される。
-- **deep休止**（2026-10-01改定：verifierが上位モデルに昇格し、上位モデルでの上書き先が無くなった。selector→lens選択の原則は維持。oracle級が必要なlensが出たら別途検討）。
-- **モデル割当（2026-10-21 改定）**: criticは `claude-oauth/claude-haiku-5-5`
-  （OAuth定額・quota消費軽・高速。Go枠切れ時は `opencode-go/deepseek-v4.1-flash`
-  にフォールバックして呼べ。
-  subagent呼び出しは `task()` が既定。束縛が古いセッションでは `graphhopper_invoke`
-  を使う（coreの規則に従う）。
-  割当の見直しは `/choice` で対話変更できる（変更後はTUI再起動）。
-  **verifier（並列 fan-out）は `minimax/MiniMax-M3.1-Flash`**（claude-oauth の
-  ローカルプロキシ逼迫を避けるため。枠切れ時は `opencode-go/minimax-m3.1-flash-free` 等へ切替可。
-  自動切替は無いため main が選ぶが、**`graphhopper_invoke` の `model` は config の
-  `model_allow` / `model_deny` で機械的に検査される**。deny に一致するモデルを渡すと
-  invoke は拒否して止まる（フォールバックしない）。止められたらモデルを変えるのではなく、
-  まず config の deny を確認する。高額モデル（Go の Kimi/GPT 等、月枠が小さいもの）は
-  deny に入れるのが既定運用）。
-  **`task()` 経路のモデルは `.opencode/agents/*.md` に焼かれた値で決まる**ため、
-  `bun scripts/gen-agents.ts` の bake 時に同じ deny で検査され、違反があれば何も書かずに
-  exit 1 する。deny を変えたら必ず焼き直す（`bun scripts/gen-agents.ts`）。
-  `--check` で config と既存 `.md` のズレを検出できる。agent→モデル束縛はセッション開始時に
-  凍結されるため、resume したセッションには反映されない（新規セッションで始める）。
-  resume 時に catalog へ model_allow/model_deny 違反のモデルが焼かれていると、応答に警告が付く（焼き直して新規セッション）。
-  **cascade の切替先（baseline/escalate/quality 等）も同じ deny で拒否される**。拒否時は
-  切り替えず `failed` を返す（同じ拒否は1 goal 1回だけ報告）。goal 終了時の復元は拒否しない。
-  **strong モード**（design g-mwfnlpr9）: `graphhopper_goal(action: "start", strong: true)` で
-  main セッションを goal の間ずっと強いモデルにする。解決順（cascade.strong→expert→escalate）、
-  checkpoint=reviewing の扱い、deny 時、cascade 無効時、MCP の挙動は
-  SKILL.md の「strong モード」節を単一源泉として参照（ここには重複して書かない）。
-  **ルール文書の usability**（design g-mwfltxyt）:
-  対象は `AGENTS.md`・`skills/**.md`・`src/agents.ts`。変更した goal は complete の前に記録が必要。
-  1. 先に `graphhopper_diff_stash` で差分を最新化し、返った path を控える
-     （goal id は `graphhopper_status` の `(<goal id>)`）
-  2. `graphhopper_invoke(agent: "graphhopper-usability", prompt: ...)` で確認する。
-     prompt には「変更した文書のパス」「diff の path」「意図ログ
-     `.graphhopper/plans/<goal>.intent.md`（存在する場合だけ。無ければ『意図ログなし』と書く）」
-     を書く。子はこれらを読んで検証する
-  3. 結果を `graphhopper_usability_set(level: clean|drift|skipped, reason: ...)` で記録する。
-     clean=問題なし / drift=指摘を直して手順1から再実行 /
-     skipped=文言・typo のみで挙動や手順が変わらない等、確認が不要と判断した場合（reason 必須）
-  4. agent が見つからない場合は `bun scripts/gen-agents.ts` を実行して再試行する
-     （`task` はセッション開始時にモデル束縛が凍結されるため、invoke を推奨）
-  記録なし・drift・レビュー後の文書変更は complete が止まる。迂回は
-  `graphhopper_goal(action: "complete", force: true)`（意図と理由を .log.md に残す）。
-  **意図ログ**（design g-mwebh9vl）: goal 開始時の会話が
-  `.graphhopper/plans/<goal>.intent.md` に `me:` / `assistant:` ラベル付きで保存される
-  （plugin 経路のみ。MCP は作らない）。critic と requirement/general lens はこれを読み、
-  design や実装がユーザーの意図からズレていないかを見る。behavior/progress lens と
-  実装 subagent には渡さない（決定を再審議して止まるため）。既知のキーはマスクするが
-  best-effort で、会話は verifier/critic のモデル提供元に送られる。コンパクション境界より
-  前の履歴は取れないことがある。
-  **verifier clean の後に差分を変えると `complete` は止まる**（design g-mwd3n5bo）。
-  `verifier_set` が検証時点の全文 diff の sha1 を記録し、complete 時に現在値と照合する。
-  止められたら再検証する（`graphhopper_verifier_set`）。人間が問題ないと判断した場合だけ
-  `force: true` を使う（監査の `goal_complete` に `diff_gate: forced` が残る）。
-  VCS が無い・baseline が取れない環境ではゲートは無効（`diff_gate: unavailable`）。
-  CI は `bun scripts/gen-agents.ts --check-policy` で、commit 済みの
+**route=advisor（小diff）: 2ブロックを連結して1バッチ**
+
+```js
+// recipe: start
+const r = await tools.graphhopper_router_check({});
+if (r.escalated) return `昇格して designing に戻った（design.md を肉付けし critic 1回）: ${r.next}`;
+if (r.simplify) {
+  const s = await tools.graphhopper_diff_stash({});
+  const proposal = await tools.graphhopper_invoke({
+    agent: "graphhopper-simplify",
+    prompt:
+      "3レンズ（再利用・品質・効率）で整理案を出せ。適用はしない（提案のみ）。\n" +
+      "goal id は .graphhopper/state.json の goal_id。design: .graphhopper/plans/<goal_id>.md\n" +
+      `diff: ${s.path}\n`,
+  });
+  return { stop: "simplify", diff: s.path, proposal };
+}
+```
+
+```js
+// recipe: tail
+await tools.graphhopper_phase({ phase: "polish" }); // 冪等（既にpolishなら無変化）。implementingのまま実行しても通す
+const d = await tools.graphhopper_diag({});
+if (d.status === "failed" || d.status === "timeout") return `診断で止まった（${d.status}）: ${d.path}\n${d.tail}`;
+const s = await tools.graphhopper_diff_stash({});
+const v = await tools.graphhopper_verify({});
+if (v.missing.length) return { stop: "verify", missing: v.missing, bodies: v.bodies };
+const recorded = await tools.graphhopper_verifier_set({
+  results: v.results,
+  reason: v.summaries.map((x) => `${x.lens}: ${x.summary}`).join(" / "),
+  model: v.results[0]?.model,
+});
+if (recorded.level === "drift") {
+  return { stop: "drift", target: recorded.target, bodies: v.bodies, next: recorded.next };
+}
+// phase(done) を自分で呼ばない: done への遷移は completeGoal が行う。先に done にすると
+// complete が拒否されたときに戻れない（done から出る遷移が無い）
+const completed = await tools.graphhopper_goal({ action: "complete" });
+if (typeof completed === "string" && completed.startsWith("error:")) {
+  return { stop: "complete", reason: completed };
+}
+return { stop: "clean", summaries: v.summaries, completed };
+```
+
+**route=polish（大diff）: 2バッチ**
+
+1. `recipe: start` だけを実行する（`router_check` が simplify 要、`diff_stash` → simplify の提案が返る）
+2. 提案を適用する（下の「simplify の適用」。ここで編集するのでバッチが切れる）
+3. `recipe: tail` を実行する（`diag` → `diff_stash` → `verify` → 記録 → 完了）
+
+`verify` は編成（polish=3lens / advisor=general×1）を `router_check` と同じ関数で決める。
+`lens` を渡せば一部だけ再実行できる（同じ diff 指紋のときだけ保存済みの結果と合成するので、
+1 lens だけ判定不能だったときにその lens だけ投げ直せる）。例:
+`tools.graphhopper_verify({ lens: ["behavior"] })`（配列。値は `requirement`/`behavior`/`progress`/`general`）。
+
+**順序（ルール文書を変えた goal と drift の扱い）**
+
+- `AGENTS.md`・`skills/**.md`・`src/agents.ts` を変えた goal は、`recipe: tail` の**前に**
+  下の「ルール文書の usability」を済ませる。usability の指摘で文書を直すと差分が変わるので、
+  `tail`（diag → diff_stash → verify → 記録 → complete）は最終版で1回だけ回す
+- `stop: "drift"` が返ったら: `recorded.next` に従い、target=implementing なら
+  `graphhopper_phase({ phase: "implementing" })` で戻して直す。直したら `recipe: start` から
+  やり直す（advisor なら `start`＋`tail` を1バッチ。ただし下の usability が要る goal は
+  usability を挟むので2バッチ）。drift を握り潰して `complete` はできない。
+  ルール文書を直した場合は、やり直す前に usability をもう一度通す（下の usability 節の手順から）
+- `goal(complete)` は throw せず**拒否理由の `error:` 文字列**を返す（レシピは `stop: "complete"`
+  で返す）。理由ごとの対応:
+  - usability が未記録・drift → usability を記録してから
+    `await tools.graphhopper_goal({ action: "complete" })` だけ再実行（usability の drift で
+    文書を直した場合は差分が変わるので、diff ゲートの対応＝`tail` の再実行へ）
+  - 検証後に差分が変わった（diff ゲート）→ 再検証（`recipe: tail` をもう一度）
+  - phase は polish のままなので巻き戻しは要らない（`tail` は `phase(done)` を呼ばない。
+    done への遷移は `completeGoal` が行う）
+
+#### 何が自動で守られるか（散文で守らなくてよい）
+
+- **path の受け渡し**: `verify` が design・意図ログ・退避 diff・診断の path を自分で解決して
+  prompt に入れる（手で書き写さない。渡し忘れは起こらない）
+- **順序**: `await` が保証する。2.3.0 の `task()` のような「結果が届く前に記録するな」という
+  注意は不要（background にならない）
+- **前提の照合**: 退避 diff・診断・現在の diff の指紋が3つ揃わなければ `verify` は throw する。
+  古い diff を検証したまま complete で初めて止まる、という無駄が出ない
+- **判定の読み取り**: 出力契約（末尾の json フェンス `level`/`target`/`summary`）は `verify` が
+  prompt に足し、`verify` が読む。読めなければ `missing` に入り、記録に進まない
+- **集約**: `level`/`target` の決定は `verifier_set` の機械集約（`state.aggregateVerdicts`）。
+  レシピは `recorded.level` を見るだけで、メインの裁量で drift を握り潰せない
+- **自己完結**: `verifier_set` は results が空だと機械的に拒否する（self-graded 完了防止）。
+  route=advisor でも第三者チェック（verifier）は省略できない
+
+#### simplify の適用（メインの仕事。agent は提案のみ）
+
+- 各 finding を該当ファイルで Read して裏付け（Iron Law）
+- critical: 挙動不変・局所的なものだけ自動適用（typo / rename / 冗長な中間変数削除）。
+  interface・signature・新規依存は high 扱いで人間に提示
+- high: 人間に確認してから修正 / medium・note: 報告のみ
+- 適用後は `recipe: tail` を実行する（`diag` が eval_cmd を回すので、機械確認を兼ねる）
+- route は simplify 前の記録値に固定する（適用後に再測定して route を変えない）
+
+#### 診断（graphhopper_diag）
+
+`graphhopper_diag` は goal の `eval_cmd` を実行し、`.graphhopper/tmp/diag-<goal>.txt` に
+コマンド・終了コード・diff 指紋・出力の末尾 200 行を書いて path を返す（実行するのは eval_cmd
+だけで、任意のコマンドは渡せない）。verifier はこのファイルを補助証拠として読む。
+
+- `status: "failed"`・`"timeout"` では verifier に進まない（直すものがある証拠）
+- `status: "unset"`（eval_cmd 未設定）でもファイルは作られ、verifier は走る。その場合 verifier は
+  「診断未実行（理由）」を明記し、診断の不在を clean の根拠にしない
+- **診断クリーン≠driftなし**（挙動 drift は診断に出ない）
+
+#### モデル割当と起動ずらし
+
+- 割当は config（`~/.config/opencode/graphhopper.json` の `agents["graphhopper-verifier"]`）で決まる。
+  この文書にモデル名を書かない（実設定と食い違うため）。変えたら `bun scripts/gen-agents.ts` と
+  セッション再起動
+- **3 lens は 5 秒ずつずらして起動する**（`verify` の既定 `delayMs: 5000`）。verifier が
+  単一プロキシの provider（claude-oauth 等）に載っていると、同時投入で
+  `Timed out waiting for response headers` になりうる。ずらしは最大 10 秒で、待ち時間の損は小さい
+- `verify` の `model` は config の `model_allow` / `model_deny` で機械的に検査される。
+  deny 一致は拒否して止まる（フォールバックしない）。止められたら config を直す
+- 高額モデル（Go の Kimi/GPT 等、月枠が小さいもの）は deny に入れるのが既定運用。
+  cascade の切替先（baseline/escalate/quality 等）も同じ deny で拒否される
+
+#### ルール文書の usability（design g-mwfltxyt）
+
+対象は `AGENTS.md`・`skills/**.md`・`src/agents.ts`。変更した goal は complete の前に記録が必要。
+
+1. 先に `graphhopper_diff_stash` で差分を最新化し、返った path を控える
+   （goal id は `graphhopper_status` の `(<goal id>)`）
+2. `graphhopper_invoke(agent: "graphhopper-usability", prompt: ...)` で確認する。
+   prompt には「変更した文書のパス」「diff の path」「意図ログ
+   `.graphhopper/plans/<goal>.intent.md`（存在する場合だけ。無ければ『意図ログなし』と書く）」
+   を書く。子はこれらを読んで検証する
+3. 結果を `graphhopper_usability_set(level: clean|drift|skipped, reason: ...)` で記録する。
+   clean=問題なし / drift=指摘を直して手順1から再実行 /
+   skipped=文言・typo のみで挙動や手順が変わらない等、確認が不要と判断した場合（reason 必須）
+4. agent が見つからない場合は `bun scripts/gen-agents.ts` を実行して再試行する
+   （束縛が古いセッションでは `graphhopper_invoke` を使う）
+
+記録なし・drift・レビュー後の文書変更は complete が止まる。迂回は
+`graphhopper_goal(action: "complete", force: true)`（意図と理由を .log.md に残す）。
+
+#### 意図ログ（design g-mwebh9vl）
+
+goal 開始時の会話が `.graphhopper/plans/<goal>.intent.md` に `me:` / `assistant:` ラベル付きで
+保存される（plugin 経路のみ）。critic と requirement/general lens はこれを読み、design や実装が
+ユーザーの意図からズレていないかを見る（`verify` が requirement/general にだけ path を渡す）。
+behavior/progress lens と実装 subagent には渡さない（決定を再審議して止まるため）。
+既知のキーはマスクするが best-effort で、会話は verifier/critic のモデル提供元に送られる。
+コンパクション境界より前の履歴は取れないことがある。
+
+#### diff ゲート（design g-mwd3n5bo）
+
+**verifier clean の後に差分を変えると `complete` は止まる**。`verifier_set` が検証時点の
+全文 diff の sha1 を記録し、complete 時に現在値と照合する。止められたら再検証する
+（`recipe: tail` をもう一度）。人間が問題ないと判断した場合だけ `force: true` を使う
+（監査の `goal_complete` に `diff_gate: forced` が残る）。VCS が無い・baseline が取れない
+環境ではゲートは無効（`diff_gate: unavailable`）。
+
+- **diff 肥大は検証コスト3倍**: polish routeは3lensが全差分を読む。748行級は1回で3×748行の
+  コンテキスト消費。goalを小さく切ってadvisor（verifier×1）に収めるのが最大の節約。
+  巻き戻しはさらに3倍するので、criticで初回品質を上げることも節約になる
+- **drift は全件報告させる**（閾値カットしない。「重大なものだけ報告」のような保守的指示は
+  過少報告を招く——`verify` の prompt は既存の lens 指示文を使うので、この原則は自動で入る）
+- CI は `bun scripts/gen-agents.ts --check-policy` で、commit 済みの
   `.graphhopper/config.example.json` をポリシー源に catalog と cascade 設定を検査する。
   ローカルでは project catalog に加えて `~/.config/opencode/agents` が存在すれば
   global catalog も同じポリシーで検査する（`[global]` ラベル。CI には無いためローカル限定の保証）。
   見逃し率はscoreboardで監視。
-  researcher/librarian は `opencode-go/minimax-m3.1-flash-free`（無料枠の M3.1）、
-  **simplifyは `opencode-go/deepseek-v4.1-flash`（primary。遅い/枠切れ時は `claude-oauth/claude-sonnet-5-5` に手動切替）**、oracleはopus-5-5、advisorはglm-5.3（Bedrock cross-region。coding特化・prompt cache対応。旧grok-4.7から2026-10-08に置換）。
-  注意: session envに陳腐な `AWS_BEARER_TOKEN_BEDROCK` があるとSSOをshadowしてBedrock系が全滅する。
-  `graphhopper_invoke` の子には渡さない（invoke.tsで除去済み）。直接 `opencode run` する場合は
-  `env -u AWS_BEARER_TOKEN_BEDROCK` を付ける
-- **diff肥大は検証コスト3倍**: polish routeは3lensが全差分を読む。748行級は1回で3×748行の
-  コンテキスト消費。goalを小さく切ってadvisor（verifier×1）に収めるのが最大の節約。
-  巻き戻しはさらに3倍するので、criticで初回品質を上げることも節約になる
-   2. `graphhopper_diff_stash` でdiffを退避（`.graphhopper/tmp`配下。子権限で読めるため
-      手動コピーは不要・禁止）し、各verifierには**返却pathを渡す**
-      （inline 3重展開は禁止。3lensが全文を各々読むと3倍燃費になる）。
-      読むのは `goal` / `.graphhopper/plans/<goal-id>.md` の内容 / 退避diffの差分範囲＋疑義点のみ。
-      周辺探索はgraft-first（漁り読み禁止）。診断はメインが事前に1回実行し
-      `.graphhopper/tmp/diag-<goal>.txt` に保存してpathを渡す（verifier個別実行は禁止）。
-      behavior lens では添付診断を証拠に使う
-  3. drift（乖離）を検出したら**全件報告させる**（閾値カットしない。「重大なものだけ報告」のような保守的指示は書かない——過少報告を招く）
-  4. 3体の結果（各lens の `level`。drift には `target` 必須）を `results` に詰め、
-     `graphhopper_verifier_set(results: [...], reason: ...)` で1回記録する。
-     level/target の最終決定は機械集約（いずれか drift → drift、target は
-     implementing 優先）であり、メインの裁量で「重大なものだけ採用」といった
-     後段フィルタはしない
