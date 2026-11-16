@@ -38,7 +38,12 @@ function isInternal(m: IntentMessage, text: string): boolean {
   return isInternalPrompt(m.metadata, text);
 }
 
-/** v2 メッセージ列 → me/assistant のターン列（text のみ） */
+/**
+ * v2 メッセージ列 → me/assistant のターン列（text のみ）。
+ * assistant の tool part は意図的に捨てる。hooks の toLike は逆に tool part を残し、
+ * 同一 tool call 反復検知（detectLoopKind / isToolRepeatLoop）に使う。
+ * 目的が違うので、この2つを統合してはいけない（統合するとループ検知が壊れる）。
+ */
 export function toIntentTurns(messages: IntentMessage[]): IntentTurn[] {
   const out: IntentTurn[] = [];
   for (const m of messages ?? []) {
