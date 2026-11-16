@@ -30,7 +30,7 @@ import { VERIFIER_EFFICIENCY_RULE } from "./prompts";
 import { readConfig } from "./state";
 
 export interface PermissionRule { action: string; resource: string; effect: "allow" | "ask" | "deny"; }
-export interface V2ModelRef { providerID: string; model: string; }
+export interface V2ModelRef { providerID: string; model: string; /** reasoning effort など（割当表の "provider/model#variant"） */ variant?: string; }
 /** v2 static agent definition. Registered via agents/*.md defaults + ctx.agent.transform update() at runtime. */
 export interface V2AgentDef {
   description: string;
@@ -439,11 +439,17 @@ export function parseModelRef(s: string): V2ModelRef {
   const [providerModel, variant] = s.split("#", 2);
   const slash = (providerModel ?? "").indexOf("/");
   if (slash <= 0) throw new Error(`invalid model ref: ${s}`);
-  void variant;
   return {
     providerID: providerModel.slice(0, slash),
     model: providerModel.slice(slash + 1),
+    ...(variant ? { variant } : {}),
   };
+}
+
+/** V2ModelRef → "provider/model"（variant があれば "#variant" を付ける）。
+ * 許可判定用に variant を落とすのは model-policy.ts の stripModelVariant */
+export function formatModelRef(ref: V2ModelRef): string {
+  return `${ref.providerID}/${ref.model}${ref.variant ? `#${ref.variant}` : ""}`;
 }
 
 /**
@@ -503,7 +509,7 @@ export function resolveAgentAssignments(root: string): {
         // 形式不正を黙って既定へ落とすと設定ミスが見えない（bake は invalid で止める）
         warnings.push({ agent: name, model: override, kind: "invalid" });
       } else {
-        // bake と同じく正規化した provider/model で判定する（variant の有無で差を作らない）
+        // bake と同じく variant を落とした provider/model で判定する（effort で差を作らない）
         const normalized = `${ref.providerID}/${ref.model}`;
         const v = toViolation(
           name,

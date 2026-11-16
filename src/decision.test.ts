@@ -106,20 +106,25 @@ describe("decideRoute（fail-safe）", () => {
     }
   });
 
-  test("正常応答→choice通り", async () => {
+  test("正常応答→choice通り（route は difficulty を聞かない）", async () => {
     setKey("liquid_test");
-    const fakeFetch = (async () => ({
-      ok: true,
-      json: async () => ({
-        answers: {
-          route: { choice: "light", confidence: 0.9 },
-          difficulty: { choice: "hard", confidence: 0.8 },
-        },
-      }),
-    })) as unknown as typeof fetch;
+    let asked: string[] = [];
+    const fakeFetch = (async (_url: string, init: { body: string }) => {
+      asked = Object.keys((JSON.parse(init.body) as { questions: object }).questions);
+      return {
+        ok: true,
+        json: async () => ({
+          answers: {
+            route: { choice: "light", confidence: 0.9 },
+            difficulty: { choice: "hard", confidence: 0.8 },
+          },
+        }),
+      };
+    }) as unknown as typeof fetch;
     try {
       const r = await decideRoute("何かやる", fakeFetch);
-      expect(r).toMatchObject({ route: "light", confidence: 0.9, difficulty: "hard" });
+      expect(r).toMatchObject({ route: "light", confidence: 0.9, difficulty: null });
+      expect(asked).toEqual(["route"]);
     } finally {
       restore();
     }

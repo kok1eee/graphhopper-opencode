@@ -19,11 +19,15 @@ import {
   readTodosStatus,
   todoProgressView,
 } from "./state";
-import { formatTodoChip } from "./todos";
+import { formatTodoChip, type TodoItem } from "./todos";
+import { readRunningInvokeCount } from "./running-invoke";
 
 export type { EntryRoute, GoalStatus, Phase };
 
 export type PhaseStatus = "done" | "current" | "pending";
+
+/** 進捗タスク 1 件の表示用写像（todos.ts の TodoItem から必要な項目だけ） */
+export type SnapshotTaskItem = Pick<TodoItem, "id" | "text" | "status">;
 
 export interface SnapshotVerdict {
   level: "clean" | "drift";
@@ -72,9 +76,13 @@ export interface Snapshot {
     open: number;
     unreadable: boolean;
     invalidCount: number;
+    /** 表示用の明細（サイドバーが古い順に数件だけ出す）。unreadable は空 */
+    items: SnapshotTaskItem[];
   } | null;
   evalCmd: string | null;
   notes: string;
+  /** 実行中の gh-invoke 数（.graphhopper/invoke-running.json。design g-mwkfisl7 判断3） */
+  runningInvokes: number;
   updatedAt: string;
   history: SnapshotHistoryEntry[];
 }
@@ -140,19 +148,97 @@ function parseTasks(raw: unknown): {
   open: number;
   unreadable: boolean;
   invalidCount: number;
+  items: SnapshotTaskItem[];
 } | null {
   const rec = asRecord(raw);
   if (!rec) return null;
   const unreadable = rec.unreadable === true;
   const total = asNumber(rec.total) ?? 0;
   if (!unreadable && total === 0) return null;
+  // ストア不読は「0 件」ではなく不明なので明細も出さない（件数だけ unreadable として見せる）
+  const items: SnapshotTaskItem[] = unreadable ? [] : parseTaskItems(rec.items);
   return {
     total,
     done: asNumber(rec.done) ?? 0,
     open: asNumber(rec.open) ?? 0,
     unreadable,
     invalidCount: asNumber(rec.invalidCount) ?? 0,
+    items,
   };
+}
+
+/** TodoItem[] を表示用に写す。不正要素は落とす（件数側の invalidCount が正） */
+function parseTaskItems(raw: unknown): SnapshotTaskItem[] {
+  if (!Array.isArray(raw)) return [];
+  const out: SnapshotTaskItem[] = [];
+  for (const r of raw) {
+    const it = asRecord(r);
+    if (!it) continue;
+    const id = asString(it.id);
+    const text = asString(it.text);
+    const status = asString(it.status);
+    if (!id || !text) continue;
+    if (
+      status !== "pending" &&
+      status !== "in_progress" &&
+      status !== "completed" &&
+      status !== "cancelled"
+    ) {
+      continue;
+    }
+    out.push({ id, text, status });
+  }
+  return out;
+}
+
+/** サイドバーに出す 1 行。mark は状態記号＋タスク番号（例 "▸3"） */
+export interface SnapshotTaskRow {
+  mark: string;
+  text: string;
+}
+
+export interface SnapshotTaskWindow {
+  /** 表示窓より前にある件数（`… 済 N` に出す） */
+  before: number;
+  /** 表示窓より後ろにある件数（`…+K` に出す） */
+  after: number;
+  rows: SnapshotTaskRow[];
+}
+
+/** タスク本文から `T3（判断 2）: ` の接頭辞を落とす（番号は記号列に出すので二重にしない） */
+function stripTaskPrefix(text: string): string {
+  return text.replace(/^T\d+（[^）]*）:\s*/, "").replace(/^T\d+:\s*/, "");
+}
+
+/**
+ * サイドバーに出すタスクの窓を作る（純関数）。
+ * - 作業中（in_progress、無ければ最初の pending）から limit 件を出す
+ * - 全部済み・取消なら末尾 limit 件
+ * - 前後にはさまれた件数を before / after で返す
+ */
+export function taskWindow(
+  items: readonly SnapshotTaskItem[],
+  limit = 5,
+): SnapshotTaskWindow | null {
+  if (items.length === 0) return null;
+  const inProgress = items.findIndex((it) => it.status === "in_progress");
+  const firstPending = items.findIndex((it) => it.status === "pending");
+  const current = inProgress >= 0 ? inProgress : firstPending;
+  const start = current >= 0 ? current : Math.max(0, items.length - limit);
+  const end = Math.min(items.length, start + limit);
+  const rows = items.slice(start, end).map((it, i) => {
+    const mark =
+      it.status === "completed"
+        ? "✓"
+        : it.status === "cancelled"
+          ? "–"
+          : start + i === current
+            ? "▸"
+            : "·";
+    const num = it.id.match(/^t(\d+)$/)?.[1] ?? it.id;
+    return { mark: `${mark}${num}`, text: stripTaskPrefix(it.text) };
+  });
+  return { before: start, after: items.length - end, rows };
 }
 
 /** designing → implementing → polish のラダー。done は全項目 done として扱う */
@@ -233,6 +319,8 @@ export function buildSnapshot(input: {
   historyLimit?: number;
   /** 進捗タスクストア（.graphhopper/todos/<goalId>.json の中身） */
   todos?: unknown;
+  /** 実行中の gh-invoke 数（省略時 0） */
+  runningInvokes?: number;
 }): Snapshot | null {
   const state = asRecord(input.state);
   if (!state) return null;
@@ -287,6 +375,7 @@ export function buildSnapshot(input: {
     tasks: parseTasks(input.todos),
     evalCmd: asString(state.eval_cmd),
     notes: asString(state.notes) ?? "",
+    runningInvokes: Math.max(0, input.runningInvokes ?? 0),
     updatedAt: asString(state.updated_at) ?? "",
     history: parseHistory(input.history, input.historyLimit ?? DEFAULT_HISTORY_LIMIT),
   };
@@ -332,6 +421,7 @@ export function loadSnapshot(root: string, opts?: { historyLimit?: number }): Sn
     history: (readTail(join(dir, "history.jsonl")) ?? "").split("\n"),
     historyLimit: opts?.historyLimit,
     todos: goalID ? todoProgressView(readTodosStatus(root, goalID)) : null,
+    runningInvokes: readRunningInvokeCount(root),
   });
 }
 

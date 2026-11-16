@@ -430,12 +430,13 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
       const guideSync = syncPhaseGuide(gh, sessionID);
 
       /* 子セッション（subagent）は parentID で判定する。session.created イベントに
-       * 依存すると prompt admission が先に走った場合に漏れる（design g-mvj7ddcz 判断2-2） */
+       * 依存すると prompt admission が先に走った場合に漏れる（design g-mvj7ddcz 判断2-2）。
+       * 時間切れは null（不明）で、判定も handoff 案内もしない（design g-mwkfisl7 判断2） */
       const child = await withinBudget(isChildSession(ctx, sessionID), deadline);
       const decision = shouldRunEntryDecide({
         text,
         isInternal: isInternalPrompt(e.metadata, text),
-        isChildSession: child === true,
+        isChildSession: child,
         /* paused の goal も対象。loop 進行中（active/paused）は入口判定の対象外 */
         hasActiveGoal: !!active && active.goal.status !== "done",
         hasApiKey: decisionAvailable(),
@@ -464,7 +465,7 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
       if (
         !handoffChecked.has(sessionID) &&
         !(active && active.state.session_id === sessionID) &&
-        child !== true
+        child === false
       ) {
         try {
           const memo = readHandoff(root);
@@ -641,11 +642,12 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
 }
 
 /** 子セッション（subagent）か。parentID があれば親あり。
- * 取得失敗時は「判定しない」側に倒さない（子でなくても d1 が走るだけなので安全側） */
+ * 取得失敗・時間切れは null（不明）を返す。不明は「判定しない」側に倒す
+ * （design g-mwkfisl7 判断2。subagent の内部 prompt を decisions.jsonl に混ぜない） */
 async function isChildSession(
   ctx: Gh["ctx"],
   sessionID: string,
-): Promise<boolean> {
+): Promise<boolean | null> {
   try {
     /* admission 経路なので応答が詰まるとユーザー入力が止まる。短く切る */
     const info = await ctx.session.get(
@@ -654,7 +656,7 @@ async function isChildSession(
     );
     return !!info?.parentID;
   } catch {
-    return false;
+    return null;
   }
 }
 

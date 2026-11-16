@@ -16,7 +16,7 @@ import { Plugin, usePlugin } from "@opencode/plugin/tui";
 import { type FSWatcher, existsSync, watch } from "node:fs";
 import { join } from "node:path";
 import { isTurnEndEvent } from "../../../src/events";
-import { For, Show, createSignal, onCleanup } from "solid-js";
+import { For, Show, createMemo, createSignal, onCleanup } from "solid-js";
 import {
   type Phase,
   type Snapshot,
@@ -25,6 +25,7 @@ import {
   shortModel,
   loadSnapshot,
   phaseLadder,
+  taskWindow,
   truncate,
 } from "../../../src/tui-snapshot";
 
@@ -78,7 +79,9 @@ function shortAgent(agent?: string): string {
   return (agent ?? "subagent").replace(/^graphhopper-/, "");
 }
 
-/** 子セッション（subagent）のうち running のものを agent 名で返す */
+/** 子セッション（subagent）のうち running のものを agent 名で返す。
+ * 数えるのは「実行中のセッション数」（同じ agent が複数走る fan-out を 1 に潰さない）。
+ * 表示の丸め（9+）は Chip 側で行う（design g-mwkfisl7 判断3）。 */
 function computeRunning(context: Plugin.Context): string[] {
   const names: string[] = [];
   for (const info of context.data.session.list()) {
@@ -89,7 +92,7 @@ function computeRunning(context: Plugin.Context): string[] {
       // 個別セッションの失敗は無視する
     }
   }
-  return [...new Set(names)].slice(0, 3);
+  return names;
 }
 
 /* ---------- colors ---------- */
@@ -167,6 +170,44 @@ function Badges(props: { snapshot: Snapshot }) {
   );
 }
 
+function Tasks(props: { tasks: NonNullable<Snapshot["tasks"]> }) {
+  const colors = useColors();
+  const win = createMemo(() => taskWindow(props.tasks.items));
+  const markColor = (mark: string) =>
+    mark.startsWith("▸") ? colors.accent : mark.startsWith("✓") ? colors.success : colors.faint;
+  return (
+    <Show
+      when={win()}
+      fallback={
+        <Show when={props.tasks.unreadable}>
+          <text fg={colors.faint}>{truncate("✓? 進捗不明", WIDTH)}</text>
+        </Show>
+      }
+    >
+      {(w) => (
+        <box flexDirection="column">
+          <Show when={w().before > 0}>
+            <text fg={colors.faint}>{truncate(`… 済 ${w().before}`, WIDTH)}</text>
+          </Show>
+          <For each={w().rows}>
+            {(row) => (
+              <box flexDirection="row">
+                <text fg={markColor(row.mark)}>{row.mark} </text>
+                <text fg={colors.base} flexShrink={1} wrapMode="none" truncate>
+                  {row.text}
+                </text>
+              </box>
+            )}
+          </For>
+          <Show when={w().after > 0}>
+            <text fg={colors.faint}>{truncate(`…+${w().after}`, WIDTH)}</text>
+          </Show>
+        </box>
+      )}
+    </Show>
+  );
+}
+
 function Sidebar() {
   const snapshot = useSnapshot();
   const colors = useColors();
@@ -190,6 +231,9 @@ function Sidebar() {
             <text fg={colors.base}>{truncate(value().title, WIDTH)}</text>
           </Show>
           <Badges snapshot={value()} />
+          <Show when={value().tasks}>
+            {(t) => <Tasks tasks={t()} />}
+          </Show>
           <box flexDirection="row">
             <text fg={colors.muted}>Δ</text>
             <text
@@ -226,13 +270,19 @@ function Chip() {
   const snapshot = useSnapshot();
   const running = useRunning();
   const colors = useColors();
+  /* subagent のセッション数＋gh-invoke の実行数。9 を超えたら 9+（design g-mwkfisl7 判断3） */
+  const runningTotal = () => running().length + (snapshot()?.runningInvokes ?? 0);
+  const shownTotal = () => {
+    const n = runningTotal();
+    return n > 9 ? "9+" : String(n);
+  };
   return (
     <Show when={snapshot()}>
       {(value) => (
         <box flexDirection="row">
           <text fg={value().phase === "done" ? colors.success : colors.accent}>{formatChip(value())}</text>
-          <Show when={running().length > 0}>
-            <text fg={colors.muted}>·⟳{running().length}</text>
+          <Show when={runningTotal() > 0}>
+            <text fg={colors.muted}>·⟳{shownTotal()}</text>
           </Show>
         </box>
       )}
@@ -312,6 +362,16 @@ function Panel(props: { panel: { close: () => void; toggleFullscreen: () => void
             }`}
           />
           <Row label="eval" value={value().evalCmd ?? "(なし: attempt自己申告)"} />
+          <Row
+            label="tasks"
+            value={
+              !value().tasks
+                ? "(なし)"
+                : value().tasks!.unreadable
+                  ? "不読（進捗不明）"
+                  : `✓${value().tasks!.done}/${value().tasks!.total}（未 ${value().tasks!.open}）`
+            }
+          />
           <Row label="critic" value={verdictText(value().critic)} />
           <Row label="verifier" value={verdictText(value().verifier)} />
           <Row
@@ -327,7 +387,7 @@ function Panel(props: { panel: { close: () => void; toggleFullscreen: () => void
                 : "(off)"
             }
           />
-          <Row label="running" value={running().join(", ") || "(idle)"} />
+          <Row label="running" value={running().slice(0, 9).join(", ") || "(idle)"} />
           <Row label="notes" value={truncate(value().notes, REASON_WIDTH)} />
           <Row label="updated" value={value().updatedAt} />
           <Show when={value().history.length > 0}>
@@ -343,7 +403,14 @@ function Panel(props: { panel: { close: () => void; toggleFullscreen: () => void
 
 /* ---------- data ---------- */
 
-const WATCH_FILES = new Set(["state.json", "goals.json", "config.json", "history.jsonl"]);
+const WATCH_FILES = new Set([
+  "state.json",
+  "goals.json",
+  "config.json",
+  "history.jsonl",
+  /* gh-invoke の実行数（design g-mwkfisl7 判断3） */
+  "invoke-running.json",
+]);
 
 /**
  * `.graphhopper/` を監視する。ディレクトリが無い間は repo root を見張り、

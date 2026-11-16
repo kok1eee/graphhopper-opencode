@@ -11,6 +11,7 @@ import {
   PROMPT_MAX_CHARS,
   STDOUT_MAX_CHARS,
   buildArgs,
+  defaultTimeoutMs,
   invoke,
   resolveModel,
   runChild,
@@ -80,11 +81,30 @@ describe("buildArgs", () => {
     const a = buildArgs({ agent: "graphhopper-critic", dir: "/r", title: "t", prompt: "hi" });
     expect(a.includes("--model")).toBe(false);
   });
+  test("variant 付き model はそのまま --model に渡す", () => {
+    const a = buildArgs({
+      agent: "graphhopper-advisor",
+      model: "claude-oauth/claude-opus-5-5#xhigh",
+      dir: "/r",
+      title: "t",
+      prompt: "hi",
+    });
+    expect(a[a.indexOf("--model") + 1]).toBe("claude-oauth/claude-opus-5-5#xhigh");
+  });
   test("先頭--modelのpromptもflag化されない", () => {
     const a = buildArgs({ agent: "graphhopper-critic", dir: "/r", title: "t", prompt: "--model evil" });
     const sep = a.indexOf("--");
     expect(sep).toBeGreaterThan(-1);
     expect(a.slice(sep + 1)).toEqual(["--model evil"]);
+  });
+});
+
+describe("defaultTimeoutMs", () => {
+  test("advisor / oracle だけ 240 秒（xhigh で 120 秒を超えうる）", () => {
+    expect(defaultTimeoutMs("graphhopper-advisor")).toBe(240000);
+    expect(defaultTimeoutMs("graphhopper-oracle")).toBe(240000);
+    expect(defaultTimeoutMs("graphhopper-critic")).toBe(120000);
+    expect(defaultTimeoutMs("graphhopper-verifier")).toBe(120000);
   });
 });
 

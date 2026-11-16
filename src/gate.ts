@@ -36,6 +36,32 @@ const DESIGN_ADVISOR_HARD = `difficulty=hard なので ${ADVISOR_HOWTO}`;
 
 const DESIGN_ADVISOR_EASY = "difficulty=easy なので advisor は省略する（graphhopper_consult_set の記録も不要）。";
 
+/** hard に上がった（または hard のまま）ことを示す先頭行。案内文と tools-core の
+ * 完了報告で同じ文面を使う（design g-mwkfisl7 判断1。二重定義を避ける）。 */
+export function formatHardUpgradeHead(
+  changed: boolean,
+  from: state.Difficulty | null,
+): string {
+  return changed
+    ? `difficulty: ${from ?? "unknown"} → hard（タスク列の判定。cascade を昇格）`
+    : "difficulty=hard のまま（start の判定。再判定はしない）";
+}
+
+/** hard で advisor が未実施のときに、implementing 遷移で 1 回だけ促す文。
+ * 難易度を引き上げた場合（changed）と、start から hard だった場合で先頭行だけ変える
+ * （design g-mwkfisl7 判断1。文面はここに集約する）。 */
+export function formatAdvisorRequiredForHard(opts: {
+  changed: boolean;
+  from?: state.Difficulty | null;
+}): string {
+  const head = formatHardUpgradeHead(opts.changed, opts.from ?? null);
+  return [
+    head,
+    "advisor をまだ呼んでいない。実装に入る前に graphhopper_invoke(agent: 'graphhopper-advisor') を 1 回呼び、",
+    "指摘は .graphhopper/plans/<goal-id>.log.md に残す（design.md は designing を抜けたので書き換えない）。",
+  ].join("\n");
+}
+
 const DESIGN_BACK =
   "次に graphhopper_invoke(agent: 'graphhopper-critic') で設計を1回敵対レビューし、指摘を design.md に反映してから " +
   "graphhopper_phase(phase: 'implementing') へ（任意で graphhopper_critic_set に結果を記録できる。" +

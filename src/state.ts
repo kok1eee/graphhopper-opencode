@@ -833,6 +833,16 @@ export function planLogExists(root: string, goalId: string): boolean {
 
 export type HistoryEvent =
   | { type: "goal_start"; goal: string; title: string; strong?: boolean }
+  | {
+      /* 難易度の昇格（design g-mwjsd3om 判断6）。implementing 遷移時に design の
+       * タスク列から再判定して hard に上げた事実を残す（後から精度を数える） */
+      type: "difficulty_upgraded";
+      goal: string;
+      from: Difficulty | null;
+      to: Difficulty;
+      confidence: number | null;
+      source: string;
+    }
   | { type: "goal_pause"; goal: string }
   | { type: "goal_resume"; goal: string }
   | { type: "cascade_switch"; goal: string; from: string; to: string; phase: Phase; reason: string }
@@ -1281,7 +1291,7 @@ export function startGoal(
   root: string,
   title: string,
   sessionID: string,
-  opts?: { strong?: boolean },
+  opts?: { strong?: boolean; difficulty?: Difficulty | null },
 ): ActiveLoop {
   const goals = readGoals(root);
   const goal: Goal = {
@@ -1320,8 +1330,10 @@ export function startGoal(
       pending.route === "oracle")
   ) {
     next.entry_route = pending.route;
-    next.difficulty = pending.difficulty ?? null;
   }
+  /* 難易度は pending（route_set でメインが明示）を優先し、無ければ start 時の題の判定
+   * （judgeGoalDifficulty）を使う。どちらも無ければ null＝未判定（design g-mwjsd3om 判断4） */
+  next.difficulty = pending?.difficulty ?? opts?.difficulty ?? null;
   clearPendingRoute(root);
   writeState(root, next);
   recordEvent(root, {
@@ -1886,6 +1898,11 @@ export function bindEntryRoute(
     });
   }
   return r;
+}
+
+/** 難易度を書き換える（implementing 遷移の再判定用。design g-mwjsd3om 判断6） */
+export function setDifficulty(root: string, difficulty: Difficulty): ActiveLoop | null {
+  return mutateActive(root, () => ({ state: { difficulty } }));
 }
 
 /** カスケード状態の保存。null でクリア */

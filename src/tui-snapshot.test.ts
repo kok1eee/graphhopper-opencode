@@ -15,6 +15,7 @@ import {
   parseHistory,
   parsePhase,
   phaseLadder,
+  taskWindow,
   truncate,
   shortModel,
 } from "./tui-snapshot";
@@ -93,6 +94,30 @@ describe("buildSnapshot", () => {
     expect(snap?.diff.route).toBe("advisor");
     expect(snap?.loop.stopCount).toBe(1);
     expect(snap?.loop.blocked).toBe(false);
+  });
+
+  test("実行中の gh-invoke 数を Snapshot に載せる（省略時は 0）", () => {
+    const snap = buildSnapshot({
+      root: "/r",
+      state: state(),
+      goals,
+      config: null,
+      history: [],
+      runningInvokes: 2,
+    });
+    expect(snap?.runningInvokes).toBe(2);
+    const zero = buildSnapshot({ root: "/r", state: state(), goals, config: null, history: [] });
+    expect(zero?.runningInvokes).toBe(0);
+    /* 負の値は 0 に丸める（壊れた入力で表示を壊さない） */
+    const neg = buildSnapshot({
+      root: "/r",
+      state: state(),
+      goals,
+      config: null,
+      history: [],
+      runningInvokes: -3,
+    });
+    expect(neg?.runningInvokes).toBe(0);
   });
 
   test("router の閾値は config から取る", () => {
@@ -366,5 +391,106 @@ describe("formatChip: 完了 goal", () => {
       todos: { total: 28, done: 23, open: 0, unreadable: false, invalidCount: 0 },
     });
     expect(formatChip(snap!)).toBe("done");
+  });
+});
+
+describe("tasks.items と taskWindow（サイドバーのタスク一覧）", () => {
+  const item = (
+    id: string,
+    status: "pending" | "in_progress" | "completed" | "cancelled",
+    text = `T${id.slice(1)}（判断 1）: ${id} の本文`,
+  ) => ({ id, text, status });
+
+  test("parseTasks は items を写し、不正要素は落とす", () => {
+    const snap = buildSnapshot({
+      root: "/r",
+      state: state(),
+      goals,
+      config: null,
+      history: [],
+      todos: {
+        total: 2,
+        done: 1,
+        open: 1,
+        unreadable: false,
+        invalidCount: 0,
+        items: [
+          item("t1", "completed"),
+          item("t2", "pending"),
+          { id: "t3", text: "T3: ok", status: "bogus" },
+          { id: "", text: "no id", status: "pending" },
+        ] as never,
+      },
+    });
+    expect(snap!.tasks!.items).toEqual([
+      { id: "t1", text: "T1（判断 1）: t1 の本文", status: "completed" },
+      { id: "t2", text: "T2（判断 1）: t2 の本文", status: "pending" },
+    ]);
+  });
+
+  test("unreadable は items を空にする（0 件に潰さない）", () => {
+    const snap = buildSnapshot({
+      root: "/r",
+      state: state(),
+      goals,
+      config: null,
+      history: [],
+      todos: {
+        total: 3,
+        done: 1,
+        open: 2,
+        unreadable: true,
+        invalidCount: 0,
+        items: [item("t1", "completed")] as never,
+      },
+    });
+    expect(snap!.tasks!.unreadable).toBe(true);
+    expect(snap!.tasks!.items).toEqual([]);
+  });
+
+  test("taskWindow は最初の pending から limit 件を出し、接頭辞を落とす", () => {
+    const w = taskWindow([
+      item("t1", "completed"),
+      item("t2", "completed"),
+      item("t3", "pending", "T3（判断 2）: `src/a.ts` を直す"),
+      item("t4", "pending"),
+      item("t5", "pending"),
+    ]);
+    expect(w).toEqual({
+      before: 2,
+      after: 0,
+      rows: [
+        { mark: "▸3", text: "`src/a.ts` を直す" },
+        { mark: "·4", text: "t4 の本文" },
+        { mark: "·5", text: "t5 の本文" },
+      ],
+    });
+  });
+
+  test("taskWindow は in_progress を優先し、窓を limit で切って after を出す", () => {
+    const items = Array.from({ length: 9 }, (_, i) => item(`t${i + 1}`, "pending"));
+    items[6] = item("t7", "in_progress");
+    const w = taskWindow(items, 3)!;
+    expect(w.before).toBe(6);
+    expect(w.after).toBe(0);
+    expect(w.rows.map((r) => r.mark)).toEqual(["▸7", "·8", "·9"]);
+    const w2 = taskWindow(items, 2)!;
+    expect(w2.rows.map((r) => r.mark)).toEqual(["▸7", "·8"]);
+    expect(w2.after).toBe(1);
+  });
+
+  test("taskWindow は全部済みなら末尾を出し、記号を status で変える", () => {
+    const w = taskWindow([
+      item("t1", "completed"),
+      item("t2", "cancelled"),
+      item("t3", "completed"),
+    ])!;
+    expect(w.before).toBe(0);
+    expect(w.after).toBe(0);
+    expect(w.rows.map((r) => r.mark)).toEqual(["✓1", "–2", "✓3"]);
+  });
+
+  test("taskWindow は 0 件なら null", () => {
+    expect(taskWindow([])).toBeNull();
   });
 });

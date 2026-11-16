@@ -41,7 +41,11 @@ export default Plugin.define({
       for (const [name, u] of Object.entries(updates)) {
         if (!editor.get(name)) continue;
         editor.update(name, (agent) => {
-          agent.model = { providerID: u.model.providerID, model: u.model.model } as never;
+          agent.model = {
+            providerID: u.model.providerID,
+            model: u.model.model,
+            ...(u.model.variant ? { variant: u.model.variant } : {}),
+          } as never;
           agent.permissions = u.permissions as never;
           if (u.temperature !== undefined) {
             agent.request = { body: { temperature: u.temperature } } as never;

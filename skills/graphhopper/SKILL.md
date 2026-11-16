@@ -37,11 +37,33 @@ graphhopper本体（Claude Code版）の3相グラフをopencodeに移植した�
 full / 未判定 / oracle の advisor は難易度で**分岐する**（裁量があるのは normal / 判定なしだけ。
 ここでの「未判定」は入口 route が未判定、「判定なし」は難易度が未判定を指す）。
 難易度は goal start の応答の `difficulty=` 行か、designing の案内文（easy は省略文・hard は呼ぶ文に
-なっている）で確認する。どちらにも無ければ「判定なし」として扱う。
+なっている）で確認する。`difficulty=` 行が無ければ「判定なし」として扱う。
 
-- **easy**: 省略する（記録も不要）。
+**難易度がどこで決まるか**（route の入口判定とは別の呼び出し）:
+
+- d1 が **goal の題**を入力に判定する（goal start 時、最大 1.0 秒待つ）。
+- implementing へ移るときに design のタスク列からもう一度判定し、**hard と出たときだけ**引き上げる
+  （降格しない。cascade の昇格を伴うので下限は 0.7）。
+- 下限はラベル別: easy 0.9 / normal 0.4 / hard 0.6。easy を高くしているのは、easy が advisor の
+  省略に直結するため（誤 easy で第二意見を失うほうが、easy を出し損ねるより重い）。
+- 「判定なし」は 2 種類あり、どちらも**扱いは同じ**（下の normal と同じくメインが決める）:
+  (a) 判定できなかった（キーなし・時間切れ・d1 の失敗）、(b) 判定はしたが下限未満だった。
+  どちらなのかは `.graphhopper/decisions.jsonl` の `kind: "difficulty"` 行（`fallback` と `reason`）で分かる。
+- hard に引き上げたとき advisor をまだ呼んでいなければ、遷移の応答が advisor 1 回を求める。
+  そのときは **implementing のまま**（design.md はもう書き換えない）呼び、指摘は
+  `.graphhopper/plans/<goal-id>.log.md` に残して実装順に反映する。`consult_set` の記録は任意
+  （advised 入口と oracle 入口の oracle 相談だけが機械ゲート）。
+  timeout したら再試行せず、`advisor 省略(timeout)` を log に残して実装を続ける。
+
+hard で advisor を呼んだときは、指摘を design に反映したうえで、`graphhopper_consult_set(kind: 'advisor', summary: ...)`
+に 1〜3 文残す（任意。省略しても遷移は止まらない）。
+
+**advisor の要否**（上の難易度に対する規則）:
+
+- **easy**: 省略する。`.graphhopper/plans/<goal-id>.log.md` に `advisor 省略(easy): …` を 1 行残す
+  （easy 規則が実際に効いているかを後から数えるため。省略の事実が消えると規則の要否を判断できない）。
 - **hard**: 1回呼ぶ。
-- **normal / 判定なし**: design を書いた後にメインが決める。基準は「捨てた代替案の理由に自信がない判断が 1 つでもあるか」。あれば 1 回呼び（呼び方は designing 節）、無ければ省略して `.graphhopper/plans/<goal-id>.log.md` に `advisor 省略: 判断2・4は実測で裏付けあり` のように、検討した判断と根拠を1行書く。
+- **normal / 判定なし**: design を書いた後にメインが決める。基準は「捨てた代替案の理由に自信がない判断が 1 つでもあるか」。あれば 1 回呼び（呼び方は designing 節）、無ければ省略して `.graphhopper/plans/<goal-id>.log.md` に 1 行書く。書式は省略の経路が分かる形にする（`advisor 省略(normal): 判断2・4は実測で裏付けあり` / `advisor 省略(判定なし): …`。easy の書式は上の項目）。
 - **oracle 入口**: easy / hard は上のとおり。normal / 判定なしのときだけ、開始時の oracle 相談で結論が出た論点を除いて基準を当てる。
 
 phase 案内（次のアクションの全文）は system ではなく**会話の中**に届く。
@@ -131,15 +153,25 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
 
 フルループが大袈裟な作業に相応の重さで回す入口判定。**判定は plugin の hook が自動で走らせる**
 （メッセージ受付時に d1 を待ち、`## graphhopper 入口判定` で始まるメッセージとして会話に届く。
-受付の遅れを 1.5 秒までに抑えるため待ちは最大 1.5 秒で、間に合わなければ届かない＝判定なしとして扱う）。
+受付の遅れを 1.5 秒までに抑えるため待ちは最大 1.5 秒で、間に合わなければ届かない＝
+**route が未判定**として扱う。これは難易度の「判定なし」とは別の事象で、難易度は goal start 時に
+題から判定する）。
 `LIQUID_API_KEY` が要る（無いと判定は走らない）:
 
 - **自動判定が基本**: モデルが `graphhopper_decide` を呼ぶ必要はない。
   判定結果は `.graphhopper/decisions.jsonl` に自動記録される
   （route・confidence・rawChoice・レイテンシ。閾値較正の材料）
 - 判定結果（route が direct 以外）がモデルに渡される。モデルはそれに従って
-  `graphhopper_route_set(route, reason, difficulty)` → `graphhopper_goal(action: "start")` へ進む。
+  `graphhopper_route_set(route, reason)` → `graphhopper_goal(action: "start")` へ進む。
   **d1 の判定は参考値**。明らかに単一ファイルの小修正なら route_set をしない（ループを作らない）
+- **難易度は入口判定では聞かない**。goal start 時に題から別の呼び出しで判定し、
+  `.graphhopper/decisions.jsonl` に `kind: "difficulty"` で残る（`source` が goal-start / implementing）。
+  `route_set` の `difficulty` 引数は残っているが、**原則として渡さない**。渡すと pending に入り、
+  goal start の題からの判定が省かれる（自己申告は d1 の下限を通らない。easy は advisor の省略に
+  直結するので特に避ける）。入口判定では難易度を聞かないので比較対象は無い。
+  渡してよいのは「題だけでは内容が伝わらず（例: `進めて` だけ）、自分が実装内容を把握していて
+  d1 の判定が外れると分かっている」場合だけ。題を具体的に書き直せるなら、そちらを直して渡さない
+  （題から判定させるほうが安く、記録も残る）
 - 手動で判定し直したいときだけ `graphhopper_route(request)` → `graphhopper_decide(request)` →
   `graphhopper_route_set(route, reason)`。手動の decide も同じログに記録される
 - **full=フル**（現行通り）/**light=軽量**（design の内容規約は full と同じ。判断は少なくてよいが1件以上、critic省略、verifier general×1）/
@@ -263,6 +295,23 @@ state・design・historyはdiskにあり圧縮の影響を受けない）。
 compaction時はd1 keep-listが自動注入される（要約落ち防止の制約。hook不発時は手動で要点を残せ）。
 
 > 詳細は [refs/gotchas.md](refs/gotchas.md) を読め（該当時に参照）
+
+
+## ユーザーの承認が要るもの
+
+次は実行前にユーザーへ聞き、承認を得てから進める（goal 中の phase 遷移では代替できない）。
+承認が要る操作に当たったら、その操作の直前で止めて聞く（自動継続の対象外。承認待ちの間に先へ進まない）。
+
+- 本番環境の変更（EC2 上のデプロイ・設定・サービス再起動）
+- 戻せない削除（DB・バケット・ファイル）。先に dump や設定のバックアップを取る
+- push / merge（goal 完了時に commit まではしてよいが、push は指示があるまでしない）
+- API キーの発行・失効・ローテーション
+- implementing 以降に、承認済みの design の内容を変える必要が出たとき（designing 中の加筆・critic/verifier 指摘の反映は含まない）
+- `AGENTS.md`・`skills/**.md` の一括置換（同じ置換を複数箇所へ一度に適用すること。1 行ずつの修正なら不要）
+- 既定を超える fan-out の本数、または既定にないモデルへの格上げ
+  （phase 連動の cascade 切替、verifier の既定 3 lens など定常の呼び出しは対象外）
+
+判断に迷ったら「戻せるか」「外に出るか（push・本番・外部 API）」「お金が動くか」の 3 つで見る。
 
 
 ## phase 連動のモデル切替

@@ -1,6 +1,6 @@
 /** モデル許可判定の単体テスト（design g-mw8qwiy6 / g-mw8rlbjr）。 */
 import { describe, expect, test } from "bun:test";
-import { checkModelAllowed } from "./model-policy";
+import { checkModelAllowed, stripModelVariant } from "./model-policy";
 
 describe("checkModelAllowed", () => {
   test("未設定は無制限", () => {
@@ -33,6 +33,26 @@ describe("checkModelAllowed", () => {
     expect(
       checkModelAllowed("Opencode-Go/x", { deny: ["opencode-go/*"] }),
     ).toEqual({ ok: true });
+  });
+  test("variant（effort）は判定に含めない", () => {
+    // deny は variant 付きでも当たる（design g-mwjsd3om 判断3）
+    expect(
+      checkModelAllowed("claude-oauth/claude-opus-5-5#xhigh", {
+        deny: ["claude-oauth/claude-opus-5-5"],
+      }),
+    ).toEqual({
+      ok: false,
+      kind: "deny",
+      rule: "claude-oauth/claude-opus-5-5",
+    });
+    expect(
+      checkModelAllowed("claude-oauth/claude-opus-5-5#xhigh", { allow: ["claude-oauth/*"] }),
+    ).toEqual({ ok: true });
+    expect(
+      checkModelAllowed("claude-oauth/claude-opus-5-5#xhigh", { allow: ["*/claude-opus-5-5"] }),
+    ).toEqual({ ok: true });
+    expect(stripModelVariant("a/b#max")).toBe("a/b");
+    expect(stripModelVariant("a/b")).toBe("a/b");
   });
   test("未解決は制限有効時のみ拒否", () => {
     expect(checkModelAllowed(undefined, { deny: ["a/*"] })).toEqual({

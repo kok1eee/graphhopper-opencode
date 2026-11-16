@@ -9,25 +9,22 @@
  * 純粋ロジック（shouldRunEntryDecide / formatEntryVerdict）はここで、IO は decision.ts に任せる。
  * d1 の HTTP 呼び出しは decision.ts の decideRoute を再利用する（HTTP 部分を複製しない）。
  */
-import { closeSync, openSync, readSync, statSync } from "node:fs";
-import { join } from "node:path";
 import {
+  decideDifficulty,
   decideRoute,
   decisionAvailable,
   logDecision,
   type DecideResult,
   type FetchFn,
 } from "./decision";
+import type { Difficulty } from "./state";
 
 /** hook 経路の d1 待ち時間上限。モデル呼び出しを止めるので短めに切る */
 export const ENTRY_DECIDE_TIMEOUT_MS = 5_000;
 
-/** goal start 時の保険で「直近」とみなす decide 行の窓 */
-export const ENTRY_DECIDE_FRESH_MS = 5 * 60_000;
-
-/** decisions.jsonl を末尾何バイト読むか（先頭からの全走査を避ける）。
- * skip 行も毎 prompt 記録されるので 5 分の窓を余裕をもって覆う */
-export const DECISION_TAIL_BYTES = 256 * 1024;
+/** goal start 時の難易度判定の待ち上限。実測の最大 663ms に対して余裕をみる
+ * （入口 hook の 1.5 秒と合わせて 1 往復で最悪 2.5 秒に抑える。design g-mwjsd3om 判断4） */
+export const GOAL_DIFFICULTY_TIMEOUT_MS = 1_000;
 
 /** plugin 内部 prompt の識別子。ctx.session.prompt に付けて渡す */
 export const INTERNAL_PROMPT_METADATA_KEY = "graphhopper_internal";
@@ -56,6 +53,9 @@ export type EntryVerdict = DecideResult;
 export type EntrySkipReason =
   | "internal"
   | "child_session"
+  /* 子セッションかを時間内に確認できなかった。判定すると subagent の内部 prompt が
+   * decisions.jsonl に混ざるため、走らせない側に倒す（design g-mwkfisl7 判断2） */
+  | "child_unknown"
   | "active_goal"
   | "no_api_key"
   | "session_unknown"
@@ -66,8 +66,8 @@ export type EntryDecideInput = {
   text: string;
   /** plugin 自身が投げた prompt か（自動継続・eval 失敗通知など） */
   isInternal: boolean;
-  /** subagent などの子セッションか */
-  isChildSession: boolean;
+  /** subagent などの子セッションか。null は時間内に確認できなかった（不明） */
+  isChildSession: boolean | null;
   /** 実行中の goal があるか */
   hasActiveGoal: boolean;
   /** 判定モデルを実行できるか（decisionAvailable。jev はキー不要で true） */
@@ -86,7 +86,10 @@ export function shouldRunEntryDecide(
   input: EntryDecideInput,
 ): EntryDecideDecision {
   if (input.isInternal) return { run: false, reason: "internal" };
-  if (input.isChildSession) return { run: false, reason: "child_session" };
+  /* 不明（null）も判定しない。子に走らせると decisions.jsonl が汚れ、
+   * 親に走らせても確認できていない前提で判定することになる（design g-mwkfisl7 判断2） */
+  if (input.isChildSession === true) return { run: false, reason: "child_session" };
+  if (input.isChildSession === null) return { run: false, reason: "child_unknown" };
   if (input.hasActiveGoal) return { run: false, reason: "active_goal" };
   if (!input.hasApiKey) return { run: false, reason: "no_api_key" };
   if (!input.text.trim()) return { run: false, reason: "empty" };
@@ -107,13 +110,12 @@ export function formatEntryVerdict(v: EntryVerdict): string | null {
   if (!route) return null;
   if (route === "direct") return null;
   const conf = v.confidence === null ? "n/a" : v.confidence.toFixed(2);
-  const diffNote = v.difficulty ? `、difficulty=${v.difficulty}` : "";
-  const diffArg = v.difficulty ? `, difficulty: '${v.difficulty}'` : "";
+  /* 難易度は goal start 時に題から判定する（design g-mwjsd3om 判断4）ので、ここでは渡さない */
   return [
     "## graphhopper 入口判定（d1・自動判定済み）",
     "",
-    `判定: route=${route}（confidence ${conf}${diffNote}）`,
-    `- graphhopper_route_set(route: '${route}', reason: 'd1判定'${diffArg}) を呼び、` +
+    `判定: route=${route}（confidence ${conf}）`,
+    `- graphhopper_route_set(route: '${route}', reason: 'd1判定') を呼び、` +
       `graphhopper_goal(action: 'start', title: ...) でループを開始する。`,
     "- 明らかに単一ファイルの小修正・質問応答ならループを作らず直接対応してよい（route_set 不要）。",
     "- d1 の判定は参考値。判断に確信があれば route_set で上書きしてよい。",
@@ -161,77 +163,22 @@ export async function recordEntrySkip(
   });
 }
 
-/** decisions.jsonl の末尾だけ読む（先頭から全部走査しない） */
-function readDecisionRows(root: string): Array<Record<string, unknown>> {
-  const path = join(root, ".graphhopper/decisions.jsonl");
-  try {
-    const size = statSync(path).size;
-    const start = Math.max(0, size - DECISION_TAIL_BYTES);
-    const len = size - start;
-    const buf = Buffer.alloc(len);
-    const fd = openSync(path, "r");
-    try {
-      readSync(fd, buf, 0, len, start);
-    } finally {
-      closeSync(fd);
-    }
-    /* 先頭が切れた行は JSON.parse が失敗して無視される（1行で全体が落ちない） */
-    const rows: Array<Record<string, unknown>> = [];
-    for (const l of buf.toString("utf8").split("\n").filter(Boolean)) {
-      try {
-        rows.push(JSON.parse(l) as Record<string, unknown>);
-      } catch {
-        // 壊れた行は無視
-      }
-    }
-    return rows;
-  } catch {
-    return [];
-  }
-}
-
-/** このセッションに直近の decide 行があるか（goal start 時の保険の判定用）。
- * sessionID が null のときは「セッション不明」として一致なしとみなす（他セッションの decide で代用しない） */
-export function hasRecentEntryDecision(
-  root: string,
-  sessionID: string | null,
-  now: number = Date.now(),
-  windowMs: number = ENTRY_DECIDE_FRESH_MS,
-): boolean {
-  if (!sessionID) return false;
-  const rows = readDecisionRows(root);
-  for (const r of rows) {
-    if (r.kind !== "decide") continue;
-    /* fallback（d1 失敗）は「判定できた」ことにならない。数えると保険が走らず、
-     * goal が古い別 decide に紐付く（decision.ts は失敗時に last id を更新しない） */
-    if (r.fallback === true) continue;
-    if (r.sessionID !== sessionID) continue;
-    const ts = typeof r.ts === "string" ? Date.parse(r.ts) : NaN;
-    if (!Number.isFinite(ts)) continue;
-    if (now - ts <= windowMs) return true;
-  }
-  return false;
-}
-
 /**
- * goal start 時の保険: 直近に decide 行が無ければ goal title を入力に判定して**記録だけ**残す。
- * route は変えない（entry_route は既存の route_set / fail-safe に委ねる）。
+ * goal start 時の難易度判定（design g-mwjsd3om 判断4）。
+ * route は入口 hook が判定済みなので、ここでは題から難易度だけを決める。
  *
- * - セッションが不明なときは何もしない（他セッションの decide と二重計上になるため）。
- * - API キーが無い環境では判定しない（失敗した decide 行が goal ごとに残ると
- *   calibrate の decide×outcome 結合が偽の decide に実績を吸わせる）。
- * - 例外は投げない（goal start を止めない）。呼び出し側で try/catch しないためのもの。
+ * - セッション不明では何もしない（他セッションの判定と二重計上になるため）
+ * - API キーが無い環境では判定しない（失敗行が goal ごとに残ると較正が汚れる）
+ * - 例外は投げない（goal start を止めない）
+ * - 上限は GOAL_DIFFICULTY_TIMEOUT_MS（外れたら difficulty: null で始める）
  */
-export async function ensureEntryDecision(
+export async function judgeGoalDifficulty(
   root: string,
   sessionID: string | null,
   title: string,
-  opts?: { fetchFn?: FetchFn; timeoutMs?: number; now?: number },
-): Promise<EntryVerdict | null> {
+  opts?: { fetchFn?: FetchFn; timeoutMs?: number },
+): Promise<Difficulty | null> {
   try {
-    /* セッション不明では Recent 判定も紐付けもできない。
-     * 保険を動かすと他セッションの decide と二重計上になるので動かさない。
-     * 動かなかったことは skip 行として残す（較正データで，保险の不发火が見える） */
     if (!sessionID) {
       await recordEntrySkip(root, "session_unknown", title, null);
       return null;
@@ -240,14 +187,13 @@ export async function ensureEntryDecision(
       await recordEntrySkip(root, "no_api_key", title, sessionID);
       return null;
     }
-    if (hasRecentEntryDecision(root, sessionID, opts?.now ?? Date.now())) {
-      return null;
-    }
-    return await decideEntry(title, opts?.fetchFn ?? fetch, {
+    const r = await decideDifficulty(title, opts?.fetchFn ?? fetch, {
       root,
       sessionID,
-      timeoutMs: opts?.timeoutMs ?? ENTRY_DECIDE_TIMEOUT_MS,
+      source: "goal-start",
+      timeoutMs: opts?.timeoutMs ?? GOAL_DIFFICULTY_TIMEOUT_MS,
     });
+    return r.difficulty;
   } catch {
     // 判定の失敗で goal start を止めない
     return null;

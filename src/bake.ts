@@ -9,6 +9,7 @@ import { join } from "node:path";
 import {
   GRAPHHOPPER_AGENTS,
   buildPermissions,
+  formatModelRef,
   parseModelRef,
   type V2AgentDef,
 } from "./agents";
@@ -93,13 +94,14 @@ export function bakeAgents(input: BakeInput): BakeResult {
     if (override) {
       try {
         const m = parseModelRef(override);
-        modelStr = `${m.providerID}/${m.model}`;
+        // variant（reasoning effort）も焼く。許可判定は checkModelAllowed が variant を落とす
+        modelStr = formatModelRef(m);
       } catch {
         violations.push({ agent: name, model: override, kind: "invalid" });
         continue;
       }
     } else {
-      modelStr = `${def.model.providerID}/${def.model.model}`;
+      modelStr = formatModelRef(def.model);
     }
     const v = toViolation(name, modelStr, checkModelAllowed(modelStr, input.policy));
     if (v) {

@@ -69,7 +69,9 @@ function globMatch(pattern: string, model: string): boolean {
   return new RegExp(`^${body}$`).test(model);
 }
 
-/** モデルの許可判定。deny 優先・allow 非空なら一致必須・未解決は制限有効時のみ拒否 */
+/** モデルの許可判定。deny 優先・allow 非空なら一致必須・未解決は制限有効時のみ拒否。
+ * `provider/model#variant` の variant は判定に含めない（effort は課金の別軸で、ポリシーは
+ * モデルの許可・拒否を表す。design g-mwjsd3om 判断3）。 */
 export function checkModelAllowed(
   model: string | undefined,
   policy: ModelPolicy,
@@ -81,10 +83,17 @@ export function checkModelAllowed(
       ? { ok: true }
       : { ok: false, kind: "unresolved" };
   }
-  const denied = deny.find((p) => globMatch(p, model));
+  const key = stripModelVariant(model);
+  const denied = deny.find((p) => globMatch(p, key));
   if (denied !== undefined) return { ok: false, kind: "deny", rule: denied };
-  if (allow.length > 0 && !allow.some((p) => globMatch(p, model))) {
+  if (allow.length > 0 && !allow.some((p) => globMatch(p, key))) {
     return { ok: false, kind: "allow" };
   }
   return { ok: true };
+}
+
+/** "provider/model#variant" → "provider/model" */
+export function stripModelVariant(model: string): string {
+  const hash = model.indexOf("#");
+  return hash >= 0 ? model.slice(0, hash) : model;
 }

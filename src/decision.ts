@@ -139,7 +139,7 @@ export type DecisionLog = {
   /** decide行のid。outcome行は decision_id で参照する */
   id?: string;
   decision_id?: string | null;
-  kind: "decide" | "decide-skip" | "select" | "compact" | "compact-skip" | "outcome" | "shadow";
+  kind: "decide" | "decide-skip" | "difficulty" | "select" | "compact" | "compact-skip" | "outcome" | "shadow";
   /** 判定を行ったプロバイダ／実際に答えたモデル（shadow 行は shadow 側） */
   provider?: DecisionProviderName;
   model?: string | null;
@@ -158,6 +158,8 @@ export type DecisionLog = {
   rawChoice?: string | null;
   /** 判定を行ったセッション（hook経由の自動判定で発生。null=不明） */
   sessionID?: string | null;
+  /** kind="difficulty" の出所（"goal-start" / "implementing"。較正用） */
+  source?: string;
   /** 判定に対応するユーザーメッセージのID（hook経由。null=不明）。
    * 同じターンの decide 行をまとめる手がかりになる */
   messageID?: string | null;
@@ -391,26 +393,133 @@ export type DecideResult = {
 export type { Difficulty } from "./state";
 type Difficulty = state.Difficulty;
 
-/* 難易度3択のcriteria。routeとは独立に「失敗コスト」を見る */
-export const DECISION_DIFFICULTY_CRITERIA: Record<Difficulty, string> = {
-  easy: "単純。既存パターンの踏襲で、設計判断なし・変更範囲が狭い・失敗しても即座に直せる",
-  normal: "普通。設計判断が多少ある／複数ファイルに触れる／テストを書く必要がある。easyにもhardにも当てはまらない全て",
-  hard: "難しい。設計判断が重い・未知の領域・変更範囲が広い／失敗コストが高い・アーキテクチャや契約に触れる",
+/* 難易度は route と別の下限を使う（design g-mwjsd3om 判断5）。
+ * easy は advisor 省略に直結するので高く、normal は「メインが決める」側なので低く、
+ * hard は cascade の昇格に効くので実在の大型作業だけが通る高さにする。 */
+export const DIFFICULTY_CONFIDENCE_FLOOR: Record<Difficulty, number> = {
+  easy: 0.9,
+  normal: 0.4,
+  hard: 0.6,
 };
 
-/** d1 difficulty の choice を写像する（純関数）。不正・低confidenceは null（昇格しない） */
+/* 難易度3択のcriteria。routeとは独立に「変更の形」を見る（失敗コストより判別が良い。§2 実測）。
+ * 「迷ったらnormal」は書かない（normal に寄ると hard が出なくなる）。 */
+export const DECISION_DIFFICULTY_CRITERIA: Record<Difficulty, string> = {
+  easy: "小さい変更。1〜2ファイルの文言・コメント・設定値の修正や、既存パターンをそのまま踏襲する追加。設計判断がない",
+  normal: "通常の機能追加・修正。数ファイルに触れ、テストを書く。設計判断はあるが既存の仕組みの中に収まる",
+  hard: "大きい変更。新しい仕組みの設計、既存の仕組みの置き換え・削除・移行、複数のサブシステムにまたがる変更、hook・状態遷移・並行実行・課金など失敗が見えにくい箇所の変更",
+};
+
+/** 難易度の質問文（route とは別呼び出しで聞く） */
+export const DECISION_DIFFICULTY_INSTRUCTIONS = "この作業自体の難易度を1つ選べ";
+
+/** d1 difficulty の choice を写像する（純関数）。不正・下限未満は null（昇格しない） */
 export function mapDifficultyAnswer(
   choice: unknown,
   confidence: unknown,
+  floors: Record<Difficulty, number> = DIFFICULTY_CONFIDENCE_FLOOR,
 ): { difficulty: Difficulty | null; confidence: number | null; reason: string } {
   const conf = typeof confidence === "number" ? confidence : null;
   if (choice !== "easy" && choice !== "normal" && choice !== "hard") {
     return { difficulty: null, confidence: conf, reason: "d1不正difficulty→未判定" };
   }
-  if (conf !== null && conf < DECISION_CONFIDENCE_FLOOR) {
-    return { difficulty: null, confidence: conf, reason: `d1低confidence(${conf})→未判定` };
+  const floor = floors[choice];
+  if (conf !== null && conf < floor) {
+    return {
+      difficulty: null,
+      confidence: conf,
+      reason: `d1低confidence(${conf}<${floor})→未判定`,
+    };
   }
   return { difficulty: choice, confidence: conf, reason: `d1判定(${choice})` };
+}
+
+/** 難易度だけを d1 に聞く結果 */
+export type DifficultyResult = {
+  difficulty: Difficulty | null;
+  confidence: number | null;
+  reason: string;
+  /** 呼び出し自体が失敗した（判定不能） */
+  fallback: boolean;
+  model: string | null;
+};
+
+/**
+ * 難易度だけを判定する（design g-mwjsd3om 判断4）。route とは別の呼び出しにするのは、
+ * 入力が違う（題・design のタスク列）ため。opts.root があれば decisions.jsonl に
+ * kind="difficulty" で残す（route の decide 行を汚さない）。
+ */
+export async function decideDifficulty(
+  request: string,
+  fetchFn: FetchFn = fetch,
+  opts?: {
+    root?: string;
+    sessionID?: string | null;
+    timeoutMs?: number;
+    floors?: Record<Difficulty, number>;
+    /** 呼び出しの出所（較正用。例 "goal-start" / "implementing"） */
+    source?: string;
+  },
+): Promise<DifficultyResult> {
+  const question: DecisionQuestion = {
+    type: "choice",
+    instructions: DECISION_DIFFICULTY_INSTRUCTIONS,
+    criteria: DECISION_DIFFICULTY_CRITERIA,
+  };
+  const timeoutMs = opts?.timeoutMs ?? DECISION_TIMEOUT_MS;
+  const primary = primaryProviderName();
+  const t0 = performance.now();
+  const r = await callDecision(request, { difficulty: question }, fetchFn, timeoutMs, PROVIDERS[primary]);
+  if (!r.ok) {
+    if (opts?.root) {
+      await logDecision(opts.root, {
+        kind: "difficulty",
+        provider: primary,
+        model: null,
+        request,
+        result: "error",
+        confidence: null,
+        latencyMs: Math.round(performance.now() - t0),
+        fallback: true,
+        reason: r.reason,
+        difficulty: null,
+        difficultyConfidence: null,
+        sessionID: opts.sessionID ?? null,
+        source: opts.source,
+      });
+    }
+    return { difficulty: null, confidence: null, reason: r.reason, fallback: true, model: null };
+  }
+  const mapped = mapDifficultyAnswer(
+    r.answers.difficulty?.choice,
+    r.answers.difficulty?.confidence,
+    opts?.floors ?? DIFFICULTY_CONFIDENCE_FLOOR,
+  );
+  if (opts?.root) {
+    await logDecision(opts.root, {
+      kind: "difficulty",
+      provider: primary,
+      model: r.model,
+      request,
+      result: mapped.difficulty ?? "unknown",
+      confidence: mapped.confidence,
+      latencyMs: Math.round(performance.now() - t0),
+      fallback: false,
+      reason: mapped.reason,
+      difficulty: mapped.difficulty,
+      difficultyConfidence: mapped.confidence,
+      rawChoice: typeof r.answers.difficulty?.choice === "string" ? r.answers.difficulty.choice : null,
+      sessionID: opts.sessionID ?? null,
+      source: opts.source,
+    });
+  }
+  return {
+    difficulty: mapped.difficulty,
+    confidence: mapped.confidence,
+    reason: mapped.reason,
+    fallback: false,
+    model: r.model,
+  };
 }
 
 /* d1応答のchoice＋confidence→route写像（純粋関数。単体テスト対象）。
@@ -479,10 +588,6 @@ function scheduleShadow(args: {
         return;
       }
       const base = mapDecisionAnswer(r.answers.route?.choice, r.answers.route?.confidence);
-      const diff = mapDifficultyAnswer(
-        r.answers.difficulty?.choice,
-        r.answers.difficulty?.confidence,
-      );
       await logDecision(root, {
         decision_id: decisionId,
         kind: "shadow",
@@ -494,8 +599,8 @@ function scheduleShadow(args: {
         latencyMs: Math.round(performance.now() - t0),
         fallback: false,
         reason: base.reason,
-        difficulty: diff.difficulty,
-        difficultyConfidence: diff.confidence,
+        difficulty: null,
+        difficultyConfidence: null,
         rawChoice: base.rawChoice,
       });
     } catch (e) {
@@ -540,17 +645,13 @@ export async function decideRoute(
   const decisionId = opts?.root ? randomUUID().slice(0, 8) : null;
   const timeoutMs = opts?.timeoutMs ?? DECISION_TIMEOUT_MS;
   const questions: Record<string, DecisionQuestion> = {
+    /* 難易度は decideDifficulty で別に聞く（design g-mwjsd3om 判断4）。
+     * 入力が違う（発話ではなく goal の題・design のタスク列）ため同居させない。 */
     route: {
       type: "choice",
       instructions:
         "この作業内容に適したgraphhopperの入口routeを1つ選べ。迷ったらfull",
       criteria: DECISION_ROUTE_CRITERIA,
-    },
-    difficulty: {
-      type: "choice",
-      instructions:
-        "この作業自体の難易度を1つ選べ（routeとは独立。迷ったらnormal）",
-      criteria: DECISION_DIFFICULTY_CRITERIA,
     },
   };
   const finish = async (
@@ -620,16 +721,12 @@ export async function decideRoute(
     );
   }
   const base = mapDecisionAnswer(r.answers.route?.choice, r.answers.route?.confidence);
-  const diff = mapDifficultyAnswer(
-    r.answers.difficulty?.choice,
-    r.answers.difficulty?.confidence,
-  );
   return finish(
     {
       ...base,
-      difficulty: diff.difficulty,
-      difficultyConfidence: diff.confidence,
-      reason: `${base.reason} / ${diff.reason}`,
+      difficulty: null,
+      difficultyConfidence: null,
+      reason: base.reason,
     },
     false,
     r.model,

@@ -357,6 +357,16 @@ describe("subagent read-only guard (v2 permissions)", () => {
       providerID: "opencode-go",
       model: "deepseek-v4.1-flash",
     });
+    // variant（reasoning effort）は捨てずに保持する（design g-mwjsd3om 判断2）
+    expect(parseModelRef("claude-oauth/claude-opus-5-5#xhigh")).toEqual({
+      providerID: "claude-oauth",
+      model: "claude-opus-5-5",
+      variant: "xhigh",
+    });
+    expect(parseModelRef("claude-oauth/claude-opus-5-5#")).toEqual({
+      providerID: "claude-oauth",
+      model: "claude-opus-5-5",
+    });
     expect(() => parseModelRef("no-slash")).toThrow();
   });
 

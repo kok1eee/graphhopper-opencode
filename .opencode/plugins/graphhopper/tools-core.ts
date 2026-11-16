@@ -4,7 +4,7 @@
  * v1 src/index.ts の同名 tool execute 本体を v2 形 (JSON Schema＋{content}) に移植。
  */
 import { $ } from "bun";
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import {
   autoEscalateOnStuck,
@@ -12,6 +12,8 @@ import {
   effectivePhaseAction,
   ESCALATE_NEXT,
   EVAL_MANAGED_NOTE,
+  formatAdvisorRequiredForHard,
+  formatHardUpgradeHead,
   formatUsabilityLine,
   ORACLE_ASK,
   parseEntryRoute,
@@ -19,6 +21,8 @@ import {
   usabilityGateRefusal,
 } from "../../../src/gate";
 import {
+  DIFFICULTY_CONFIDENCE_FLOOR,
+  decideDifficulty,
   decideRoute,
   formatDecisionNextStep,
   formatDecisionSummary,
@@ -27,14 +31,83 @@ import {
   selectLenses,
 } from "../../../src/decision";
 import { finishCascade, maybeRequestCheckpoint, syncCascade } from "./cascade";
-import { ensureEntryDecision } from "../../../src/entry-decide";
+import { judgeGoalDifficulty } from "../../../src/entry-decide";
 import { formatIntentLine, renderIntent } from "../../../src/intent";
 import { catalogPolicyWarning } from "../../../src/bake";
 import * as state from "../../../src/state";
 import { clearWaitTimer, noteSession, S, text, type Gh } from "./shared";
 import { checkBuiltinGoal } from "../../../src/goal-conflict";
+import { parseSeedTasks } from "../../../src/todos";
 
 type Ctx = { sessionID: string };
+
+/**
+ * implementing 遷移の難易度再判定（design g-mwjsd3om 判断6）。
+ * design のタスク列を入力に hard だけを判定し、hard なら state を上げる（降格しない）。
+ * design.md は designing を抜けると不変なので、結果は応答と log に残す。
+ * 上限 2 秒。判定できない・hard でないなら何もしない（null を返す）。
+ *
+ * start から hard だった goal は再判定をスキップするが、advisor 未実施なら案内は返す
+ * （判断6が塞ぎたかった穴の残り。design g-mwkfisl7 判断1）。
+ */
+async function upgradeDifficultyFromDesign(
+  gh: Gh,
+  active: state.ActiveLoop,
+): Promise<string | null> {
+  const root = gh.root;
+  const wasHard = active.state.difficulty === "hard";
+  if (wasHard) {
+    /* 再判定はしない（hard より上は無い）。第二意見だけ未実施なら促す */
+    return active.state.advisor_consult
+      ? null
+      : formatAdvisorRequiredForHard({ changed: false });
+  }
+  let tasks: { text: string }[] = [];
+  try {
+    tasks = parseSeedTasks(readFileSync(state.planPath(root, active.goal.id), "utf8"));
+  } catch {
+    return null; // design が無い・読めない goal は対象外
+  }
+  if (tasks.length === 0) return null;
+  const input = [
+    active.goal.title,
+    "",
+    `実装タスク（${tasks.length}件）:`,
+    ...tasks.map((t) => `- ${t.text.slice(0, 160)}`),
+  ]
+    .join("\n")
+    .slice(0, 3000);
+  let r: Awaited<ReturnType<typeof decideDifficulty>>;
+  try {
+    r = await decideDifficulty(input, fetch, {
+      root,
+      sessionID: active.state.session_id ?? null,
+      source: "implementing",
+      timeoutMs: 2_000,
+      // 昇格はモデル切替を伴うので、start の 0.6 より精度を優先する
+      floors: { ...DIFFICULTY_CONFIDENCE_FLOOR, hard: 0.7 },
+    });
+  } catch {
+    // 判定の失敗で遷移を止めない。この後の state 書き込みと案内は try の外に置く
+    return null;
+  }
+  if (r.difficulty !== "hard") return null;
+  /* ここから先は判定結果に対する副作用。catch に巻き込むと、difficulty は hard に
+   * 保存済みなのに advisor の案内が消える（判断6が塞ぎたかった穴） */
+  state.setDifficulty(root, "hard");
+  state.recordEvent(root, {
+    type: "difficulty_upgraded",
+    goal: active.goal.id,
+    from: active.state.difficulty,
+    to: "hard",
+    confidence: r.confidence,
+    source: "design-tasks",
+  });
+  if (active.state.advisor_consult) {
+    return formatHardUpgradeHead(true, active.state.difficulty);
+  }
+  return formatAdvisorRequiredForHard({ changed: true, from: active.state.difficulty });
+}
 
 function sess(gh: Gh, context: Ctx): string {
   const id = String(context.sessionID ?? "");
@@ -110,12 +183,17 @@ export function registerCoreTools(
               `error: goal "${active.goal.title}" is already active. complete or pause it first.`,
             );
           }
-          /* 入口判定の保険: 直近の decide 行が無ければ goal title を入力に判定して記録だけ残す
-           * （route は変えない。entry_route は route_set / fail-safe に委ねる。
-           *   d1 の待ち時間を goal start に載せないので await しない。記録は best-effort） */
-          void ensureEntryDecision(root, sessionID || null, args.title);
+          /* 難易度は題から判定する（design g-mwjsd3om 判断4）。pending（route_set でメインが
+           * 明示した値）があればそれを優先し、判定は走らせない。d1 を使えない環境では
+           * judgeGoalDifficulty が待たずに null を返す。上限 1.0 秒。 */
+          const pendingDifficulty = state.readPendingRoute(root)?.difficulty ?? null;
+          const judged =
+            pendingDifficulty === null
+              ? await judgeGoalDifficulty(root, sessionID || null, args.title)
+              : null;
           const a = state.startGoal(root, args.title, sessionID, {
             strong: args.strong === true,
+            difficulty: judged,
           });
           try {
             const rev = await state.captureBaselineRev($, root);
@@ -348,13 +426,21 @@ export function registerCoreTools(
       const args = input as { phase: state.Phase; notes?: string };
       const rejected = checkPhaseMove(root, args.phase);
       if (rejected) return text(rejected);
+      const before = state.getActive(root);
       const mv = state.setPhaseChecked(root, args.phase, args.notes);
       if (!mv.ok) return text(`error: ${mv.error ?? "遷移に失敗"}`);
-      const a = mv.active;
+      let a = mv.active;
       if (!a) return text("error: no active goal or invalid phase");
+      /* designing → implementing のときだけ、design のタスク列から hard を再判定する。
+       * difficulty を上げてから syncCascade を呼ぶ（escalate_on: ["hard"] を効かせる） */
+      const upgrade =
+        before?.state.phase === "designing" && a.state.phase === "implementing"
+          ? await upgradeDifficultyFromDesign(gh, a)
+          : null;
+      if (upgrade) a = state.getActive(root) ?? a;
       const cascadeNote = await syncCascade(gh);
       return text(
-        `phase -> ${a.state.phase}${cascadeNote ? `\n${cascadeNote}` : ""}\n次: ${effectivePhaseAction(a.state.phase, a.state.entry_route, a.state.difficulty)}`,
+        `phase -> ${a.state.phase}${upgrade ? `\n${upgrade}` : ""}${cascadeNote ? `\n${cascadeNote}` : ""}\n次: ${effectivePhaseAction(a.state.phase, a.state.entry_route, a.state.difficulty)}`,
       );
     },
   });

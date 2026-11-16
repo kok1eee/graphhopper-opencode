@@ -8,10 +8,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   decideEntry,
-  ensureEntryDecision,
   formatEntryVerdict,
-  hasRecentEntryDecision,
   INTERNAL_PROMPT_METADATA_KEY,
+  judgeGoalDifficulty,
   isInternalPrompt,
   recordEntrySkip,
   shouldRunEntryDecide,
@@ -93,6 +92,13 @@ describe("shouldRunEntryDecide（判定の除外条件）", () => {
     });
   });
 
+  test("子セッションか不明（null）なら判定しない（child_unknown）", () => {
+    expect(shouldRunEntryDecide({ ...baseInput, isChildSession: null })).toEqual({
+      run: false,
+      reason: "child_unknown",
+    });
+  });
+
   test("内部promptを最優先で落とす（自動継続が最頻出のため）", () => {
     const r = shouldRunEntryDecide({
       ...baseInput,
@@ -154,15 +160,15 @@ describe("formatEntryVerdict（モデルへ渡す注入文）", () => {
   test("raw route を route_set に渡す指示を含む", () => {
     const text = formatEntryVerdict(verdict({})) ?? "";
     expect(text).toContain("route: 'light'");
-    expect(text).toContain("difficulty: 'easy'");
     expect(text).toContain("graphhopper_goal(action: 'start'");
     expect(text).toContain("graphhopper 入口判定");
   });
 
-  test("difficulty が無ければ difficulty 引数を付けない", () => {
-    const text = formatEntryVerdict(verdict({ difficulty: null })) ?? "";
-    expect(text).not.toContain("difficulty: '");
-    expect(text).toContain("route: 'light'");
+  test("difficulty は渡さない（goal start で題から判定する。design g-mwjsd3om 判断4）", () => {
+    for (const v of [verdict({ difficulty: "easy" }), verdict({ difficulty: null })]) {
+      const text = formatEntryVerdict(v) ?? "";
+      expect(text).not.toContain("difficulty");
+    }
   });
 
   test("confidence を表示する", () => {
@@ -237,104 +243,64 @@ describe("recordEntrySkip（判定しなかった記録）", () => {
   });
 });
 
-describe("hasRecentEntryDecision / ensureEntryDecision（goal start 時の保険）", () => {
-  test("直近の decide 行があれば true", async () => {
+describe("judgeGoalDifficulty（goal start 時の難易度判定。design g-mwjsd3om 判断4）", () => {
+  test("題で難易度を判定し、kind=difficulty で記録する", async () => {
     const root = mkRoot();
     await withKey(async () => {
-      await decideEntry("依頼", fakeFetch({ route: { choice: "full", confidence: 0.9 } }), {
-        root,
-        sessionID: "sess-1",
+      const v = await judgeGoalDifficulty(root, "sess-3", "goal の題名", {
+        fetchFn: fakeFetch({ difficulty: { choice: "hard", confidence: 0.8 } }),
       });
-      expect(hasRecentEntryDecision(root, "sess-1")).toBe(true);
-      expect(hasRecentEntryDecision(root, "sess-2")).toBe(false);
-    });
-  });
-
-  test("直近の decide 行が無ければ title で判定して記録する", async () => {
-    const root = mkRoot();
-    await withKey(async () => {
-      const v = await ensureEntryDecision(
-        root,
-        "sess-3",
-        "goal の題名",
-        { fetchFn: fakeFetch({ route: { choice: "light", confidence: 0.9 } }) },
-      );
-      expect(v).not.toBeNull();
+      expect(v).toBe("hard");
       const rows = readRows(root);
       expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({ kind: "decide", sessionID: "sess-3" });
-    });
-  });
-
-  test("sessionID が無いときは一致なし（他セッションの decide で代用しない）", async () => {
-    const root = mkRoot();
-    await withKey(async () => {
-      await decideEntry("依頼", fakeFetch({ route: { choice: "full", confidence: 0.9 } }), {
-        root,
-        sessionID: "sess-9",
+      expect(rows[0]).toMatchObject({
+        kind: "difficulty",
+        sessionID: "sess-3",
+        result: "hard",
+        difficulty: "hard",
+        source: "goal-start",
       });
-      expect(hasRecentEntryDecision(root, null)).toBe(false);
-      expect(hasRecentEntryDecision(root, "sess-9")).toBe(true);
+      // route の decide 行は作らない（質問を分けた）
+      expect(rows.some((r) => r.kind === "decide")).toBe(false);
     });
   });
 
-  test("fallback 行は「判定済み」に数えない（古い decide への紐付けを防ぐ）", async () => {
+  test("下限未満は null（easy は 0.9 以上を要求する）", async () => {
     const root = mkRoot();
     await withKey(async () => {
-      const failing = (async () => {
-        throw new Error("network down");
-      }) as unknown as typeof fetch;
-      await decideEntry("依頼", failing, { root, sessionID: "sess-f" });
-      expect(hasRecentEntryDecision(root, "sess-f")).toBe(false);
-    });
-  });
-
-  test("直近の decide 行があれば何もしない（二重記録しない）", async () => {
-    const root = mkRoot();
-    await withKey(async () => {
-      await decideEntry("依頼", fakeFetch({ route: { choice: "full", confidence: 0.9 } }), {
-        root,
-        sessionID: "sess-4",
+      const easy = await judgeGoalDifficulty(root, "s", "題", {
+        fetchFn: fakeFetch({ difficulty: { choice: "easy", confidence: 0.8 } }),
       });
-      const v = await ensureEntryDecision(
-        root,
-        "sess-4",
-        "goal の題名",
-        { fetchFn: fakeFetch({ route: { choice: "light", confidence: 0.9 } }) },
-      );
-      expect(v).toBeNull();
-      expect(readRows(root)).toHaveLength(1);
+      expect(easy).toBeNull();
+      const normal = await judgeGoalDifficulty(root, "s", "題", {
+        fetchFn: fakeFetch({ difficulty: { choice: "normal", confidence: 0.5 } }),
+      });
+      expect(normal).toBe("normal");
     });
   });
 
-  test("APIキー無しの環境では decide 行を残さない（較正データを汚さない）", async () => {
+  test("APIキー無しでは判定せず difficulty 行も残さない（較正を汚さない）", async () => {
     const root = mkRoot();
     await withoutKey(async () => {
-      const v = await ensureEntryDecision(
-        root,
-        "sess-5",
-        "goal の題名",
-        { fetchFn: fakeFetch({ route: { choice: "light", confidence: 0.9 } }) },
-      );
+      const v = await judgeGoalDifficulty(root, "sess-5", "題", {
+        fetchFn: fakeFetch({ difficulty: { choice: "hard", confidence: 0.9 } }),
+      });
       expect(v).toBeNull();
       const rows = readRows(root);
-      expect(rows.every((r) => r.kind !== "decide")).toBe(true);
+      expect(rows.every((r) => r.kind !== "difficulty")).toBe(true);
+      expect(rows[0]).toMatchObject({ kind: "decide-skip", result: "no_api_key" });
     });
   });
 
-  test("セッション不明では保険を動かさない（他セッションの decide と二重計上しない）", async () => {
+  test("セッション不明では判定しない（二重計上を避ける）", async () => {
     const root = mkRoot();
     await withKey(async () => {
-      const v = await ensureEntryDecision(
-        root,
-        null,
-        "goal の題名",
-        { fetchFn: fakeFetch({ route: { choice: "light", confidence: 0.9 } }) },
-      );
+      const v = await judgeGoalDifficulty(root, null, "題", {
+        fetchFn: fakeFetch({ difficulty: { choice: "hard", confidence: 0.9 } }),
+      });
       expect(v).toBeNull();
-      /* decide 行は作らず、動かなかったことだけ skip 行として残す */
       const rows = readRows(root);
-      expect(rows.some((r) => r.kind === "decide")).toBe(false);
+      expect(rows.some((r) => r.kind === "difficulty")).toBe(false);
       expect(rows[0]).toMatchObject({ kind: "decide-skip", result: "session_unknown" });
     });
   });
@@ -345,10 +311,8 @@ describe("hasRecentEntryDecision / ensureEntryDecision（goal start 時の保険
       const exploding = (async () => {
         throw new Error("boom");
       }) as unknown as typeof fetch;
-      const v = await ensureEntryDecision(root, "sess-6", "goal の題名", {
-        fetchFn: exploding,
-      });
-      expect(v).not.toBeUndefined();
+      const v = await judgeGoalDifficulty(root, "sess-6", "題", { fetchFn: exploding });
+      expect(v).toBeNull();
     });
   });
 });

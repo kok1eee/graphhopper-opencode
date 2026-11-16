@@ -986,13 +986,13 @@ export function registerOpsTools(
   editor.add({
     name: "graphhopper_invoke",
     description:
-      "別モデルでsubagent相当を実行する。opencode run をspawnし stdout を返す。入れ子禁止・prompt上限12000文字・timeout既定120s・上限300s。並列fan-out可。delayMsで起動ずらし可（429 herd回避）",
+      "別モデルでsubagent相当を実行する。opencode run をspawnし stdout を返す。入れ子禁止・prompt上限12000文字・timeout既定120s（advisor/oracleは240s）・上限300s。並列fan-out可。delayMsで起動ずらし可（429 herd回避）",
     input: S.obj(
       {
         agent: S.str("graphhopper-* agent名（例: graphhopper-critic）"),
         model: S.optStr("provider/model形式。省略時はconfig既定。configのmodel_allow/model_denyで拒否される場合がある"),
         prompt: S.str("lens指示＋渡し物全文（12000文字まで）"),
-        timeoutMs: S.num("タイムアウトms（既定120000・上限300000）"),
+        timeoutMs: S.num("タイムアウトms（既定120000。advisor/oracle は 240000・上限300000）"),
         delayMs: S.num("起動前の待機ms（並列herd回避用。既定0・上限60000）"),
       },
       ["agent", "prompt"],

@@ -23,3 +23,9 @@ global `~/.config/opencode/AGENTS.md` (CodeGraph / graft-first / rg制限) を�
 - `.opencode/` は graft・素の `rg`/`fd` に見えない (dot-dir)。探索時は `rg --hidden` / Glob を使う。
 - Go モデルで `Insufficient account funds` が出たら: env キーが stored (`auth.json`)
   より優先される。枯渇アカウントの env キーを unset して stored 個人キーを使うこと。
+- 完了報告の形（作業を見ていない人が読む）:
+  - 要点から書く。結論 → 入ったもの → 注意点の順。process の自慢（何回レビューした等）を先頭に置かない。
+  - 専門用語を噛み砕く。ファイル名・関数名は必要なものだけ。
+  - design の path（`.graphhopper/plans/<goal>.md`）と、commit した change を書く。commit していなければ、その旨と未 commit の変更（どのファイルか）を書く。
+  - 再起動・再ログインなど利用者側の操作が要る変更は明記する。
+  - 確かめていないこと（目視・実機・本番）を、できたことと混ぜずに分けて書く。

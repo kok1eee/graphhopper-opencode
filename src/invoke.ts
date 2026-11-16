@@ -6,16 +6,27 @@
  */
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { execSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { GRAPHHOPPER_AGENTS } from "./agents";
 import { checkModelAllowed } from "./model-policy";
+import { recordInvokeEnd, recordInvokeStart } from "./running-invoke";
 import { readConfig } from "./state";
 
 export const PROMPT_MAX_CHARS = 12000;
 export const STDOUT_MAX_CHARS = 30000;
-export const DEFAULT_TIMEOUT_MS = 120000;
-export const MAX_TIMEOUT_MS = 300000;
-export const MIN_TIMEOUT_MS = 10000;
+import { DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, MIN_TIMEOUT_MS } from "./invoke-limits";
+export { DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, MIN_TIMEOUT_MS } from "./invoke-limits";
+/** 判断ノードのうち effort を上げる agent（advisor / oracle）の既定 timeout。
+ * xhigh は既定 effort の約 2 倍の時間を使う（design g-mwjsd3om 判断2） */
+export const JUDGEMENT_AGENT_TIMEOUT_MS = 240000;
+
+/** invoke の既定 timeout。advisor / oracle だけ長く取る */
+export function defaultTimeoutMs(agent: string): number {
+  return agent === "graphhopper-advisor" || agent === "graphhopper-oracle"
+    ? JUDGEMENT_AGENT_TIMEOUT_MS
+    : DEFAULT_TIMEOUT_MS;
+}
 export const KILL_GRACE_MS = 5000;
 /** fan-out thundering herd回避用の起動ずらし上限。並列既定は維持しopt-inで使う */
 export const MAX_DELAY_MS = 60000;
@@ -336,7 +347,7 @@ export async function invokeStructured(
   const root = resolve(args.root);
   const timeoutMs = Math.min(
     MAX_TIMEOUT_MS,
-    Math.max(MIN_TIMEOUT_MS, args.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+    Math.max(MIN_TIMEOUT_MS, args.timeoutMs ?? defaultTimeoutMs(args.agent)),
   );
   const argv = buildArgs({ agent: args.agent, model, dir: root, title: "gh-invoke", prompt: args.prompt });
   const childEnv: NodeJS.ProcessEnv = { ...process.env, [DEPTH_ENV]: String(depth + 1) };
@@ -363,18 +374,25 @@ export async function invokeStructured(
       cancelled: true,
     };
   }
-  const r = await runChild(
-    binary,
-    argv,
-    {
-      timeoutMs,
-      cwd: root,
-      childEnv,
-      signal: invokeOpts.signal,
-      heartbeatMs: invokeOpts.heartbeatMs,
-      onTick: invokeOpts.onTick,
-    },
-    spawnFn,
-  );
-  return { output: r.output, timedOut: r.timedOut, fallbackWarning: r.fallbackWarning, cancelled: r.cancelled };
+  /* 実行中の数を TUI に共有する（design g-mwkfisl7 判断3）。失敗しても invoke は止めない */
+  const runID = randomUUID();
+  await recordInvokeStart(root, { id: runID, pid: process.pid, started_at: new Date().toISOString() });
+  try {
+    const r = await runChild(
+      binary,
+      argv,
+      {
+        timeoutMs,
+        cwd: root,
+        childEnv,
+        signal: invokeOpts.signal,
+        heartbeatMs: invokeOpts.heartbeatMs,
+        onTick: invokeOpts.onTick,
+      },
+      spawnFn,
+    );
+    return { output: r.output, timedOut: r.timedOut, fallbackWarning: r.fallbackWarning, cancelled: r.cancelled };
+  } finally {
+    await recordInvokeEnd(root, runID);
+  }
 }

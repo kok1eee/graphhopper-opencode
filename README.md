@@ -36,7 +36,13 @@ bun test && npx tsc --noEmit   # eval (must stay green)
 
 Model assignment (who runs on what) lives in two tables, global
 `~/.config/opencode/graphhopper.json` and project `.graphhopper/config.json`
-(project wins per-agent). After changing either, regenerate + restart:
+(project wins per-agent). A value can carry a reasoning-effort variant as
+`provider/model#variant` (e.g. `claude-oauth/claude-opus-5-5#xhigh`); the bake
+writes it into the agent frontmatter and `model_allow` / `model_deny` still match
+on `provider/model` (the variant is ignored by the policy). The bake does not
+check variants against the provider catalog (no network at bake time), so an
+unknown variant fails at run time, for that agent only. After changing either
+table, regenerate + restart:
 
 ```sh
 bun scripts/gen-agents.ts       # bake table into .opencode/agents/*.md

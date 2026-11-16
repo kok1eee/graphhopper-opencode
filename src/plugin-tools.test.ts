@@ -34,7 +34,9 @@ import {
   writePendingRoute,
   planPath,
   readTodos,
+  getActive,
   readState,
+  setConsult,
   setVerifierVerdict,
   startGoal,
   todosPath,
@@ -1250,5 +1252,170 @@ describe("plugin: graphhopper_discover_tick（loop-until-dry）", () => {
     const third = textOf(await tick.execute({ findings }));
     expect(third).toContain("stopped: dry");
     expect(third).toContain("confirmed: 1件");
+  });
+});
+
+describe("plugin tool: 難易度の判定（design g-mwjsd3om 判断4・6）", () => {
+  const d1Fetch = (choice: string, confidence: number) =>
+    (async () => ({
+      ok: true,
+      json: async () => ({ answers: { difficulty: { choice, confidence } } }),
+    })) as unknown as typeof fetch;
+
+  const withD1 = async <T>(impl: typeof fetch | null, fn: () => Promise<T>): Promise<T> => {
+    const savedKey = process.env.LIQUID_API_KEY;
+    const savedFetch = globalThis.fetch;
+    if (impl) {
+      process.env.LIQUID_API_KEY = "liquid_test";
+      globalThis.fetch = impl;
+    } else {
+      delete process.env.LIQUID_API_KEY;
+    }
+    try {
+      return await fn();
+    } finally {
+      globalThis.fetch = savedFetch;
+      if (savedKey === undefined) delete process.env.LIQUID_API_KEY;
+      else process.env.LIQUID_API_KEY = savedKey;
+    }
+  };
+
+  test("start は題から難易度を判定して state に入れる", async () => {
+    const root = tmpRoot();
+    await withD1(d1Fetch("normal", 0.7), async () => {
+      const out = await tools(root)
+        .get("graphhopper_goal")!
+        .execute({ action: "start", title: "普通の機能追加" }, { sessionID: "s1" });
+      expect(textOf(out)).toContain("difficulty=normal");
+      expect(readState(root).difficulty).toBe("normal");
+    });
+  });
+
+  test("d1 が使えないときは待たずに difficulty: null で始める", async () => {
+    const root = tmpRoot();
+    const started = Date.now();
+    await withD1(null, async () => {
+      const out = await tools(root)
+        .get("graphhopper_goal")!
+        .execute({ action: "start", title: "題" }, { sessionID: "s1" });
+      expect(textOf(out)).not.toContain("difficulty=");
+      expect(readState(root).difficulty).toBeNull();
+    });
+    /* fetch を呼ばないので即座に終わる（待ち上限 1.0 秒に対して十分小さい） */
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
+  test("pending の difficulty があれば判定せずそれを優先する", async () => {
+    const root = tmpRoot();
+    writePendingRoute(root, "full", "d1", "hard");
+    await withD1(d1Fetch("easy", 0.99), async () => {
+      await tools(root)
+        .get("graphhopper_goal")!
+        .execute({ action: "start", title: "題" }, { sessionID: "s1" });
+      expect(readState(root).difficulty).toBe("hard");
+    });
+  });
+
+  test("start で hard の goal は implementing 遷移で advisor 案内が出る（難易度は変えない）", async () => {
+    const root = tmpRoot();
+    writePendingRoute(root, "full", "d1", "hard");
+    await withD1(null, async () => {
+      startGoal(root, "題", "s1");
+      expect(readState(root).difficulty).toBe("hard");
+      writeFileSync(
+        planPath(root, getActive(root)!.goal.id),
+        compliantDesignDoc({
+          title: "題",
+          tasks: [
+            "- [ ] T1（判断1）: `src/a.ts` の hook を新しい仕組みに置き換える",
+            "- [ ] T2（判断1）: 移行とテスト",
+          ],
+        }),
+        "utf8",
+      );
+    });
+    const out = await tools(root)
+      .get("graphhopper_phase")!
+      .execute({ phase: "implementing" }, { sessionID: "s1" });
+    const body = textOf(out);
+    /* 再判定していないので「→ hard」は出ない。案内だけが出る（design g-mwkfisl7 判断1） */
+    expect(body).toContain("difficulty=hard のまま");
+    expect(body).not.toContain("→ hard");
+    expect(body).toContain("graphhopper-advisor");
+    expect(readState(root).difficulty).toBe("hard");
+    const rows = readFileSync(join(root, ".graphhopper", "history.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(rows.some((r) => r.type === "difficulty_upgraded")).toBe(false);
+  });
+
+  test("start で hard でも advisor 実施済みなら案内しない", async () => {
+    const root = tmpRoot();
+    writePendingRoute(root, "full", "d1", "hard");
+    await withD1(null, async () => {
+      startGoal(root, "題", "s1");
+      setConsult(root, "advisor", { summary: "design を見て方向に賛成" });
+      writeFileSync(
+        planPath(root, getActive(root)!.goal.id),
+        compliantDesignDoc({ title: "題", tasks: ["- [ ] T1（判断1）: 直す"] }),
+        "utf8",
+      );
+    });
+    const out = await tools(root)
+      .get("graphhopper_phase")!
+      .execute({ phase: "implementing" }, { sessionID: "s1" });
+    expect(textOf(out)).not.toContain("graphhopper-advisor");
+  });
+
+  test("implementing 遷移でタスク列から hard に上げ、advisor 未実施なら案内する", async () => {
+    const root = tmpRoot();
+    await withD1(null, async () => {
+      startGoal(root, "題", "s1");
+      writeFileSync(
+        planPath(root, getActive(root)!.goal.id),
+        compliantDesignDoc({
+          title: "題",
+          tasks: [
+            "- [ ] T1（判断1）: `src/a.ts` の hook を新しい仕組みに置き換える",
+            "- [ ] T2（判断1）: 移行とテスト",
+          ],
+        }),
+        "utf8",
+      );
+    });
+    await withD1(d1Fetch("hard", 0.8), async () => {
+      const out = await tools(root)
+        .get("graphhopper_phase")!
+        .execute({ phase: "implementing" }, { sessionID: "s1" });
+      const body = textOf(out);
+      expect(body).toContain("→ hard");
+      expect(body).toContain("graphhopper-advisor");
+      expect(readState(root).difficulty).toBe("hard");
+      const rows = readFileSync(join(root, ".graphhopper", "history.jsonl"), "utf8")
+        .trim()
+        .split("\n")
+        .map((l) => JSON.parse(l) as Record<string, unknown>);
+      expect(rows.some((r) => r.type === "difficulty_upgraded")).toBe(true);
+    });
+  });
+
+  test("confidence 0.7 未満の hard は昇格しない（降格もしない）", async () => {
+    const root = tmpRoot();
+    await withD1(null, async () => {
+      startGoal(root, "題", "s1");
+      writeFileSync(
+        planPath(root, getActive(root)!.goal.id),
+        compliantDesignDoc({ title: "題", tasks: ["- [ ] T1（判断1）: 直す"] }),
+        "utf8",
+      );
+    });
+    await withD1(d1Fetch("hard", 0.65), async () => {
+      const out = await tools(root)
+        .get("graphhopper_phase")!
+        .execute({ phase: "implementing" }, { sessionID: "s1" });
+      expect(textOf(out)).not.toContain("→ hard");
+      expect(readState(root).difficulty).toBeNull();
+    });
   });
 });

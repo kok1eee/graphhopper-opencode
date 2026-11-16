@@ -54,6 +54,51 @@ describe("bakeAgents", () => {
     expect(existsSync(join(outDir, "graphhopper-oracle.md"))).toBe(false);
   });
 
+  test("割当表の #variant を .md に焼く（design g-mwjsd3om 判断2）", () => {
+    const root = mkdtempSync(join(tmpdir(), "gh-bake-root-"));
+    const outDir = join(root, ".opencode", "agents");
+    const r = bakeAgents({
+      outDir,
+      agents: {
+        "graphhopper-advisor": "claude-oauth/claude-opus-5-5#xhigh",
+        "graphhopper-oracle": "claude-oauth/claude-fable-5-2#xhigh",
+      },
+      policy: {},
+    });
+    expect(r.ok).toBe(true);
+    const advisor = readFileSync(join(outDir, "graphhopper-advisor.md"), "utf8");
+    expect(advisor).toContain('model: "claude-oauth/claude-opus-5-5#xhigh"');
+    const oracle = readFileSync(join(outDir, "graphhopper-oracle.md"), "utf8");
+    expect(oracle).toContain('model: "claude-oauth/claude-fable-5-2#xhigh"');
+    // variant が無い agent は今までどおり
+    const critic = readFileSync(join(outDir, "graphhopper-critic.md"), "utf8");
+    expect(critic).toContain('model: "claude-oauth/claude-haiku-5-5"');
+    // 焼いた catalog を読み直してもポリシー違反にならない（variant は判定に含めない）
+    expect(catalogPolicyViolations(root, {})).toEqual([]);
+    expect(
+      catalogPolicyViolations(root, { model_deny: ["claude-oauth/claude-opus-5-5"] }),
+    ).toEqual([
+      expect.objectContaining({ agent: "graphhopper-advisor", kind: "deny" }),
+    ]);
+  });
+
+  test("variant 付きの割当も deny で止まる（bake 時に variant を落として判定）", () => {
+    const r = bakeAgents({
+      outDir: tmpOut(),
+      agents: { "graphhopper-advisor": "claude-oauth/claude-opus-5-5#xhigh" },
+      policy: { deny: ["claude-oauth/claude-opus-5-5"] },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.violations).toEqual([
+      {
+        agent: "graphhopper-advisor",
+        model: "claude-oauth/claude-opus-5-5#xhigh",
+        kind: "deny",
+        rule: "claude-oauth/claude-opus-5-5",
+      },
+    ]);
+  });
+
   test("built-in 既定も検査する（上書きが無くても止まる）", () => {
     const r = bakeAgents({
       outDir: tmpOut(),

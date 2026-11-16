@@ -32,7 +32,12 @@ function readRows(root: string): Array<Record<string, unknown>> {
 
 /** fake ctx。hook のコールバックを捕まえて、テストから直接叩けるようにする。
  * synthetic と instructions.entry は呼ばれた内容を記録する（design g-mwj6481n）。 */
-function fakeCtx(opts: { parentID?: string | null; entryThrows?: boolean } = {}) {
+function fakeCtx(opts: {
+  parentID?: string | null;
+  entryThrows?: boolean;
+  /** session.get の挙動。throws=即失敗、hangs=応答しない（prompt hook の期限切れ） */
+  get?: "ok" | "throws" | "hangs";
+} = {}) {
   const hooks = new Map<string, HookCb[]>();
   const add = (name: string, cb: HookCb) => {
     const list = hooks.get(name) ?? [];
@@ -51,10 +56,14 @@ function fakeCtx(opts: { parentID?: string | null; entryThrows?: boolean } = {})
     tool: { hook: async (name: string, cb: HookCb) => add(name, cb) },
     session: {
       hook: async (name: string, cb: HookCb) => add(name, cb),
-      get: async ({ sessionID }: { sessionID: string }) => ({
-        id: sessionID,
-        parentID: opts.parentID ?? null,
-      }),
+      get: async ({ sessionID }: { sessionID: string }) => {
+        if (opts.get === "throws") throw new Error("session get failed");
+        if (opts.get === "hangs") await new Promise(() => {});
+        return {
+          id: sessionID,
+          parentID: opts.parentID ?? null,
+        };
+      },
       context: async () => [],
       prompt: async () => undefined,
       synthetic: async (input: {
@@ -227,6 +236,48 @@ describe("plugin hook: 入口d1判定の prompt hook", () => {
     }
   });
 
+  test("子セッションか確認できない（取得失敗）ときは decide しない（child_unknown）", async () => {
+    const root = tmpRoot();
+    const restore = patchFetch();
+    try {
+      await withKey(async () => {
+        const { ctx, hooks } = fakeCtx({ get: "throws" });
+        await runPromptHook(root, ctx, hooks, {
+          sessionID: "s-main",
+          text: "複数ファイルを変更する重い依頼",
+        });
+        await new Promise((r) => setTimeout(r, 50));
+        const rows = readRows(root);
+        expect(rows.some((r) => r.kind === "decide")).toBe(false);
+        expect(rows[0]).toMatchObject({ kind: "decide-skip", result: "child_unknown" });
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  test("子セッションかの確認が時間切れでも decide も handoff 案内もしない", async () => {
+    const root = tmpRoot();
+    const restore = patchFetch();
+    try {
+      await withKey(async () => {
+        const { ctx, hooks, synthetic } = fakeCtx({ get: "hangs" });
+        await registerHooks({ ctx: ctx as never, root });
+        const promptHook = hooks.get("prompt")?.[0];
+        if (!promptHook) throw new Error("hook が登録されていない");
+        startGoal(root, "手切れのテスト", "ses_a");
+        writeHandoff(root, { sessionID: "ses_a" });
+        await promptHook({ sessionID: "s-new", prompt: { text: "続きをやる" } });
+        const rows = readRows(root);
+        expect(rows.some((r) => r.kind === "decide")).toBe(false);
+        expect(rows[0]).toMatchObject({ kind: "decide-skip", result: "child_unknown" });
+        expect(synthetic).toHaveLength(0);
+      });
+    } finally {
+      restore();
+    }
+  });
+
   test("active goal 中は decide しない", async () => {
     const root = tmpRoot();
     const restore = patchFetch();
@@ -295,6 +346,9 @@ describe("plugin hook: 入口判定は synthetic・system は固定・phase案�
         expect(synthetic[0].text).toContain(INJECT_HEADER);
         expect(synthetic[0].text).toContain("route: 'light'");
         expect(synthetic[0].resume).toBe(false);
+        /* patchFetch は difficulty=normal/0.9 も返すが、hook は難易度を渡さない
+         * （goal start で題から判定する。design g-mwjsd3om 判断4 / g-mwkfisl7 T5） */
+        expect(synthetic[0].text).not.toContain("difficulty");
 
         /* system には判定を入れない。固定文も 1 つだけ */
         const system: Array<{ type: string; text?: string }> = [];
