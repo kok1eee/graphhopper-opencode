@@ -355,6 +355,12 @@ describe("refs/implementing.md の編集レシピ（design g-mwiocibp 判断7）
     expect(calls.filter((c) => c.startsWith("edit:"))).toEqual(["edit:src/a.ts", "edit:src/b.ts"]);
   });
 
+  test("oracle の呼び出しは graphhopper_invoke に揃っている（design g-mwiwxc5a 判断6）", () => {
+    expect(implMd).not.toContain("task(subagent_type:");
+    expect(implMd).not.toContain("task(task_id:");
+    expect(implMd).toContain('graphhopper_invoke(agent: "graphhopper-oracle")');
+  });
+
   test("no-goal の error 文字列も失敗として扱う", async () => {
     const tools = {
       graphhopper_hash: (a: Record<string, unknown>) => ({

@@ -1053,7 +1053,7 @@ const TOOL_DEFS: ToolDef[] = [
   {
     name: "graphhopper_diff_stash",
     description:
-      "verifier fan-out用のdiff退避。baselineからの全文diffを.graphhopper/tmpに1回だけ置きpathを返す（3 lensへのinline 3重展開防止）",
+      "verifier fan-out用のdiff退避。baselineからの実効diff（`.graphhopper/` の作業ファイルを除く。`config.json` と `config.example.json` は含む。現行の変更が0件・測定不能・個別diff失敗・初期集合なしのときは全文から同じ除外をしたもの。現行と初期が同じなら空）を.graphhopper/tmpに1回だけ置きpathを返す（3 lensへのinline 3重展開防止）",
     inputSchema: { type: "object", properties: { root: ROOT_PROP } },
     schema: z.object({ root: rootZ }),
     outputSchema: {

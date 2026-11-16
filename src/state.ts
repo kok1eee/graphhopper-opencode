@@ -30,7 +30,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { decodeUtf8Strict, sha1Hex } from "./hashedit";
 import {
   addTodo,
@@ -2166,6 +2166,27 @@ export function ghKeepSpec(): string[] {
   return [...MEASURED_GH_FILES];
 }
 
+/** `git rev-parse --show-prefix` の値（root が repo 直下なら空）。失敗は "" */
+async function gitShowPrefix(shell: Shell, root: string): Promise<string> {
+  try {
+    const r = await shell`git rev-parse --show-prefix`.cwd(root).nothrow().quiet();
+    if (r.exitCode === 0) return r.stdout.toString().trim();
+  } catch {
+    // git でない・repo 外は空として扱う
+  }
+  return "";
+}
+
+/** git が返す repo 直下相対のパスを root 相対に直す（root 外は ".." を付ける）。
+ * root が VCS repo のサブディレクトリのとき、そのままでは `diffOneFile` の pathspec と
+ * 一致しない（design g-mwiwxc5a 判断3）。 */
+export function toRootRelative(prefix: string, file: string): string {
+  if (!prefix) return file;
+  if (file.startsWith(prefix)) return file.slice(prefix.length);
+  const depth = prefix.split("/").filter((s) => s.length > 0).length;
+  return "../".repeat(depth) + file;
+}
+
 /** baseline からの変更ファイル列を測定する（jj → git fallback）。
  * 作業ファイル（`.graphhopper/` 配下）は数えない。deep検知用。取得不能時は []
  * （fail-open＝deepなし）。 */
@@ -2199,8 +2220,13 @@ export async function measureChangedFiles(
       .nothrow()
       .quiet();
     if (all.exitCode !== 0 || keep.exitCode !== 0) return [];
+    const prefix = await gitShowPrefix(shell, root);
     return [
-      ...new Set([...collect(all.stdout.toString()), ...collect(keep.stdout.toString())]),
+      ...new Set(
+        [...collect(all.stdout.toString()), ...collect(keep.stdout.toString())].map((f) =>
+          toRootRelative(prefix, f),
+        ),
+      ),
     ];
   } catch {
     return [];
@@ -2339,8 +2365,11 @@ export async function diffOneFile(
   baseline: string,
   file: string,
 ): Promise<string | null> {
+  // root 相対の名前を cwd 基準の絶対パスにする（root が repo のサブディレクトリでも
+  // pathspec が一致しないように。design g-mwiwxc5a 判断3）。
+  const abs = isAbsolute(file) ? file : resolve(root, file);
   try {
-    const r = await shell`jj diff --from ${baseline} -- ${file}`
+    const r = await shell`jj diff --from ${baseline} -- ${abs}`
       .cwd(root)
       .nothrow()
       .quiet();
@@ -2349,7 +2378,7 @@ export async function diffOneFile(
     // gitへ
   }
   try {
-    const r = await shell`git diff ${baseline} -- ${file}`
+    const r = await shell`git diff ${baseline} -- ${abs}`
       .cwd(root)
       .nothrow()
       .quiet();

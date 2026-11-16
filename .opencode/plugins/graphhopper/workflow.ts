@@ -95,12 +95,26 @@ export function makeHost(gh: Gh, parentID: string): WorkflowHost {
       await ctx.session.interrupt({ sessionID });
     },
     async repoHash() {
-      const g = await $`git diff HEAD`.cwd(root).quiet().nothrow().text();
+      // `.graphhopper/` の作業ファイルは run の差分ではない（design g-mwiwxc5a 判断1）。
+      // 設定 2 つは残す（設定変更ではキャッシュを外す）。exclude したディレクトリの子は
+      // 同じ pathspec で足し戻せないため 2 回に分ける。
+      const all = await $`git diff HEAD -- ${[".", ":(exclude).graphhopper"]}`
+        .cwd(root)
+        .quiet()
+        .nothrow()
+        .text();
+      const keep = await $`git diff HEAD -- ${[...state.MEASURED_GH_FILES]}`
+        .cwd(root)
+        .quiet()
+        .nothrow()
+        .text();
       const u = await $`git ls-files --others --exclude-standard`.cwd(root).quiet().nothrow().text();
-      const files = u.split("\n").filter((f) => f && !f.startsWith(".graphhopper/"));
+      const files = u
+        .split("\n")
+        .filter((f) => f && (!f.startsWith(".graphhopper/") || state.MEASURED_GH_FILES.includes(f)));
       const parts: string[] = [];
       for (const f of files) parts.push(f + ":" + sha1(await Bun.file(`${root}/${f}`).text().catch(() => "")));
-      return sha1(g + "\u0000" + parts.join("\n"));
+      return sha1(all + keep + "\u0000" + parts.join("\n"));
     },
   };
 }

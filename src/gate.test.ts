@@ -1,10 +1,22 @@
 /** usability ゲートの純関数テスト（design g-mwfltxyt）。 */
 import { describe, expect, test } from "bun:test";
 import {
+  ESCALATE_NEXT,
+  PHASE_ACTION,
   isPolicyDocPath,
   policyDocsChanged,
   usabilityGateRefusal,
 } from "./gate";
+
+describe("案内文の呼び出し表記（design g-mwiwxc5a 判断6）", () => {
+  test("phase の次アクションと昇格文は graphhopper_invoke を使い、task() を案内しない", () => {
+    for (const text of [PHASE_ACTION.designing, PHASE_ACTION.implementing, ESCALATE_NEXT]) {
+      expect(text).toContain("graphhopper_invoke");
+      expect(text).not.toContain("task(");
+      expect(text).not.toContain("subagent_type");
+    }
+  });
+});
 
 describe("isPolicyDocPath", () => {
   test("AI が読んで従う文書だけを対象にする", () => {

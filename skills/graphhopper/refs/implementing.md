@@ -6,7 +6,8 @@
   - **モデル**: primary は `opencode-go/minimax-m3.1-flash-free`（無料枠）。枠切れ・遅いときは
     課金枠の `minimax/MiniMax-M3.1-Flash` に手動切替できる（割当表を書き換えて
     `bun scripts/gen-agents.ts` して再起動）
-  - 独立した問いなら `task()` で2体を**並列**に呼び、メインが統合する（discover fan-outと同型）
+  - 独立した問いなら `graphhopper_invoke` で2体を**並列**に呼び、メインが統合する（discover fan-outと同型。
+    1つの応答で2件をまとめて呼ぶ。`execute` の中ではない）
   - 外部問いが内部findingsに依存するなら**直列**にする（researcherで対象ライブラリ・版を
     特定してからlibrarianにdocを引かせる。逆順・同時投げは版ズレの温床）
   - researcherは外部調査を自分でやらずlibrarian委譲を提案し、librarianは判断を含めない（境界の二重化）
@@ -59,9 +60,10 @@
   手動の進捗メモが必要ならnoteに残す）。eval未設定時のみ自己申告フォールバックとして使う
 - **evalは自動**: eval_cmd設定後はターン終了ごとにidle evalが走る。遷移しない場合は `graphhopper_status` で phase と eval_cmd を確認する（goal切替でeval_cmdは消える。start白紙が仕様）
   - `ok: false` が続き `fail_streak` が `stuck_threshold`（既定3）に達すると `escalate: true` が返る
-  - `escalate: true` が返ったら `task(subagent_type: "graphhopper-oracle")` に相談する。これまでの
+  - `escalate: true` が返ったら `graphhopper_invoke(agent: "graphhopper-oracle")` に相談する。これまでの
     失敗試行（何を試して何が起きたか）を渡し、助言を受けて別のアプローチで再試行する
-  - 同一goal内の2回目以降のoracle相談は新規ではなく `task(task_id: "<前回のID>")` で同subagent継続として呼ぶ（OmOのresume=session_id相当。文脈を失わず重複説明を省く）
+  - 同一goal内の2回目以降のoracle相談も `graphhopper_invoke` を再度呼ぶ（invoke に session 継続は無い）。
+    prompt には前回の質問・助言の結論（採用/棄却した案）・現在の失敗ログを要約して渡す
   - **これはrouter gate（diffサイズ）とは別軸のタイミング判断**——無条件で毎回opusを呼ぶのではなく、
     本当に詰まった時だけ上位モデルのコストを払う graph engineering の分岐点
   - stuck 信号は2系統＋fail（いずれかで escalate。eval_cmd 運用では idle の eval 失敗文に自動追記される）:
@@ -73,5 +75,5 @@
   - 連続失敗が `max_eval_fails`（既定6）に達すると相談ではなく goal が pause する（giveUp）。修正して resume せよ
 - 全タスクを completed か cancelled にしたら、refs/verifier.md の `recipe: start` を実行する
   （`router_check` はレシピの中で呼ばれる。単独で先に呼ぶ必要はない）
-- goal start時に初期脏れ（前goal未コミット分）を自動snapshotし、遷移判定は実効diff（測定－初期値）で行う。
+- goal start時に初期汚れ（前goal未コミット分）を自動snapshotし、遷移判定は実効diff（測定－初期値）で行う。
   statusの `initial_dirt` で確認可。実効0時は「未実装」と断定せず `router_check` 手動確認も可

@@ -235,6 +235,15 @@ describe("SEARCH_ONLY_BASH順序不変条件（findLast規律）", () => {
   });
 });
 
+describe("verifier の既定（design g-mwiwxc5a 判断5）", () => {
+  test("既定モデルは上位品質で、効率則は prompts の定数を使う", async () => {
+    const { VERIFIER_EFFICIENCY_RULE } = await import("./prompts");
+    const def = GRAPHHOPPER_AGENTS["graphhopper-verifier"]!;
+    expect(def.model.providerID).toBe("claude-oauth");
+    expect(def.system).toContain(VERIFIER_EFFICIENCY_RULE);
+  });
+});
+
 describe("subagent read-only guard (v2 permissions)", () => {
   test("全subagentのpermissionsにedit deny＋graphhopper_edit deny", () => {
     for (const [name, def] of Object.entries(GRAPHHOPPER_AGENTS)) {

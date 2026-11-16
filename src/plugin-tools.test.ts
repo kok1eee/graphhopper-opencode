@@ -1079,6 +1079,30 @@ describe("verify: prompt 組み立てと判定の読み取り（純粋層）", (
     expect(v.lensTakesIntent("behavior")).toBe(false);
   });
 
+  test("4 lens の共通ブロックが揃い、verifier に fan-out を指示しない（design g-mwiwxc5a 判断4）", async () => {
+    const v = await import("./verify");
+    const p = await import("./prompts");
+    const root = tmpRoot();
+    const paths = {
+      designPath: "/r/design.md",
+      diffPath: "/r/diff.txt",
+      diagPath: "/r/diag.txt",
+      intentPath: "/r/intent.md",
+    };
+    const prompt = (lens: "requirement" | "behavior" | "progress" | "general") =>
+      v.buildLensPrompt(root, "g-1", lens, v.lensPaths(root, "g-1", lens, paths));
+    for (const lens of ["requirement", "behavior", "progress", "general"] as const) {
+      const text = prompt(lens);
+      expect(text).toContain(p.VERIFIER_EFFICIENCY_RULE);
+      expect(text).toContain(p.VERIFIER_EVIDENCE_RULE);
+      expect(text).not.toContain("投げてよい");
+    }
+    for (const lens of ["requirement", "behavior", "progress"] as const) {
+      expect(prompt(lens)).toContain(p.PARALLEL_NOTE);
+    }
+    expect(prompt("general")).not.toContain(p.PARALLEL_NOTE);
+  });
+
   test("parseLensVerdict: clean/drift/不正を切り分ける", async () => {
     const v = await import("./verify");
     expect(v.parseLensVerdict('foo\n```json\n{"level":"clean","summary":"ok"}\n```')).toEqual({

@@ -19,9 +19,9 @@ import { parseTaskLines, todoGateError, todoStoreError } from "./todos";
  * 内容を変えたらplugin/MCP両方の応答に反映される。 */
 export const PHASE_ACTION: Record<state.Phase, string> = {
   designing:
-    "goalを理解し、設計判断・実装タスク列を .graphhopper/plans/<goal-id>.md に書く。source編集はここではブロックされる。書けたら task(subagent_type: 'graphhopper-critic') で設計を1回敵対レビューし、指摘を design.md に反映してから graphhopper_phase(phase: 'implementing') へ（任意で graphhopper_critic_set に結果を記録できる。opt-inでphase遷移の前提条件ではない）。design.md はこのフェーズを抜けた後は不変になる（verifierのdrift検出アンカーのため）——決定の経緯・棄却した代替案・進捗はここで固めず、実装中は .graphhopper/plans/<goal-id>.log.md に追記すること",
+    "goalを理解し、設計判断・実装タスク列を .graphhopper/plans/<goal-id>.md に書く。source編集はここではブロックされる。書けたら graphhopper_invoke(agent: 'graphhopper-critic') で設計を1回敵対レビューし、指摘を design.md に反映してから graphhopper_phase(phase: 'implementing') へ（任意で graphhopper_critic_set に結果を記録できる。opt-inでphase遷移の前提条件ではない）。design.md はこのフェーズを抜けた後は不変になる（verifierのdrift検出アンカーのため）——決定の経緯・棄却した代替案・進捗はここで固めず、実装中は .graphhopper/plans/<goal-id>.log.md に追記すること",
   implementing:
-    "design.md のタスクを実装する。進捗タスク（.graphhopper/todos/）は graphhopper_todo で完了・cancel を申告する（全タスクが completed か cancelled でないと polish へ進めない）。goal中のsource編集は graphhopper_edit（hash検証付き）を使え、素のedit/writeはフォールバック。まず graphhopper_set_eval(cmd) で合否を機械判定できるコマンド（テスト/lint/typecheck）を1度設定せよ。設定後はターン終了ごとに自動実行され、passならpolishへ自動遷移、failならfail_streakが機械カウントされ、escalateが返ったら task(subagent_type: 'graphhopper-oracle') に相談する。eval_cmdが無い（機械判定できない）場合のみ graphhopper_attempt(ok, note) の自己申告にフォールバックする。外部公式doc裏付けが必要なら task(subagent_type: 'graphhopper-librarian') を使える",
+    "design.md のタスクを実装する。進捗タスク（.graphhopper/todos/）は graphhopper_todo で完了・cancel を申告する（全タスクが completed か cancelled でないと polish へ進めない）。goal中のsource編集は graphhopper_edit（hash検証付き）を使え、素のedit/writeはフォールバック。まず graphhopper_set_eval(cmd) で合否を機械判定できるコマンド（テスト/lint/typecheck）を1度設定せよ。設定後はターン終了ごとに自動実行され、passならpolishへ自動遷移、failならfail_streakが機械カウントされ、escalateが返ったら graphhopper_invoke(agent: 'graphhopper-oracle') に相談する。eval_cmdが無い（機械判定できない）場合のみ graphhopper_attempt(ok, note) の自己申告にフォールバックする。外部公式doc裏付けが必要なら graphhopper_invoke(agent: 'graphhopper-librarian') を使える",
   polish:
     "Code Mode のレシピを実行する: skills/graphhopper/refs/verifier.md の recipe: start → recipe: tail を上から順に execute に貼る（advisorは1バッチ、polishは start→simplify適用→tail の2バッチ）。simplify は route=polish のときだけ（router_check の simplify）。適用はメインが Read と edit で行い、critical は挙動不変・局所のみ自動、high は人間確認、medium/note は報告のみ。順序は diag → diff_stash → verify（graphhopper_verify が指紋3つを照合する）。第三者チェック（verifier）は省略不可、level/target の集約は verifier_set が機械で行う。escalated=true ならレシピは打ち切られ designing に戻る",
   done: "完了済み。graphhopper_goal(action: 'complete') を確認",
@@ -88,7 +88,7 @@ export function effectivePhaseAction(
   if (entryRoute === "light" || entryRoute === "advised") {
     const advisor =
       entryRoute === "advised"
-        ? "implementing前にtask(graphhopper-advisor)／graphhopper_invoke(agent: 'graphhopper-advisor')で相談1回し、graphhopper_consult_set(kind: 'advisor')で記録（機械ゲート）。"
+        ? "implementing前にgraphhopper_invoke(agent: 'graphhopper-advisor')で相談1回し、graphhopper_consult_set(kind: 'advisor')で記録（機械ゲート）。"
         : "";
     const note =
       `（entry_route=${entryRoute}軽量: designingは内容規約（判断の理由・代替案・反証条件、§5 触らないもの、§2 の file:line 証拠、§4 のタスク紐付け）を満たすこと。critic省略、` +
@@ -99,8 +99,8 @@ export function effectivePhaseAction(
   }
   if (entryRoute === "oracle") {
     return (
-      `${base}（entry_route=oracle多角: 開始時にtask(graphhopper-oracle)／` +
-      "graphhopper_invoke(agent: 'graphhopper-oracle')で相談1回し、graphhopper_consult_set(kind: 'oracle')で記録（機械ゲート）。stuck時は同session継続）"
+      `${base}（entry_route=oracle多角: 開始時にgraphhopper_invoke(agent: 'graphhopper-oracle')で` +
+      "相談1回し、graphhopper_consult_set(kind: 'oracle')で記録（機械ゲート）。再度相談するときは同じ agent を invoke し、前回のやり取りを prompt に要約して渡す）"
     );
   }
   return base;
@@ -108,7 +108,7 @@ export function effectivePhaseAction(
 
 /* 昇格後の次アクション定型文（plugin/MCPの昇格系3箇所の単一源泉） */
 export const ESCALATE_NEXT =
-  "次: design.mdを肉付けし、task(graphhopper-critic)／graphhopper_invoke(agent: 'graphhopper-critic')で1回レビューしてから implementing へ。polishでは verifier fan-out×3（requirement/behavior/progress）が必須。";
+  "次: design.mdを肉付けし、graphhopper_invoke(agent: 'graphhopper-critic')で1回レビューしてから implementing へ。polishでは verifier fan-out×3（requirement/behavior/progress）が必須。";
 
 /* （旧buildJevPromptは削除。入口判定は decision.ts のdecideRouteに移管） */
 
@@ -680,7 +680,7 @@ export function checkPhaseMove(
   ) {
     return (
       "error: light/advised→full昇格後は designing→implementing に critic_review 記録が必要。" +
-      "task(graphhopper-critic)／graphhopper_invoke(agent: 'graphhopper-critic')で肉付けdesignを1回レビューし、graphhopper_critic_set で記録してから遷移せよ。"
+      "graphhopper_invoke(agent: 'graphhopper-critic')で肉付けdesignを1回レビューし、graphhopper_critic_set で記録してから遷移せよ。"
     );
   }
   // entry相談ゲート（D/E実効化。proseだけだと素通りするため機械化。
@@ -694,7 +694,7 @@ export function checkPhaseMove(
   ) {
     return (
       "error: entry_route=advised の designing→implementing には advisor相談の記録が必要。" +
-      "task(graphhopper-advisor)／graphhopper_invoke(agent: 'graphhopper-advisor')で相談1回し、graphhopper_consult_set(kind: 'advisor')で記録してから遷移せよ。"
+      "graphhopper_invoke(agent: 'graphhopper-advisor')で相談1回し、graphhopper_consult_set(kind: 'advisor')で記録してから遷移せよ。"
     );
   }
   if (
@@ -706,7 +706,7 @@ export function checkPhaseMove(
   ) {
     return (
       "error: entry_route=oracle の designing→implementing には oracle相談の記録が必要。" +
-      "task(graphhopper-oracle)／graphhopper_invoke(agent: 'graphhopper-oracle')で相談1回し、graphhopper_consult_set(kind: 'oracle')で記録してから遷移せよ。"
+      "graphhopper_invoke(agent: 'graphhopper-oracle')で相談1回し、graphhopper_consult_set(kind: 'oracle')で記録してから遷移せよ。"
     );
   }
   // scaffoldが自動生成するため、骨格不足で失敗するのは骨格を削った場合のみ。

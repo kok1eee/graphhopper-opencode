@@ -19,9 +19,24 @@ export const VERSION_GUARD_RULE = [
   "版が不明・3.13 以前なら従来通り指摘してよい。",
 ].join("\n");
 
-/* fan-out 並列化（verifier 3 lens 用）。invoke は多重起動可。 */
+/* fan-out する 3 lens 用。verifier 自身は lens を起動しない（graphhopper_verify が起動する）ので、
+ * 「投げてよい」ではなく「他は別セッション」と伝える（design g-mwiwxc5a 判断4）。
+ * general は 1 回で 3 観点を見るため入れない。 */
 export const PARALLEL_NOTE =
-  "3 lens は graphhopper_invoke で並列に投げてよい（invoke は多重起動可・入れ子のみ禁止）。結果を集めて graphhopper_verifier_set に記録する。";
+  "他 lens は別セッションで並列に走る。自分は担当 lens だけを検証し、他 lens の結果を仮定しない。";
+
+/* 4 lens 共通の証拠状態ルール（design g-mwiwxc5a 判断4）。level だけを書かせない。 */
+export const VERIFIER_EVIDENCE_RULE =
+  "findingsには証拠状態を必ず付ける: 裏付けあり / 証拠不足 / 診断未実行 / 実行失敗。原因不明のまま level だけ付けない。";
+
+/** 4 lens の共通ブロック（効率則・証拠状態＋任意で version guard・並列注記）。
+ * 個別 render に同じ行を書き写さない（片方だけ直す事故を防ぐ）。 */
+function lensPreamble(opts: { parallel: boolean; versionGuard: boolean }): string[] {
+  const lines = [VERIFIER_EFFICIENCY_RULE, VERIFIER_EVIDENCE_RULE];
+  if (opts.versionGuard) lines.push("", VERSION_GUARD_RULE);
+  if (opts.parallel) lines.push("", PARALLEL_NOTE);
+  return lines;
+}
 
 /* verifier調査効率則（graft-first＋診断添付）。4 lens共通。
  * SKILL.md polish節・agents.ts verifier promptと一対で維持すること */
@@ -178,12 +193,7 @@ export const PROMPT_DEFS: PromptDef[] = [
       return [
         "あなたは graphhopper の verifier（requirement lens）である。",
         "実装が design.md の意図（done の定義）から外れていないかを検証せよ。",
-        VERIFIER_EFFICIENCY_RULE,
-        "findingsには証拠状態を必ず付ける: 裏付けあり / 証拠不足 / 診断未実行 / 実行失敗。原因不明のまま level だけ付けない。",
-        "",
-        VERSION_GUARD_RULE,
-        "",
-        PARALLEL_NOTE,
+        ...lensPreamble({ parallel: true, versionGuard: true }),
         "",
         goalHeader(root, id),
       ].join("\n");
@@ -202,11 +212,7 @@ export const PROMPT_DEFS: PromptDef[] = [
         "あなたは graphhopper の verifier（behavior lens）である。",
         "変更の挙動が正しいか、テストが実際のユーザーパスを検証しているかを検証せよ。",
         "エッジケース・境界値・失敗時の振る舞いを見ろ。",
-        VERIFIER_EFFICIENCY_RULE,
-        "",
-        VERSION_GUARD_RULE,
-        "",
-        PARALLEL_NOTE,
+        ...lensPreamble({ parallel: true, versionGuard: true }),
         "",
         goalHeader(root, id),
       ].join("\n");
@@ -226,9 +232,7 @@ export const PROMPT_DEFS: PromptDef[] = [
         "あなたは graphhopper の verifier（progress lens）である。",
         "変更が goal に収束しているか、スコープ外の膨張・未完の残骸が無いかを検証せよ。",
         "決定の経緯・棄却した代替案が .log.md に追記されているかも見ろ。",
-        VERIFIER_EFFICIENCY_RULE,
-        "",
-        PARALLEL_NOTE,
+        ...lensPreamble({ parallel: true, versionGuard: false }),
         "",
         goalHeader(root, id),
         todos,
@@ -248,10 +252,7 @@ export const PROMPT_DEFS: PromptDef[] = [
       return [
         "あなたは graphhopper の verifier（general lens）である。",
         "「実装が design.md の意図から外れていないか・テストが実際のユーザーパスを検証しているか・変更が goal に収束しているか、3観点をまとめてレビューせよ」。",
-        VERIFIER_EFFICIENCY_RULE,
-        "findingsには証拠状態を必ず付ける: 裏付けあり / 証拠不足 / 診断未実行 / 実行失敗。",
-        "",
-        VERSION_GUARD_RULE,
+        ...lensPreamble({ parallel: false, versionGuard: true }),
         "",
         goalHeader(root, id),
         todos,

@@ -134,15 +134,15 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
   中身をゼロから書く必要は無い、scaffoldを埋めればよい
 - **このフェーズではsource編集（Edit/Write）が `tool.execute.before` hookで物理ブロックされる**
   （許可パスは `.graphhopper/plans/` 配下のみ、`.graphhopper/config.json` の `design_gate_allow` で変更可）
-- 書けたら `task(subagent_type: "graphhopper-critic")` で**設計を1回敵対レビュー**する
-  （要件漏れ・設計の穴・スコープ逸脱を検出。安価モデル = 常設nodeなので毎goal必ず呼ぶ。
-  `require_critic: true` のプロジェクトでは機械ゲート化され、未記録だと implementing 遷移が拒否される）
+- 書けたら `graphhopper_invoke(agent: "graphhopper-critic")` で**設計を1回敵対レビュー**する
+  （要件漏れ・設計の穴・スコープ逸脱を検出。安価モデル = 常設nodeなので毎goal必ず呼ぶ）。
+  呼び出しは `execute` の外から直接でよい（`execute` の中は polish のレシピだけ）
 - critic の指摘を design.md に反映してから `graphhopper_phase(phase: "implementing")`
-- 要件の公式doc裏付けが必要なら `task(subagent_type: "graphhopper-librarian")` を使う
+- 要件の公式doc裏付けが必要なら `graphhopper_invoke(agent: "graphhopper-librarian")` を使う
   （researcherはコードベース事実収集に専念し、外部調査はlibrarianに委ねる）
-- 任意で `graphhopper_critic_set(level, reason)` に結果を記録できる（opt-in、`graphhopper_phase`
-  の前提条件にはならない。self-graded防止機構は付けない——「critic を呼んだか」自体の
-  機械チェックはしないので、記録するかどうかもメインエージェントの裁量）
+- 呼ぶこと自体は毎goal必須（運用規則）。記録は `require_critic: true` のプロジェクトでは **必須**
+  （未記録だと implementing 遷移が機械拒否される）。それ以外は任意で `graphhopper_phase` の前提条件には
+  ならない（「critic を呼んだか」自体の機械チェックはしないので、記録も裁量）
 - **design.md はこのフェーズを抜けた後は不変になる**（`tool.execute.before` が
   designing以外での該当パスへの書き込みを常にブロックする）。verifierがdrift検出の
   アンカーとして読むため、実装に合わせて書き直せると「driftをdesign.md側の書き換えで

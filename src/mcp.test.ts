@@ -28,6 +28,14 @@ function freshRoot(): string {
 }
 
 describe("graphhopper-mcp tool一覧", () => {
+  test("diff_stash の説明は作業ファイル除外を反映する（design g-mwiwxc5a 判断2）", async () => {
+    const client = await linked();
+    const { tools } = await client.listTools();
+    const d = tools.find((t) => t.name === "graphhopper_diff_stash")?.description ?? "";
+    expect(d).not.toContain("全文diff");
+    expect(d).toContain(".graphhopper/");
+  });
+
   test("24 toolが登録される", async () => {
     const client = await linked();
     const { tools } = await client.listTools();

@@ -1487,7 +1487,11 @@ describe("deep検知（RISK_PATHS×自goal差分）", () => {
   ) =>
     ((strings: TemplateStringsArray) => {
       const cmd = strings.join(" ");
-      const r = cmd.includes("jj diff") ? jj : git;
+      const r = cmd.includes("jj diff")
+        ? jj
+        : cmd.includes("rev-parse --show-prefix")
+          ? { code: 0, out: "" }
+          : git;
       return {
         cwd: () => ({
           nothrow: () => ({
@@ -1849,9 +1853,11 @@ describe("stashDiff（verifier用diff退避）", () => {
             }),
           }),
         });
+        if (joined.includes("rev-parse --show-prefix")) return ok("");
         if (joined.includes("--name-only")) return ok(files.join("\n") + "\n");
         if (vals.length >= 2) {
-          const f = s.normalizeForGate("/r", String(vals[1]));
+          // diffOneFile は root 基準の絶対パスを渡す（design g-mwiwxc5a 判断3）
+          const f = String(vals[1]).split("/").pop() ?? "";
           return ok(perFile[f] ?? "");
         }
         return ok(full);
@@ -2074,6 +2080,57 @@ describe("差分測定の .graphhopper/ 除外（design g-mwiu6lcj）", () => {
     expect(JSON.stringify(jjCall?.[1])).toContain("~cwd:");
     expect(seen.some(([, spec]) => JSON.stringify(spec) === JSON.stringify(s.ghAllSpec()))).toBe(true);
     expect(seen.some(([, spec]) => JSON.stringify(spec) === JSON.stringify(s.ghKeepSpec()))).toBe(true);
+  });
+});
+
+describe("差分測定の root がサブディレクトリ（design g-mwiwxc5a 判断3）", () => {
+  async function subdirGitRoot(): Promise<{ repo: string; root: string; rev: string }> {
+    const { $ } = await import("bun");
+    const repo = mkdtempSync(join(tmpdir(), "gh-subdir-"));
+    await $`git init -q ${repo}`.quiet();
+    await $`git -C ${repo} config user.email t@t`.quiet();
+    await $`git -C ${repo} config user.name t`.quiet();
+    const root = join(repo, "proj");
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src/state.ts"), "x\n");
+    writeFileSync(join(repo, "other.txt"), "o\n");
+    await $`git -C ${repo} add -A`.quiet();
+    await $`git -C ${repo} commit -qm init`.quiet();
+    const rev = (await $`git -C ${repo} rev-parse HEAD`.text()).trim();
+    return { repo, root, rev };
+  }
+
+  test("名前は root 相対で返り、deep 検出と diffOneFile が効く", async () => {
+    const s = await import("./state");
+    const { $ } = await import("bun");
+    const { root, rev } = await subdirGitRoot();
+    writeFileSync(join(root, "src/state.ts"), "x\ny\n");
+    const files = await s.measureChangedFiles($, root, rev);
+    expect(files).toEqual(["src/state.ts"]);
+    expect(s.detectDeepRisk(root, files, []).deep).toBe(true);
+    expect(await s.diffOneFile($, root, rev, "src/state.ts")).toContain("y");
+  });
+
+  test("stashDiff の実効 diff にサブディレクトリ root の変更が入る", async () => {
+    const s = await import("./state");
+    const { $ } = await import("bun");
+    const { root, rev } = await subdirGitRoot();
+    s.startGoal(root, "t", "s1");
+    writeFileSync(join(root, "src/state.ts"), "x\ny\n");
+    s.snapshotInitialDiffFiles(root, []);
+    const st = await s.stashDiff($, root, rev, "g-abc123");
+    expect(st).not.toBeNull();
+    expect(readFileSync(st!.path, "utf8")).toContain("src/state.ts");
+  });
+
+  test("root 外の変更は ../ 付きで返り、diffOneFile が拾える", async () => {
+    const s = await import("./state");
+    const { $ } = await import("bun");
+    const { repo, root, rev } = await subdirGitRoot();
+    writeFileSync(join(repo, "other.txt"), "o\np\n");
+    const files = await s.measureChangedFiles($, root, rev);
+    expect(files).toContain("../other.txt");
+    expect(await s.diffOneFile($, root, rev, "../other.txt")).toContain("p");
   });
 });
 

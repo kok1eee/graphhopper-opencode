@@ -29,6 +29,7 @@
  * プロジェクト単位のモデル上書きは .graphhopper/config.json の agents で指定する。
  */
 import { checkModelAllowed, toViolation, type ModelViolation } from "./model-policy";
+import { VERIFIER_EFFICIENCY_RULE } from "./prompts";
 import { readConfig } from "./state";
 
 export interface PermissionRule { action: string; resource: string; effect: "allow" | "ask" | "deny"; }
@@ -343,7 +344,7 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
     description:
       "polish/advisorのverifier用。route=polishではrequirement/behavior/progressの3レンズfan-out、route=advisorでは'general'（3観点統合）lensで単発呼び出しされる。判断nodeなので上位品質モデルを使うが、モデルは .graphhopper/config.json の agents と model_allow/model_deny に従う（invoke の明示指定は deny で拒否される）。実装者本人（メインエージェント）とは独立した第三者チェックであることが呼び出しの目的そのもの",
     mode: "all",
-    model: { providerID: "minimax", model: "MiniMax-M3.1-Flash" },
+    model: { providerID: "claude-oauth", model: "claude-sonnet-5-5" },
     temperature: 0.2,
     bash: VERIFIER_BASH,
     system: [
@@ -354,21 +355,19 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
       "- general: 3観点（要件逸脱・挙動の妥当性・進捗の収束）を1回のレビューでまとめて見る（advisorの単発呼び出し）",
       "",
       "進捗タスク（source of truth）:",
-      "- 進捗の source of truth は .graphhopper/todos/<goalId>.json（design.md は planning 終端で immutable のため進捗の計測源にできない）",
+      "- 進捗の source of truth は .graphhopper/todos/<goalId>.json（design.md は designing 終端で immutable のため進捗の計測源にできない）",
       "- goalId の解決: `.graphhopper/state.json` の `goal_id` を読む。取れなければ `.graphhopper/todos/` 配下のファイル名（通常1つ）を使う",
       "- progress / general lens では必ずこのストアを読む。未完了タスクが残っていないか、cancelled の理由が妥当かを見よ",
       "- ストアが 0 件ならタスクなしとして扱い、進捗起因の drift は報告しない",
       "- ストアが壊れて読めない場合は『進捗は確認できなかった』と evidence_state に明記する（0件扱いしない）",
       "",
-      "調査効率則: 周辺探索は graft MCP / ast-grep / rg を優先し漁り読み禁止。",
-      "Readはdiff本体＋graft/diffが指した関数・テスト単位のみ。全文catして数える（cat | wc等）・同一範囲の再読は禁止。行特定はgrep/graftで行い、Readは1範囲1回。",
-      "Readはdiff本体＋graft/diffが指した関数・テスト単位のみ。graft未構築時は従来Readへフォールバック。",
+      VERIFIER_EFFICIENCY_RULE,
       "",
       "drift（乖離）を検出したら全件報告する（confidence/severity付き、閾値カットしない）。",
       "無ければfindings: []とsummaryに「driftなし」と明記する。",
       "",
       "診断証拠:",
-      "- 型・lint診断は自分で実行しない（shell ツールは使えない）。呼び出し側添付の診断ファイル（.graphhopper/tmp/diag-<goal>.txt）をReadして裏付け・反証に使え",
+      "- 型・lint診断は自分で実行しない（診断系コマンドは shell で許可されていない）。呼び出し側添付の診断ファイル（.graphhopper/tmp/diag-<goalId>.txt）をReadして裏付け・反証に使え",
       "- 添付が無ければ「診断未実行（理由）」を明記し、診断不在をcleanの根拠にしない",
       "- 診断クリーンはdriftなしの根拠にならない（挙動driftは診断に出ない）。診断結果は補助証拠として扱う",
       "",
