@@ -11,15 +11,60 @@
 import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { applySingleEdit, decodeUtf8Strict, sha1Hex, verifyHash } from "./hashedit";
+import { PONYTAIL_RULES } from "./ponytail-rules";
 import * as state from "./state";
 import { parseTaskLines, todoGateError, todoStoreError } from "./todos";
+
+/* designing の案内は 3 つに分ける（前半＋advisor節＋後半）。
+ * advisor節だけを入口・難易度で差し替える（design g-mwj6481n 判断1・2）。
+ * PHASE_ACTION.designing は「難易度未判定＝メインが決める」版と一致させる。 */
+const DESIGN_FRONT =
+  "goalを理解し、設計判断・実装タスク列を .graphhopper/plans/<goal-id>.md に書く。source編集はここではブロックされる。";
+
+/** advisor の呼び方（ASK / HARD で共通） */
+const ADVISOR_HOWTO =
+  "graphhopper_invoke(agent: 'graphhopper-advisor') に design と .graphhopper/plans/<goal-id>.intent.md（無ければ design だけ）の path を渡し、" +
+  "判断の第二意見を1回求める（要約せず会話を読ませる。反映後に呼び直さない。記録は graphhopper_consult_set で任意）。";
+
+const DESIGN_ADVISOR_ASK =
+  "書けたら advisor を呼ぶかを決める: 捨てた代替案の理由に自信がない判断が 1 つでもあれば " +
+  ADVISOR_HOWTO +
+  "無ければ省略し、.graphhopper/plans/<goal-id>.log.md に「advisor 省略: 検討した判断と根拠」を1行書く" +
+  "（oracle 入口では、oracle が扱わなかった判断について自信を問う）。";
+
+const DESIGN_ADVISOR_HARD = `difficulty=hard なので ${ADVISOR_HOWTO}`;
+
+const DESIGN_ADVISOR_EASY = "difficulty=easy なので advisor は省略する（graphhopper_consult_set の記録も不要）。";
+
+const DESIGN_BACK =
+  "次に graphhopper_invoke(agent: 'graphhopper-critic') で設計を1回敵対レビューし、指摘を design.md に反映してから " +
+  "graphhopper_phase(phase: 'implementing') へ（任意で graphhopper_critic_set に結果を記録できる。" +
+  "phase遷移の前提条件になるのは config が require_critic: true のプロジェクトだけ）。" +
+  "design.md はこのフェーズを抜けた後は不変になる（verifierのdrift検出アンカーのため）" +
+  "——決定の経緯・棄却した代替案・進捗はここで固めず、実装中は .graphhopper/plans/<goal-id>.log.md に追記すること";
+
+/** designing の案内を入口route・難易度から組み立てる。light/advised は advisor節を空にし、
+ * 差分は effectivePhaseAction の注記だけで明示する（単一源泉則）。 */
+function designingAction(
+  entryRoute: state.EntryRoute | null,
+  difficulty: state.Difficulty | null,
+): string {
+  const advisor =
+    entryRoute === "light" || entryRoute === "advised"
+      ? ""
+      : difficulty === "easy"
+        ? DESIGN_ADVISOR_EASY
+        : difficulty === "hard"
+          ? DESIGN_ADVISOR_HARD
+          : DESIGN_ADVISOR_ASK;
+  return `${DESIGN_FRONT}${advisor}${DESIGN_BACK}`;
+}
 
 /* フェーズごとの次のアクション指示文（tool 応答・注入文の単一源泉）。
  * plugin entry（index.ts）には置けない（loaderが非関数exportでload失敗するため）。
  * 内容を変えたら tool 応答と注入文の両方に反映される。 */
 export const PHASE_ACTION: Record<state.Phase, string> = {
-  designing:
-    "goalを理解し、設計判断・実装タスク列を .graphhopper/plans/<goal-id>.md に書く。source編集はここではブロックされる。書けたら graphhopper_invoke(agent: 'graphhopper-advisor') に design と .graphhopper/plans/<goal-id>.intent.md（無ければ design だけ）の path を渡し、判断の第二意見を1回求めよ（要約せず会話を読ませる。反映後に呼び直さない。記録は graphhopper_consult_set で任意）。次に graphhopper_invoke(agent: 'graphhopper-critic') で設計を1回敵対レビューし、指摘を design.md に反映してから graphhopper_phase(phase: 'implementing') へ（任意で graphhopper_critic_set に結果を記録できる。phase遷移の前提条件になるのは config が require_critic: true のプロジェクトだけ）。design.md はこのフェーズを抜けた後は不変になる（verifierのdrift検出アンカーのため）——決定の経緯・棄却した代替案・進捗はここで固めず、実装中は .graphhopper/plans/<goal-id>.log.md に追記すること",
+  designing: designingAction(null, null),
   implementing:
     "design.md のタスクを実装する。進捗タスク（.graphhopper/todos/）は graphhopper_todo で完了・cancel を申告する（全タスクが completed か cancelled でないと polish へ進めない）。goal中のsource編集は graphhopper_edit（hash検証付き）を使え、素のedit/writeはフォールバック。まず graphhopper_set_eval(cmd) で合否を機械判定できるコマンド（テスト/lint/typecheck）を1度設定せよ。設定後はターン終了ごとに自動実行され、passならpolishへ自動遷移、failならfail_streakが機械カウントされ、escalateが返ったら graphhopper_invoke(agent: 'graphhopper-oracle') に相談する。eval_cmdが無い（機械判定できない）場合のみ graphhopper_attempt(ok, note) の自己申告にフォールバックする。外部公式doc裏付けが必要なら graphhopper_invoke(agent: 'graphhopper-librarian') を使える",
   polish:
@@ -28,29 +73,15 @@ export const PHASE_ACTION: Record<state.Phase, string> = {
 };
 
 /* continuation（turn 終了 → promptAsync）のuser向け表示用の1行要約。
- * LLM向けの詳細指示は PHASE_ACTION のまま chat.system.transform 側で注入する
- * （design g-mtwhdb4t）。done は continuation 自体が発火しない（idle ハンドラが
+ * LLM向けの詳細指示は PHASE_ACTION を phase 案内（instructions.entry）で渡す
+ * （design g-mwj6481n 判断4）。done は continuation 自体が発火しない（idle ハンドラが
  * phase==="done" で早期return）ため実質未使用だが、Record の型完全性のために残す。 */
 export const PHASE_ACTION_SHORT: Record<state.Phase, string> = {
-  designing: "設計ドキュメントを書き、advisorとcriticのレビュー後にimplementingへ",
+  designing: "設計ドキュメントを書き、レビュー後にimplementingへ（advisorは難易度次第）",
   implementing: "design.mdのタスクを実装し、eval_cmdを設定。タスク完了はgraphhopper_todoで申告",
   polish: "router_checkのrouteに従いsimplify/verifierを実行",
   done: "goalをcompleteする",
 };
-
-/* system注入の短縮版（2回目以降のターン用）。hard制約のみ残す。
- * 強制力はコード側ゲートが担うため、文面短縮は安全性を下げない。
- * ponytail短縮行と対で使う */
-export const PHASE_ACTION_BRIEF: Record<state.Phase, string> = {
-  designing: "design.mdを書け。source編集不可（plans/のみ）。詳細は初回指示参照",
-  implementing: "実装続行。eval設定済みなら自動判定。詰まったらoracle。タスク完了はgraphhopper_todoで申告",
-  polish: "router→verifier必須（verifier_set記録）。自己レビュー完結不可",
-  done: "goalをcompleteする",
-};
-
-/** ponytail短縮行（implementing 2ターン目以降用） */
-export const PONYTAIL_BRIEF =
-  "ponytail継続適用: YAGNI・怠惰原則（詳細は初回注入参照）。interface変更はhigh扱いで人間に提示";
 
 /* decide toolの5択criteriaは decision.ts DECISION_ROUTE_CRITERIA に一本化
  *（旧JEV_ROUTE_PROMPTの判定基準を移植）。gate.tsにはLLM用promptを残さない */
@@ -79,12 +110,15 @@ export function parseEntryRoute(text: string | null | undefined): {
 }
 
 /* route別phase指示（effective route）。light/advisedはcritic省略・verifier×1の注記を付与。
- * oracleは開始時相談の注記を付与。transform注入・tool応答の単一源泉 */
+ * oracleは開始時相談の注記を付与。designing は difficulty で advisor 節が変わる（判断1・2）。
+ * phase案内（instructions.entry）・tool応答の単一源泉 */
 export function effectivePhaseAction(
   phase: state.Phase,
   entryRoute: state.EntryRoute | null,
+  difficulty: state.Difficulty | null = null,
 ): string {
-  const base = PHASE_ACTION[phase];
+  const base =
+    phase === "designing" ? designingAction(entryRoute, difficulty) : PHASE_ACTION[phase];
   if (entryRoute === "light" || entryRoute === "advised") {
     const advisor =
       entryRoute === "advised"
@@ -96,27 +130,51 @@ export function effectivePhaseAction(
       `（entry_route=${entryRoute}軽量: designingは内容規約（判断の理由・代替案・反証条件、§5 触らないもの、§2 の file:line 証拠、§4 のタスク紐付け）を満たすこと。${reviewers}` +
       `polishのverifierはgeneral×1。${advisor}` +
       (entryRoute === "advised"
-        ? "advisor相談の記録（graphhopper_consult_set）だけは必須（上の designing 指示の「記録は graphhopper_consult_set で任意」より優先）。criticは呼ばない。"
+        ? "advisor相談の記録（graphhopper_consult_set）だけは必須（機械ゲート）。criticは呼ばない。"
         : "") +
       "require_critic: true のプロジェクトだけは、criticを呼ばなかった理由を graphhopper_critic_set に記録する。" +
       "詰まったらgraphhopper_escalateでfullへ昇格）";
-    // 単一源泉則: light/advised designingもPHASE_ACTION.designingを基にし、差分は例外条項で明示する
+    // 単一源泉則: light/advised designing も designingAction を基にし、差分は例外条項で明示する
     return `${base}${note}`;
   }
   if (entryRoute === "oracle") {
     return (
       `${base}（entry_route=oracle多角: 開始時にgraphhopper_invoke(agent: 'graphhopper-oracle')で` +
       "相談1回し、graphhopper_consult_set(kind: 'oracle')で記録（機械ゲート）。" +
-      "その後の設計レビューは base どおり（advisor 1回 → critic 1回。oracle 相談で代用しない。この2つの記録は任意で、critic_set が必須になるのは require_critic: true のときだけ）。" +
+      "その後の設計レビューは base のとおり（graphhopper-advisor を呼ぶかは難易度と上の基準で決め、" +
+      "oracle が扱わなかった判断について自信を問う。advisor・critic の記録は任意で、critic_set が必須になるのは require_critic: true のときだけ）。" +
       "oracle に再度相談するときは graphhopper-oracle を invoke し、前回のやり取りを prompt に要約して渡す）"
     );
   }
   return base;
 }
 
+/** 現在の goal の phase 案内（instructions.entry の値）。design g-mwj6481n 判断4。
+ *
+ * - 対象は「active・phase が done 以外・そのセッションに bind 済み」のときだけ。それ以外は null
+ *   （呼び出し側は remove する）。
+ * - 中身は goal の題と id・phase・effectivePhaseAction の全文。implementing では
+ *   PONYTAIL_RULES を後ろに付ける。
+ * - 同じ phase の間は値が変わらない（fail_streak・notes・タスク件数を入れない）。
+ *   変わると毎回全文が再送される（判断4）。 */
+export function phaseGuideText(active: state.ActiveLoop | null, sessionID: string): string | null {
+  if (!active) return null;
+  if (active.goal.status !== "active") return null;
+  if (active.state.phase === "done") return null;
+  if (!sessionID || active.state.session_id !== sessionID) return null;
+  const head = [
+    "## graphhopper 次のアクション",
+    "",
+    `goal: "${active.goal.title}" (${active.goal.id}) / phase: ${active.state.phase}（新しい案内が来たらこちらが正）`,
+    "",
+    effectivePhaseAction(active.state.phase, active.state.entry_route, active.state.difficulty),
+  ].join("\n");
+  return active.state.phase === "implementing" ? `${head}\n\n${PONYTAIL_RULES}` : head;
+}
+
 /* 昇格後の次アクション定型文（pluginの昇格系3箇所の単一源泉） */
 export const ESCALATE_NEXT =
-  "次: design.mdを肉付けし、graphhopper_invoke(agent: 'graphhopper-critic')で1回レビューしてから implementing へ。polishでは verifier fan-out×3（requirement/behavior/progress）が必須。";
+  "次: design.mdを肉付けし、捨てた代替案の理由に自信が無い判断があるか（difficulty=hard か）を見て必要なら graphhopper_invoke(agent: 'graphhopper-advisor') で第二意見を取り、graphhopper_invoke(agent: 'graphhopper-critic')で1回レビューしてから implementing へ。polishでは verifier fan-out×3（requirement/behavior/progress）が必須。";
 
 /* stuck 時に oracle へ相談させる定型文（idle eval・attempt・stuck 検知の単一源泉）。
  * 相談は同期の graphhopper_invoke で行う（task() だと同じターンで助言を受け取れない）。 */
@@ -842,7 +900,7 @@ export function goalResumeContext(
   return [
     `- goal: "${goal.title}" (${goal.id}) [${goal.status}]`,
     `- phase: ${s.phase}`,
-    `- 次のアクション: ${effectivePhaseAction(s.phase, s.entry_route)}`,
+    `- 次のアクション: ${effectivePhaseAction(s.phase, s.entry_route, s.difficulty)}`,
     s.notes ? `- notes: ${s.notes}` : null,
     s.eval_cmd ? `- eval_cmd: ${s.eval_cmd}` : null,
     progress ? `- ${progress}` : null,

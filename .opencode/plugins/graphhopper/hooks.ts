@@ -19,28 +19,23 @@ import {
   continuationText,
   designDocLockedRefusal,
   designGateRefusal,
-  effectivePhaseAction,
   ESCALATE_NEXT,
   isGateTargetTool,
   ORACLE_ASK,
   isIntentLogPath,
-  PHASE_ACTION_BRIEF,
-  PONYTAIL_BRIEF,
+  phaseGuideText,
 } from "../../../src/gate";
 import { INTENT_MAX_FETCH_CHARS } from "../../../src/intent";
 import { describeModelDenial } from "../../../src/model-policy";
-import { PONYTAIL_RULES } from "../../../src/ponytail-rules";
 import { resolveCompactDb, runCompactGate } from "../../../src/compact";
 import { goalResumeContext } from "../../../src/gate";
 import {
   decideEntry,
-  ENTRY_DECIDE_FRESH_MS,
   formatEntryVerdict,
   INTERNAL_PROMPT_METADATA_KEY,
   isInternalPrompt,
   recordEntrySkip,
   shouldRunEntryDecide,
-  type EntryVerdict,
 } from "../../../src/entry-decide";
 import { decisionAvailable } from "../../../src/decision";
 import { isFailedEvent, isInterruptedEvent } from "../../../src/events";
@@ -53,19 +48,21 @@ import { isDesignDocLocked, isDesignGateBlocked } from "../../../src/state";
 import { LSPServerManager } from "../../../src/lsp/client";
 import { clearAllWaitTimers, clearWaitTimer, setWaitTimer, type Gh } from "./shared";
 
-const SYSTEM_GUIDE = `## graphhopper（designing/implementing/polishループ）の存在
+/** system に入れる唯一の文。goal の有無・phase で変えない（変えるとキャッシュが切れる。
+ * design g-mwj6481n 判断3）。変わる案内はすべて会話の中のメッセージとして届く。 */
+const SYSTEM_GUIDE = `## graphhopper（常駐）
 
-この環境には graphhopper プラグインが常駐している。複数ファイルにまたがる変更・設計判断を含む実装を依頼されたら、手を付ける前に graphhopper_goal(action: "start", title: ...) でループを開始せよ。
+この環境には graphhopper プラグインが常駐している。複数ファイルにまたがる変更・設計判断を含む実装を依頼されたら、手を付ける前に graphhopper_goal(action: "start", title: ...) でループを開始する。単一ファイルの小修正・質問への回答・一回きりのコマンド実行程度なら、ループを作らず直接対応してよい。
 
-入口の route 判定（d1）はプラグインが自動実行し、判定結果はこのプロンプトの「graphhopper 入口判定」として渡されることがある（direct・判定不能・内部/子セッション/goal進行中は渡されない）。渡された場合はその判定に従って graphhopper_route_set → graphhopper_goal(start) へ進むこと。判定は参考値であり、明らかに単一ファイルの小修正ならループを作らず直接対応してよい。
+入口の route 判定（d1）はプラグインが自動実行し、結果は会話の中に「## graphhopper 入口判定」で始まるメッセージとして届くことがある（direct・判定不能・内部/子セッション/goal進行中は届かない）。届いたらその判定に従って graphhopper_route_set → graphhopper_goal(start) へ進む。判定は参考値で、明らかに単一ファイルの小修正なら直接対応してよい。
 
-designing フェーズでは source ファイルの edit/write は物理的にブロックされる（許可されるのは .graphhopper/plans/ 配下の design ドキュメントのみ）。まず design ドキュメントを書き、graphhopper-critic で1回敵対レビューしてから implementing フェーズに遷移して実装せよ。
+designing フェーズでは source ファイルの edit/write は物理的にブロックされる（書けるのは .graphhopper/plans/ 配下の design ドキュメントだけ）。まず design ドキュメントを書き、レビューを経てから implementing に遷移して実装する。
 
-使わない場面: 単一ファイルの小修正・質問への回答・一回きりのコマンド実行程度の単純作業。その場合は直接やれ。
+案内はこの文ではなく会話の中に届く:
+- \`<context key="graphhopper-phase">\`: 進行中 goal の phase と次のアクション。新しい値が前の値を置き換える（古い値は無効）。
+- 「## graphhopper 入口判定」「## graphhopper handoff メモ」で始まるメッセージ: プラグインからの通知。
 
-active な goal が既にあるなら graphhopper_status で状態を確認し、ループの継続として振る舞え。`;
-
-const SYSTEM_GUIDE_IDLE = `## graphhopper（常駐・goal進行中はphase指示に従え。goal外の小用件は直接対応可）`;
+active な goal があるときは、その案内に従う。goal の外の小用件は直接対応してよい。`;
 
 /* idle 取得の窓と上限 (H3: v2 は全文取得のみ。窓切りはローカルで行う)。
  * TAIL_LIMIT: loop検知窓 + echo用履歴 + margin。SAMPLING 概念は廃止
@@ -74,23 +71,105 @@ const TAIL_LIMIT = 50;
 const MAX_FETCH_CHARS = INTENT_MAX_FETCH_CHARS;
 let oversizeSticky = false;
 
-/* system注入節約用の記憶 (v1 と同型。再起動・compact後は消失しfull再送) */
-const seenPhaseGuides = new Set<string>();
-/** handoff 案内を評価済みのセッション（毎モデル呼び出しの I/O を避ける） */
+/** handoff 案内を評価済みのセッション（毎ターンの I/O を避ける） */
 const handoffChecked = new Set<string>();
 /** handoff メモの案内寿命（過ぎたメモは案内しない） */
 const HANDOFF_TTL_MS = 14 * 24 * 60 * 60 * 1000;
-const seenPonytails = new Set<string>();
 
-/* 入口d1判定: prompt hook で起動し、context hook で注入する。
- * prompt hook は d1 を await しない（判定の待ち時間をメッセージ受付に載せない）。
- * ただし子セッション判定の 1 read だけは admission 経路で待つ（数msのローカル呼び出し）。
- * 判定結果は context hook が待って注入し、消費したら捨てる（1ターン1回）。 */
-const entryVerdicts = new Map<string, { at: number; promise: Promise<EntryVerdict | null> }>();
+/* prompt hook（メッセージ受付）で使う時間の上限。提出した入力が受け付けられるまでの
+ * 遅れの上限はこの 1 つだけ（子セッション判定・d1 待ち・phase案内の同期を直列に積まない。
+ * design g-mwj6481n 判断5・8）。 */
+const PROMPT_HOOK_BUDGET_MS = 1500;
 
-/** 保持する判定の最大件数（context hook に到達しないセッションの取り残し対策。
- * 同時多セッションでも他セッションの pending を捨てないよう余裕を持たせる） */
-const ENTRY_VERDICT_MAX_ENTRIES = 128;
+/* phase案内の同期（instructions.entry）。値はセッションごとに「最後に put した値」を持つ。
+ * プロセスで初めて見るセッションは list で実値を 1 回読む（再起動後の取りこぼし対策）。 */
+const PHASE_GUIDE_KEY = "graphhopper-phase";
+const guideKnown = new Map<string, string | null>();
+/** 同じセッションの同期を直列にする（古い値が後から上書きするのを防ぐ） */
+const guideQueue = new Map<string, Promise<boolean>>();
+/** 失敗の警告はセッションごとに 1 回 */
+const guideWarned = new Set<string>();
+
+/** phase 案内を instructions.entry に同期する（design g-mwj6481n 判断4・8）。
+ *
+ * - 値が変わったときだけ put / remove する（同じ値の再送はメッセージを増やさないが、
+ *   RPC を減らす）。目標値は phaseGuideText（active・bind 済み・done 以外だけ非 null）。
+ * - 同じセッションの同期は直列にする。
+ * - 失敗してもループは止めない。警告はセッションごとに 1 回、history に記録する。
+ *   呼び出し側（idle）は false を受けたら継続メッセージに全文を付ける。 */
+async function syncPhaseGuide(gh: Gh, sessionID: string): Promise<boolean> {
+  if (!sessionID) return true;
+  const entry = gh.ctx.session.instructions?.entry;
+  if (!entry) return false;
+  const flush = async (): Promise<boolean> => {
+    const want = phaseGuideText(state.getActive(gh.root), sessionID);
+    try {
+      let known = guideKnown.get(sessionID);
+      if (known === undefined) {
+        const rows = await entry.list(
+          { sessionID },
+          { signal: AbortSignal.timeout(1000) },
+        );
+        const row = rows.find((r) => r.key === PHASE_GUIDE_KEY);
+        known = row ? String(row.value) : null;
+      }
+      if (known === want) {
+        guideKnown.set(sessionID, want);
+        return true;
+      }
+      if (want === null) await entry.remove({ sessionID, key: PHASE_GUIDE_KEY });
+      else await entry.put({ sessionID, key: PHASE_GUIDE_KEY, value: want });
+      guideKnown.set(sessionID, want);
+      return true;
+    } catch (err) {
+      /* 警告も記録もセッションごとに 1 回（失敗し続ける環境で history を溢れさせない） */
+      if (!guideWarned.has(sessionID)) {
+        guideWarned.add(sessionID);
+        console.warn(
+          `graphhopper: phase案内の同期に失敗（tool応答と継続メッセージで代替）: ${String(err)}`,
+        );
+        state.recordEvent(gh.root, {
+          type: "phase_guide_sync",
+          sessionID,
+          ok: false,
+          error: String(err),
+        });
+      }
+      return false;
+    }
+  };
+  const prev = guideQueue.get(sessionID) ?? Promise.resolve(true);
+  const next = prev.catch(() => false).then(flush);
+  guideQueue.set(sessionID, next);
+  try {
+    return await next;
+  } finally {
+    if (guideQueue.get(sessionID) === next) guideQueue.delete(sessionID);
+  }
+}
+
+/** このセッションの同期状態を忘れる（セッション削除・goal完了時） */
+function forgetPhaseGuide(sessionID: string): void {
+  guideKnown.delete(sessionID);
+  guideQueue.delete(sessionID);
+  guideWarned.delete(sessionID);
+  handoffChecked.delete(sessionID);
+}
+
+/** 期限つき await。期限を過ぎたら null を返す（相手の Promise は走り続ける） */
+async function withinBudget<T>(p: Promise<T>, deadline: number): Promise<T | null> {
+  const ms = deadline - Date.now();
+  if (ms <= 0) return null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+  });
+  try {
+    return await Promise.race([p, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 function resolveFilePath(args: unknown): string | undefined {
   if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
@@ -133,7 +212,7 @@ function toLike(m: V2Msg): state.SessionMessageLike {
   return { info: { id: String(m.id ?? ""), role }, parts };
 }
 
-function tailLikes(all: V2Msg[]): state.SessionMessageLike[] | null {
+export function tailLikes(all: V2Msg[]): state.SessionMessageLike[] | null {
   const size = JSON.stringify(all).length;
   if (size > MAX_FETCH_CHARS) {
     oversizeSticky = true;
@@ -141,7 +220,12 @@ function tailLikes(all: V2Msg[]): state.SessionMessageLike[] | null {
   }
   oversizeSticky = false;
   const ordered = [...all].sort((a, b) => (a.time?.created ?? 0) - (b.time?.created ?? 0));
-  return ordered.slice(-TAIL_LIMIT).map(toLike);
+  /* instructions.entry の通知（system 型）は plugin 自身の案内なので、echo 検知・
+   * 継続の指紋の入力にしない（design g-mwj6481n 判断6）。synthetic（自動継続）は残す。 */
+  return ordered
+    .filter((m) => m.type !== "system")
+    .slice(-TAIL_LIMIT)
+    .map(toLike);
 }
 
 interface BeforeEvent {
@@ -311,139 +395,153 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
     }
   });
 
-  /* 入口d1判定: prompt admission で起動し、context（モデル呼び出し直前）で注入する。
-   * prompt hook は d1 を await しない（メッセージ受付を遅らせない）。結果は context hook が待つ。 */
+  /* graphhopper の tool が状態を変えた直後に phase案内を同期する（design g-mwj6481n 判断4）。
+   * goal start / phase / resume / complete / escalate / handoff load を 1 か所で拾う。
+   * await するので、案内は tool 結果の直後（同じターン）に届く。Code Mode の execute の
+   * 中で呼ばれた tool でも、その tool 名で発火する。値が変わらなければ RPC は走らない。 */
+  await ctx.tool.hook("execute.after", async (event: unknown) => {
+    try {
+      const e = event as AfterEvent;
+      if (!e.sessionID || !String(e.tool ?? "").startsWith("graphhopper_")) return;
+      /* 応答しない RPC で tool の結果を止めない（期限を過ぎたら同期は裏で続く） */
+      await withinBudget(
+        syncPhaseGuide(gh, String(e.sessionID)),
+        Date.now() + PROMPT_HOOK_BUDGET_MS,
+      );
+    } catch {
+      // 同期の失敗で tool の結果を壊さない
+    }
+  });
+
+  /* メッセージ受付: phase案内の同期・入口判定・handoff 案内をここでまとめる
+   * （design g-mwj6481n 判断3・5）。受付の遅れの上限は PROMPT_HOOK_BUDGET_MS の 1 つだけで、
+   * 子セッション判定・d1 待ち・phase案内の同期を直列に積まない。
+   * system は変えず、案内は synthetic（履歴に残り、同じ呼び出しに入る）で積む。 */
   await ctx.session.hook("prompt", async (event: unknown) => {
     try {
       const e = event as PromptEvent;
       const sessionID = String(e.sessionID ?? "");
       if (!sessionID) return;
       const text = String(e.prompt?.text ?? "");
+      const deadline = Date.now() + PROMPT_HOOK_BUDGET_MS;
       const active = state.getActive(root);
+
+      /* phase案内の同期は d1 と並列に走らせる（再起動後・別セッションでの状態変化を回収） */
+      const guideSync = syncPhaseGuide(gh, sessionID);
+
+      /* 子セッション（subagent）は parentID で判定する。session.created イベントに
+       * 依存すると prompt admission が先に走った場合に漏れる（design g-mvj7ddcz 判断2-2） */
+      const child = await withinBudget(isChildSession(ctx, sessionID), deadline);
       const decision = shouldRunEntryDecide({
         text,
         isInternal: isInternalPrompt(e.metadata, text),
-        /* 子セッション（subagent）は parentID で判定する。session.created イベントに
-         * 依存すると prompt admission が先に走った場合に漏れる（design 判断2-2） */
-        isChildSession: await isChildSession(ctx, sessionID),
+        isChildSession: child === true,
         /* paused の goal も対象。loop 進行中（active/paused）は入口判定の対象外 */
         hasActiveGoal: !!active && active.goal.status !== "done",
         hasApiKey: decisionAvailable(),
       });
+      /* d1 は先に起動だけして、handoff 案内の後で結果を待つ（待ち時間を重ねない） */
+      const startedAt = Date.now();
+      let errored = false;
+      const verdictPromise = decision.run
+        ? decideEntry(text, fetch, {
+            root,
+            sessionID,
+            messageID: e.messageID ?? null,
+          }).catch((err) => {
+            errored = true;
+            console.warn(`graphhopper: 入口判定に失敗: ${String(err)}`);
+            return null;
+          })
+        : null;
       if (!decision.run) {
         void recordEntrySkip(root, decision.reason, text, sessionID).catch(() => {});
-        return;
       }
-      /* 前回の判定は捨てる（1セッション1件だけ保持） */
-      if (entryVerdicts.size >= ENTRY_VERDICT_MAX_ENTRIES) {
-        /* 最も古い entry を1件捨てる（context hook に到達しないセッションの取り残し対策） */
-        const oldest = [...entryVerdicts.entries()].sort((a, b) => a[1].at - b[1].at)[0];
-        if (oldest) entryVerdicts.delete(oldest[0]);
+
+      /* handoff メモの案内（design g-mvq907g4）。pending かつ write 元でない新セッションに1回だけ。
+       * 自動 load はしない（bind は人間の意思で）。subagent には出さない。
+       * 入口判定を回さない入力（goal 進行中・キー無し・内部）でも出す（条件は移設前と同じ）。 */
+      if (
+        !handoffChecked.has(sessionID) &&
+        !(active && active.state.session_id === sessionID) &&
+        child !== true
+      ) {
+        try {
+          const memo = readHandoff(root);
+          /* 別 goal のメモ・完了後のメモ・古すぎるメモは案内しない（load しても error になる） */
+          const writtenAt = memo?.meta.written_at ? Date.parse(memo.meta.written_at) : NaN;
+          const fresh = Number.isFinite(writtenAt) && Date.now() - writtenAt <= HANDOFF_TTL_MS;
+          const relevant =
+            memo?.meta.pending &&
+            memo.meta.status !== "done" &&
+            memo.meta.written_by !== sessionID &&
+            fresh &&
+            (memo.meta.kind === "session"
+              ? !active || active.goal.status === "done"
+              : !active || memo.meta.goal_id === active.goal.id);
+          if (relevant) {
+            handoffChecked.add(sessionID);
+            await withinBudget(ctx.session.synthetic({
+              sessionID,
+              text: [
+                "## graphhopper handoff メモ",
+                "",
+                memo.meta.kind === "session"
+                  ? ".graphhopper/HANDOFF.md に未読の handoff メモがある（goal なしの作業メモ＋会話の要約）。"
+                  : `.graphhopper/HANDOFF.md に未読の handoff メモがある（goal: "${memo.meta.goal_title}" ${memo.meta.goal_id} / phase: ${memo.meta.phase}）。`,
+                memo.meta.kind === "session"
+                  ? "続きから作業するなら、まずメモを Read し、必要なら `graphhopper_handoff` (action: \"load\") で内容を確認せよ（goal は再開しない）。"
+                  : "続きから作業するなら、まずメモを Read し、`graphhopper_handoff` (action: \"load\") を呼んで goal をこのセッションに復元せよ。",
+                memo.meta.kind === "session"
+                  ? "別の作業をするなら無視してよい（メモは書いた時点の参考情報で、正は VCS とファイル）。"
+                  : "別の作業をするなら無視してよい（メモは state の写像であり、state は変わらない）。",
+              ].join("\n"),
+              description: "graphhopper handoff メモ",
+              resume: false,
+            } as never), deadline);
+          }
+        } catch {
+          // 案内の失敗でユーザー入力を止めない
+        }
       }
-      entryVerdicts.set(sessionID, {
-        at: Date.now(),
-        promise: decideEntry(text, fetch, {
-          root,
+
+      /* d1 の結果を待って synthetic で積む。間に合わなければ積まない
+       * （d1 は裏で走り続け、decisions.jsonl には残る） */
+      if (verdictPromise) {
+        const verdict = await withinBudget(verdictPromise, deadline);
+        const waitedMs = Date.now() - startedAt;
+        const inject = verdict ? formatEntryVerdict(verdict) : null;
+        if (inject) {
+          await withinBudget(
+            ctx.session.synthetic({
+              sessionID,
+              text: inject,
+              description: "graphhopper 入口判定",
+              resume: false,
+            } as never),
+            deadline,
+          );
+        }
+        state.recordEvent(root, {
+          type: "entry_verdict_delivery",
           sessionID,
-          messageID: e.messageID ?? null,
-        }).catch((err) => {
-          console.warn(`graphhopper: 入口判定に失敗: ${String(err)}`);
-          return null;
-        }),
-      });
+          outcome: inject ? "injected" : errored ? "error" : verdict ? "skipped" : "late",
+          waited_ms: waitedMs,
+          route: verdict?.rawRoute ?? null,
+        });
+      }
+
+      await withinBudget(guideSync, deadline);
     } catch {
-      // 判定の失敗でユーザー入力を止めない
+      // 判定・案内の失敗でユーザー入力を止めない
     }
   });
 
-  /* system 注入: guide＋phase指示＋ponytail＋入口判定 (v1 と同型の節約つき) */
+  /* system 注入は固定文 1 つだけ（design g-mwj6481n 判断3）。goal の有無・phase で変えない。
+   * 変わる案内は instructions.entry（phase案内）・synthetic・tool 応答で会話に届く。 */
   await ctx.session.hook("context", async (event: unknown) => {
     const e = event as ContextEvent;
-    const push = (t: string) => e.system?.push({ type: "text", text: t });
-    const active = state.getActive(root);
-    push(active?.goal.status === "active" ? SYSTEM_GUIDE_IDLE : SYSTEM_GUIDE);
-    /* 入口判定の注入（1ターン1回。消費したら捨てる） */
-    const sessionID = String(e.sessionID ?? "");
-    const pending = sessionID ? entryVerdicts.get(sessionID) : undefined;
-    if (pending) {
-      entryVerdicts.delete(sessionID);
-      /* 保持した判定が古すぎる（失敗したターンの取り残し）なら注入しない */
-      if (Date.now() - pending.at <= ENTRY_DECIDE_FRESH_MS) {
-        try {
-          const verdict = await pending.promise;
-          const text = verdict ? formatEntryVerdict(verdict) : null;
-          if (text) push(text);
-        } catch {
-          // 判定の失敗でモデル呼び出しを止めない
-        }
-      }
-    }
-    /* handoff メモの案内（design g-mvq907g4）。pending かつ write 元でない新セッションに1回だけ。
-     * 自動 load はしない（bind は人間の意思で）。subagent には出さない。 */
-    if (
-      sessionID &&
-      !handoffChecked.has(sessionID) &&
-      !(active && active.state.session_id === sessionID)
-    ) {
-      try {
-        const memo = readHandoff(root);
-        /* 別 goal のメモ・完了後のメモ・古すぎるメモは案内しない（load しても error になる） */
-        const writtenAt = memo?.meta.written_at ? Date.parse(memo.meta.written_at) : NaN;
-        const fresh = Number.isFinite(writtenAt) && Date.now() - writtenAt <= HANDOFF_TTL_MS;
-        const relevant =
-          memo?.meta.pending &&
-          memo.meta.status !== "done" &&
-          memo.meta.written_by !== sessionID &&
-          fresh &&
-          (memo.meta.kind === "session"
-            ? !active || active.goal.status === "done"
-            : !active || memo.meta.goal_id === active.goal.id);
-        if (relevant && !(await isChildSession(ctx, sessionID))) {
-          handoffChecked.add(sessionID);
-          push(
-            [
-              "## graphhopper handoff メモ",
-              "",
-              memo.meta.kind === "session"
-                ? ".graphhopper/HANDOFF.md に未読の handoff メモがある（goal なしの作業メモ＋会話の要約）。"
-                : `.graphhopper/HANDOFF.md に未読の handoff メモがある（goal: "${memo.meta.goal_title}" ${memo.meta.goal_id} / phase: ${memo.meta.phase}）。`,
-              memo.meta.kind === "session"
-                ? "続きから作業するなら、まずメモを Read し、必要なら `graphhopper_handoff` (action: \"load\") で内容を確認せよ（goal は再開しない）。"
-                : "続きから作業するなら、まずメモを Read し、`graphhopper_handoff` (action: \"load\") を呼んで goal をこのセッションに復元せよ。",
-              memo.meta.kind === "session"
-                ? "別の作業をするなら無視してよい（メモは書いた時点の参考情報で、正は VCS とファイル）。"
-                : "別の作業をするなら無視してよい（メモは state の写像であり、state は変わらない）。",
-            ].join("\n"),
-          );
-        }
-      } catch {
-        // 案内の失敗でモデル呼び出しを止めない
-      }
-    }
-    if (
-      active && active.goal.status === "active" && active.state.phase !== "done" &&
-      e.sessionID && e.sessionID === active.state.session_id
-    ) {
-      const key = `${e.sessionID}:${active.goal.id}:${active.state.phase}`;
-      if (seenPhaseGuides.has(key)) {
-        push(`## graphhopper 次のアクション\n\n${PHASE_ACTION_BRIEF[active.state.phase]}`);
-      } else {
-        seenPhaseGuides.add(key);
-        push(`## graphhopper 次のアクション（詳細）\n\n${effectivePhaseAction(active.state.phase, active.state.entry_route)}`);
-      }
-    }
-    if (
-      active && active.goal.status === "active" && active.state.phase === "implementing" &&
-      e.sessionID && e.sessionID === active.state.session_id
-    ) {
-      const pkey = `${e.sessionID}:${active.goal.id}`;
-      if (seenPonytails.has(pkey)) {
-        push(PONYTAIL_BRIEF);
-      } else {
-        seenPonytails.add(pkey);
-        push(PONYTAIL_RULES);
-      }
-    }
+    e.system?.push({ type: "text", text: SYSTEM_GUIDE });
   });
 
   /* compact 連携 (M2: messages 付加方式。要約対象に goal intent を混ぜて落とさせない) */
@@ -517,7 +615,7 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
                 state.setCascade(root, { ...cascade, restore: null });
               }
               state.unbindSession(root, id);
-              entryVerdicts.delete(id);
+              forgetPhaseGuide(id);
             }
             try {
               await LSPServerManager.stopAll();
@@ -667,6 +765,25 @@ async function onIdle(
   sessionID: string,
   background: unknown[] = [],
 ): Promise<void> {
+  try {
+    await onIdleBody(gh, sessionID, background);
+  } finally {
+    /* 同期の成否はここでは使わない（継続メッセージへのフォールバックは本体が判断する）。
+     * 値が変わらなければ RPC は走らない */
+    if (sessionID) void syncPhaseGuide(gh, sessionID);
+  }
+}
+
+/**
+ * idle の本体。phase案内の同期は wrapper（onIdle）の finally が 1 回だけ行う。
+ * 早期 return（pause・停止・完了）でも「状態を変えた後の案内」が届くようにするため、
+ * 各 return に同期を書かない（design g-mwj6481n 判断4）。
+ */
+async function onIdleBody(
+  gh: Gh,
+  sessionID: string,
+  background: unknown[] = [],
+): Promise<void> {
   const { ctx, root } = gh;
   if (!sessionID) return;
   const boot = state.bootId();
@@ -743,7 +860,9 @@ async function onIdle(
   const checkpoint = active.state.cascade?.checkpoint;
   if (checkpoint === "requested") {
     try {
-      if (await beginCheckpointReview(gh, sessionID)) return; // この idle は確認に使う（eval は回さない）
+      if (await beginCheckpointReview(gh, sessionID)) {
+        return; // この idle は確認に使う（eval は回さない）
+      }
     } catch {
       // 確認の失敗でループを止めない
     }
@@ -916,7 +1035,10 @@ async function onIdle(
       evalNote = [`eval_cmd FAILED (fail_streak=${r.fail_streak}): ${cmd}`, tail, stuckLine].filter(Boolean).join("\n");
     }
     active = state.getActive(root);
-    if (!active) return;
+    if (!active) {
+      forgetPhaseGuide(sessionID);
+      return;
+    }
   }
 
   /* 上限ガード: ラウンド数・進捗なし回数で止める */
@@ -946,9 +1068,15 @@ async function onIdle(
   }
   state.noteGuard(root, decision.next);
 
+  /* 継続メッセージを積む直前に同期する（phase 遷移・昇格・eval通過を反映）。
+   * 同期に失敗したときだけ全文を継続に付ける（design g-mwj6481n 判断7）。 */
+  const guideOk = await syncPhaseGuide(gh, sessionID);
+  const guideFallback = guideOk ? null : phaseGuideText(state.getActive(root), sessionID);
   await ctx.session.synthetic({
     sessionID,
-    text: [state.CONTINUATION_MARKER, evalNote, cascadeNote, continuationText(active.goal, active.state)].filter(Boolean).join("\n\n"),
+    text: [state.CONTINUATION_MARKER, evalNote, cascadeNote, guideFallback, continuationText(active.goal, active.state)]
+      .filter(Boolean)
+      .join("\n\n"),
   } as never);
   if (idleMsgs !== null) {
     state.noteContinuation(

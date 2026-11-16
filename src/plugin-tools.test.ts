@@ -377,6 +377,9 @@ describe("plugin tool: resume の catalog 警告（design g-mw8xvsg8）", () => 
       const text = textOf(out);
       expect(text).toContain("resumed:");
       expect(text).toContain("gen-agents");
+      /* resume の応答にも次のアクションを出す（design g-mwj6481n 判断7。
+       * entry の同期に失敗しても phase 案内が消えないようにする） */
+      expect(text).toContain("次: ");
     } finally {
       if (prevCfg === undefined) delete process.env.GRAPHHOPPER_CONFIG;
       else process.env.GRAPHHOPPER_CONFIG = prevCfg;

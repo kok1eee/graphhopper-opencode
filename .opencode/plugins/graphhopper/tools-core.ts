@@ -171,7 +171,7 @@ export function registerCoreTools(
               : "strong: 指定されたが cascade が無効のため効かない"
             : "";
           return text(
-            `goal started: "${started.goal.title}" (${started.goal.id})\n${consumed}${started.state.difficulty ? ` / difficulty=${started.state.difficulty}` : ""}\nphase: designing${cascadeNote ? `\n${cascadeNote}` : ""}${strongNote ? `\n${strongNote}` : ""}${intentNote ? `\n${intentNote}` : ""}\n次: ${effectivePhaseAction("designing", started.state.entry_route)}`,
+            `goal started: "${started.goal.title}" (${started.goal.id})\n${consumed}${started.state.difficulty ? ` / difficulty=${started.state.difficulty}` : ""}\nphase: designing${cascadeNote ? `\n${cascadeNote}` : ""}${strongNote ? `\n${strongNote}` : ""}${intentNote ? `\n${intentNote}` : ""}\n次: ${effectivePhaseAction("designing", started.state.entry_route, started.state.difficulty)}`,
           );
         }
         case "pause": {
@@ -203,7 +203,7 @@ export function registerCoreTools(
             : null;
           return text(
             a
-              ? `resumed: "${a.goal.title}" | phase: ${a.state.phase}${args.force ? " (forced)" : ""}${cascadeNote ? `\n${cascadeNote}` : ""}${policyNote ? `\n${policyNote}` : ""}`
+              ? `resumed: "${a.goal.title}" | phase: ${a.state.phase}${args.force ? " (forced)" : ""}${cascadeNote ? `\n${cascadeNote}` : ""}${policyNote ? `\n${policyNote}` : ""}\n次: ${effectivePhaseAction(a.state.phase, a.state.entry_route, a.state.difficulty)}`
               : "no active goal",
           );
         }
@@ -354,7 +354,7 @@ export function registerCoreTools(
       if (!a) return text("error: no active goal or invalid phase");
       const cascadeNote = await syncCascade(gh);
       return text(
-        `phase -> ${a.state.phase}${cascadeNote ? `\n${cascadeNote}` : ""}\n次: ${effectivePhaseAction(a.state.phase, a.state.entry_route)}`,
+        `phase -> ${a.state.phase}${cascadeNote ? `\n${cascadeNote}` : ""}\n次: ${effectivePhaseAction(a.state.phase, a.state.entry_route, a.state.difficulty)}`,
       );
     },
   });

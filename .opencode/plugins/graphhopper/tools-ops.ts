@@ -795,7 +795,7 @@ export function registerOpsTools(
               ? `メモとのズレ（state を正とする）: ${drift.map((d) => `${d.key} memo=${d.memo || "-"} live=${d.live}`).join(" / ")}`
               : "メモと state は一致（ズレなし）",
             "",
-            `次のアクション: ${a2 ? effectivePhaseAction(a2.state.phase, a2.state.entry_route) : "-"}`,
+            `次のアクション: ${a2 ? effectivePhaseAction(a2.state.phase, a2.state.entry_route, a2.state.difficulty) : "-"}`,
             "",
             "続行せよ。design は designing 終了後は不変（変更は .log.md に追記）。",
           ].join("\n"),

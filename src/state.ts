@@ -965,6 +965,23 @@ export type HistoryEvent =
       route: EntryRoute;
       reason?: string;
     }
+  | {
+      /* 入口判定の受け渡し（design g-mwj6481n 判断5）。受付の遅れと取りこぼしの計測用。
+       * injected=積んだ / skipped=判定は返ったが渡さない(direct・fallback) / late=期限切れ */
+      type: "entry_verdict_delivery";
+      sessionID: string;
+      outcome: "injected" | "skipped" | "late" | "error";
+      waited_ms: number;
+      route: EntryRoute | null;
+    }
+  | {
+      /* phase案内（instructions.entry）の同期失敗（design g-mwj6481n 判断8）。
+       * 失敗時は tool 応答と継続メッセージで全文を渡す経路に切り替わる */
+      type: "phase_guide_sync";
+      sessionID: string;
+      ok: boolean;
+      error?: string;
+    }
   | { type: "escalated"; goal: string; from: EntryRoute; at: string }
   | {
       /* 改善ループ用per-goal集計行。complete時にgoal_completeと2行1appendで同時書き込み。

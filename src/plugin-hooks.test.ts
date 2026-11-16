@@ -11,7 +11,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerHooks } from "../.opencode/plugins/graphhopper/hooks";
+import { registerHooks, tailLikes } from "../.opencode/plugins/graphhopper/hooks";
+import { writeHandoff } from "./handoff";
 import { setPhase as stateSetPhase, startGoal } from "./state";
 
 type HookCb = (event: unknown) => void | Promise<void>;
@@ -29,13 +30,22 @@ function readRows(root: string): Array<Record<string, unknown>> {
     .map((l) => JSON.parse(l) as Record<string, unknown>);
 }
 
-/** fake ctx。hook のコールバックを捕まえて、テストから直接叩けるようにする */
-function fakeCtx(opts: { parentID?: string | null } = {}) {
+/** fake ctx。hook のコールバックを捕まえて、テストから直接叩けるようにする。
+ * synthetic と instructions.entry は呼ばれた内容を記録する（design g-mwj6481n）。 */
+function fakeCtx(opts: { parentID?: string | null; entryThrows?: boolean } = {}) {
   const hooks = new Map<string, HookCb[]>();
   const add = (name: string, cb: HookCb) => {
     const list = hooks.get(name) ?? [];
     list.push(cb);
     hooks.set(name, list);
+  };
+  const synthetic: Array<{ sessionID: string; text: string; description?: string; resume?: boolean }> = [];
+  const entries = new Map<string, Map<string, string>>();
+  const entryCalls: string[] = [];
+  const sessionEntries = (sessionID: string) => {
+    const m = entries.get(sessionID) ?? new Map<string, string>();
+    entries.set(sessionID, m);
+    return m;
   };
   const ctx = {
     tool: { hook: async (name: string, cb: HookCb) => add(name, cb) },
@@ -47,6 +57,41 @@ function fakeCtx(opts: { parentID?: string | null } = {}) {
       }),
       context: async () => [],
       prompt: async () => undefined,
+      synthetic: async (input: {
+        sessionID: string;
+        text: string;
+        description?: string;
+        resume?: boolean;
+      }) => {
+        synthetic.push(input);
+        return { id: `msg-syn-${synthetic.length}`, sessionID: input.sessionID };
+      },
+      instructions: {
+        entry: {
+          list: async ({ sessionID }: { sessionID: string }) => {
+            entryCalls.push(`list:${sessionID}`);
+            return [...sessionEntries(sessionID).entries()].map(([key, value]) => ({ key, value }));
+          },
+          put: async ({
+            sessionID,
+            key,
+            value,
+          }: {
+            sessionID: string;
+            key: string;
+            value: unknown;
+          }) => {
+            if (opts.entryThrows) throw new Error("entry unavailable");
+            entryCalls.push(`put:${sessionID}:${key}`);
+            sessionEntries(sessionID).set(key, String(value));
+          },
+          remove: async ({ sessionID, key }: { sessionID: string; key: string }) => {
+            if (opts.entryThrows) throw new Error("entry unavailable");
+            entryCalls.push(`remove:${sessionID}:${key}`);
+            sessionEntries(sessionID).delete(key);
+          },
+        },
+      },
     },
     event: {
       // イベントを1つも流さない（無限に待たない）
@@ -55,7 +100,9 @@ function fakeCtx(opts: { parentID?: string | null } = {}) {
       },
     },
   };
-  return { ctx, hooks };
+  const entryValue = (sessionID: string, key = "graphhopper-phase") =>
+    sessionEntries(sessionID).get(key) ?? null;
+  return { ctx, hooks, synthetic, entryCalls, entryValue, entries };
 }
 
 /** d1 の応答を模した fetch（一時的にグローバルを差し替える） */
@@ -222,17 +269,17 @@ describe("plugin hook: 入口d1判定の prompt hook", () => {
   });
 });
 
-describe("plugin hook: 入口d1判定の context hook（注入）", () => {
-  /* 注入ヘッダ。SYSTEM_GUIDE にも「graphhopper 入口判定」という語が出るので
+describe("plugin hook: 入口判定は synthetic・system は固定・phase案内は entry（design g-mwj6481n）", () => {
+  /* 判定の通知ヘッダ。SYSTEM_GUIDE にも「graphhopper 入口判定」という語が出るので
    * ヘッダ全文で判定する */
   const INJECT_HEADER = "## graphhopper 入口判定（d1・自動判定済み）";
 
-  test("判定結果を system に注入する（1ターン1回・消費したら入れない）", async () => {
+  test("判定結果は synthetic で積み、system は固定文 1 つだけ", async () => {
     const root = tmpRoot();
     const restore = patchFetch("light");
     try {
       await withKey(async () => {
-        const { ctx, hooks } = fakeCtx();
+        const { ctx, hooks, synthetic } = fakeCtx();
         await registerHooks({ ctx: ctx as never, root });
         const promptHook = hooks.get("prompt")?.[0];
         const contextHook = hooks.get("context")?.[0];
@@ -243,78 +290,96 @@ describe("plugin hook: 入口d1判定の context hook（注入）", () => {
           prompt: { text: "複数ファイルを変更する重い依頼" },
         });
 
+        /* 判定は synthetic（履歴に残り、同じ呼び出しに入る）で 1 回だけ */
+        expect(synthetic).toHaveLength(1);
+        expect(synthetic[0].text).toContain(INJECT_HEADER);
+        expect(synthetic[0].text).toContain("route: 'light'");
+        expect(synthetic[0].resume).toBe(false);
+
+        /* system には判定を入れない。固定文も 1 つだけ */
         const system: Array<{ type: string; text?: string }> = [];
         await contextHook({ sessionID: "s-main", system });
+        expect(system).toHaveLength(1);
         const injected = system.map((s) => s.text ?? "").join("\n");
-        expect(injected).toContain(INJECT_HEADER);
-        expect(injected).toContain("route: 'light'");
+        expect(injected).not.toContain(INJECT_HEADER);
+        expect(injected).toContain("graphhopper（常駐）");
+        expect(injected).toContain("<context key=\"graphhopper-phase\">");
 
-        /* 2回目の context では注入しない（消費済み） */
+        /* 2回目の context も同じ固定文（goal の有無・phase で変わらない） */
         const system2: Array<{ type: string; text?: string }> = [];
         await contextHook({ sessionID: "s-main", system: system2 });
-        expect(system2.map((s) => s.text ?? "").join("\n")).not.toContain(INJECT_HEADER);
+        expect(system2.map((s) => s.text ?? "").join("\n")).toBe(injected);
       });
     } finally {
       restore();
     }
   });
 
-  test("raw=direct なら注入しない", async () => {
+  test("raw=direct なら積まない（履歴に通知を増やさない）", async () => {
     const root = tmpRoot();
     const restore = patchFetch("direct");
     try {
       await withKey(async () => {
-        const { ctx, hooks } = fakeCtx();
+        const { ctx, hooks, synthetic } = fakeCtx();
         await registerHooks({ ctx: ctx as never, root });
         const promptHook = hooks.get("prompt")?.[0];
-        const contextHook = hooks.get("context")?.[0];
-        if (!promptHook || !contextHook) throw new Error("hook が登録されていない");
-
-        await promptHook({
-          sessionID: "s-main",
-          prompt: { text: "こんにちは" },
-        });
-        const system: Array<{ type: string; text?: string }> = [];
-        await contextHook({ sessionID: "s-main", system });
-        expect(system.map((s) => s.text ?? "").join("\n")).not.toContain(INJECT_HEADER);
+        if (!promptHook) throw new Error("hook が登録されていない");
+        await promptHook({ sessionID: "s-main", prompt: { text: "こんにちは" } });
+        expect(synthetic).toHaveLength(0);
       });
     } finally {
       restore();
     }
   });
 
-  test("保持上限を超えると最古の判定が捨てられる（eviction）", async () => {
+  test("phase案内は entry に put し、同じ値なら再 put せず、goal 完了で remove する", async () => {
     const root = tmpRoot();
-    const restore = patchFetch("light");
-    try {
-      await withKey(async () => {
-        const { ctx, hooks } = fakeCtx();
-        await registerHooks({ ctx: ctx as never, root });
-        const promptHook = hooks.get("prompt")?.[0];
-        const contextHook = hooks.get("context")?.[0];
-        if (!promptHook || !contextHook) throw new Error("hook が登録されていない");
+    const { ctx, hooks, entryValue, entryCalls, entries } = fakeCtx();
+    await registerHooks({ ctx: ctx as never, root });
+    const promptHook = hooks.get("prompt")?.[0];
+    if (!promptHook) throw new Error("hook が登録されていない");
 
-        /* 上限(128)を超えるまで別セッションの prompt を積む */
-        for (let i = 0; i < 129; i++) {
-          await promptHook({
-            sessionID: `s-${i}`,
-            prompt: { text: `依頼 ${i}` },
-          });
-        }
-        /* 最初のセッションは追い出されているので注入されない */
-        const first: Array<{ type: string; text?: string }> = [];
-        await contextHook({ sessionID: "s-0", system: first });
-        expect(first.map((s) => s.text ?? "").join("\n")).not.toContain(INJECT_HEADER);
-        /* 最後のセッションは残っているので注入される */
-        const last: Array<{ type: string; text?: string }> = [];
-        await contextHook({ sessionID: "s-128", system: last });
-        expect(last.map((s) => s.text ?? "").join("\n")).toContain(INJECT_HEADER);
-      });
-    } finally {
-      restore();
-    }
+    const a = startGoal(root, "entry 同期のテスト", "s-main");
+    await promptHook({ sessionID: "s-main", prompt: { text: "続き" } });
+    const designing = entryValue("s-main");
+    expect(designing).toContain(a.goal.title);
+    expect(designing).toContain("phase: designing");
+    expect(designing).not.toContain("YAGNI");
+
+    /* 同じ phase のまま別セッションの idle が来ても put しない（値が同じ） */
+    const putsAfterFirst = entryCalls.filter((c) => c.startsWith("put:")).length;
+    await promptHook({ sessionID: "s-main", prompt: { text: "まだ designing" } });
+    expect(entryCalls.filter((c) => c.startsWith("put:")).length).toBe(putsAfterFirst);
+
+    /* implementing に進むと値が変わる（ponytail の全文が付く） */
+    stateSetPhase(root, "implementing", "test");
+    await promptHook({ sessionID: "s-main", prompt: { text: "実装する" } });
+    const implementing = entryValue("s-main");
+    expect(implementing).toContain("phase: implementing");
+    expect(implementing).toContain("YAGNI");
+
+    /* goal を complete すると案内は消える（古い phase を残さない） */
+    const st = await import("./state");
+    st.completeGoal(root);
+    await promptHook({ sessionID: "s-main", prompt: { text: "完了後" } });
+    expect(entryValue("s-main")).toBeNull();
+    expect(entries.get("s-main")?.size ?? 0).toBe(0);
   });
 
+  test("entry が使えない環境では system を変えずに続行する（合成もしない）", async () => {
+    const root = tmpRoot();
+    const { ctx, hooks, entryCalls } = fakeCtx({ entryThrows: true });
+    await registerHooks({ ctx: ctx as never, root });
+    const promptHook = hooks.get("prompt")?.[0];
+    if (!promptHook) throw new Error("hook が登録されていない");
+    startGoal(root, "entry 失敗のテスト", "s-main");
+    /* 失敗しても例外を投げない（ユーザー入力を止めない） */
+    await promptHook({ sessionID: "s-main", prompt: { text: "続き" } });
+    expect(entryCalls.length).toBe(0);
+  });
+});
+
+describe("plugin hook: 子セッションのモデル切替", () => {
   test("拒否された子セッションの切替先は switchModel を呼ばず、警告は1回だけ", async () => {
     const prevCfg = process.env.GRAPHHOPPER_CONFIG;
     const cfgPath = join(tmpRoot(), "global.json");
@@ -387,6 +452,129 @@ describe("plugin hook: 入口d1判定の context hook（注入）", () => {
       if (prevCfg === undefined) delete process.env.GRAPHHOPPER_CONFIG;
       else process.env.GRAPHHOPPER_CONFIG = prevCfg;
     }
+  });
+});
+
+describe("plugin hook: tool 実行後の phase案内の同期（design g-mwj6481n 判断4）", () => {
+  const runAfter = async (hooks: Map<string, HookCb[]>, tool: string, sessionID: string) => {
+    for (const cb of hooks.get("execute.after") ?? []) await cb({ tool, sessionID, input: {} });
+  };
+
+  test("graphhopper_ の tool の直後に entry を更新する（次の idle・prompt を待たない）", async () => {
+    const root = tmpRoot();
+    const { ctx, hooks, entryValue, entryCalls } = fakeCtx();
+    await registerHooks({ ctx: ctx as never, root });
+
+    startGoal(root, "tool 後の同期テスト", "s-main");
+    await runAfter(hooks, "graphhopper_goal", "s-main");
+    expect(entryValue("s-main")).toContain("phase: designing");
+
+    stateSetPhase(root, "implementing", "test");
+    await runAfter(hooks, "graphhopper_phase", "s-main");
+    expect(entryValue("s-main")).toContain("phase: implementing");
+
+    /* graphhopper 以外の tool では同期しない（毎 tool の RPC を避ける） */
+    const before = entryCalls.length;
+    stateSetPhase(root, "polish", "test");
+    await runAfter(hooks, "read", "s-main");
+    expect(entryCalls.length).toBe(before);
+    expect(entryValue("s-main")).toContain("phase: implementing");
+  });
+});
+
+describe("plugin hook: handoff メモの案内（design g-mwj6481n 判断5）", () => {
+  const HANDOFF_HEADER = "## graphhopper handoff メモ";
+
+  test("入口判定を回さない入力（goal 進行中・キー無し）でも、新セッションに1回だけ積む", async () => {
+    const root = tmpRoot();
+    await withoutKey(async () => {
+      const { ctx, hooks, synthetic } = fakeCtx();
+      await registerHooks({ ctx: ctx as never, root });
+      const promptHook = hooks.get("prompt")?.[0];
+      if (!promptHook) throw new Error("hook が登録されていない");
+
+      startGoal(root, "handoff 案内のテスト", "ses_a");
+      expect(writeHandoff(root, { sessionID: "ses_a" })).not.toBeNull();
+
+      await promptHook({ sessionID: "s-new", prompt: { text: "続きをやる" } });
+      const notes = synthetic.filter((m) => m.text.startsWith(HANDOFF_HEADER));
+      expect(notes).toHaveLength(1);
+      expect(notes[0].sessionID).toBe("s-new");
+      expect(notes[0].resume).toBe(false);
+
+      /* 2 回目の入力では積まない */
+      await promptHook({ sessionID: "s-new", prompt: { text: "もう一度" } });
+      expect(synthetic.filter((m) => m.text.startsWith(HANDOFF_HEADER))).toHaveLength(1);
+
+      /* メモを書いた本人のセッションには出さない */
+      await promptHook({ sessionID: "ses_a", prompt: { text: "書いた本人" } });
+      expect(synthetic.filter((m) => m.sessionID === "ses_a")).toHaveLength(0);
+    });
+  });
+
+  test("子セッションには出さない", async () => {
+    const root = tmpRoot();
+    await withoutKey(async () => {
+      const { ctx, hooks, synthetic } = fakeCtx({ parentID: "ses_parent" });
+      await registerHooks({ ctx: ctx as never, root });
+      const promptHook = hooks.get("prompt")?.[0];
+      if (!promptHook) throw new Error("hook が登録されていない");
+      startGoal(root, "handoff 子セッションのテスト", "ses_a");
+      writeHandoff(root, { sessionID: "ses_a" });
+      await promptHook({ sessionID: "s-child", prompt: { text: "調査して" } });
+      expect(synthetic).toHaveLength(0);
+    });
+  });
+});
+
+describe("plugin hook: idle の phase案内フォールバック（design g-mwj6481n 判断7）", () => {
+  const runIdle = async (hooks: Map<string, HookCb[]>, sessionID: string) => {
+    const cb = hooks.get("experimental.idle")?.[0];
+    if (!cb) throw new Error("idle hook が登録されていない");
+    await cb({ sessionID, background: [] });
+  };
+
+  test("entry が使えないときは継続メッセージに phase案内の全文を付ける", async () => {
+    const root = tmpRoot();
+    const { ctx, hooks, synthetic } = fakeCtx({ entryThrows: true });
+    await registerHooks({ ctx: ctx as never, root });
+    startGoal(root, "idle フォールバックのテスト", "s-main");
+    await runIdle(hooks, "s-main");
+    expect(synthetic.length).toBeGreaterThan(0);
+    const cont = synthetic[synthetic.length - 1].text;
+    expect(cont).toContain("## graphhopper 次のアクション");
+    expect(cont).toContain("phase: designing");
+  });
+
+  test("entry が使えるときは継続メッセージに全文を付けない（entry が運ぶ）", async () => {
+    const root = tmpRoot();
+    const { ctx, hooks, synthetic, entryValue } = fakeCtx();
+    await registerHooks({ ctx: ctx as never, root });
+    startGoal(root, "idle 正常系のテスト", "s-main");
+    await runIdle(hooks, "s-main");
+    expect(entryValue("s-main")).toContain("phase: designing");
+    const cont = synthetic[synthetic.length - 1].text;
+    expect(cont).not.toContain("## graphhopper 次のアクション");
+  });
+});
+
+describe("plugin hook: ループ検知の入力（design g-mwj6481n 判断6）", () => {
+  test("instructions の通知（system 型）は履歴の入力から外し、synthetic は残す", () => {
+    const likes = tailLikes([
+      { type: "user", text: "依頼", time: { created: 1 } },
+      {
+        type: "system",
+        text: 'The context under "graphhopper-phase" changed and supersedes the previous value:\n新しい案内',
+        time: { created: 2 },
+      },
+      { type: "synthetic", text: "[graphhopper-continuation] 続き", time: { created: 3 } },
+      { type: "assistant", content: [{ type: "text", text: "了解" }], time: { created: 4 } },
+    ]);
+    if (!likes) throw new Error("tailLikes が null");
+    const texts = likes.map((m) => m.parts?.[0]?.text ?? "");
+    expect(texts.some((t) => t.includes("supersedes"))).toBe(false);
+    expect(texts.some((t) => t.includes("[graphhopper-continuation]"))).toBe(true);
+    expect(likes.map((m) => m.info.role)).toEqual(["user", "user", "assistant"]);
   });
 });
 

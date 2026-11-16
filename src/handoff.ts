@@ -235,7 +235,7 @@ export function renderHandoff(root: string, opts: RenderOpts = {}): string | nul
     "",
     "## 次のアクション",
     "",
-    effectivePhaseAction(s.phase, s.entry_route),
+    effectivePhaseAction(s.phase, s.entry_route, s.difficulty),
     "",
     "## タスク",
     "",

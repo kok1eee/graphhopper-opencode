@@ -599,33 +599,85 @@ describe("continuationText 3段階文面", () => {
     expect(g.parseEntryRoute("  ADVISED  ").route).toBe("advised");
   });
 
-  test("effectivePhaseAction: light/advisedのみ注記", async () => {
+  test("effectivePhaseAction: light/advised は注記、difficulty で advisor 節が変わる", async () => {
     const g = await import("./gate");
     expect(g.effectivePhaseAction("designing", null)).toBe(g.PHASE_ACTION["designing"]);
     expect(g.effectivePhaseAction("designing", "full")).toBe(g.PHASE_ACTION["designing"]);
+    expect(g.effectivePhaseAction("designing", "direct")).toBe(g.PHASE_ACTION["designing"]);
+    /* 難易度未判定（null）は「メインが決める」= PHASE_ACTION.designing と同じ */
+    expect(g.effectivePhaseAction("designing", "full", null)).toBe(g.PHASE_ACTION["designing"]);
+
+    /* 既定（normal / 未判定）は判断基準と log の 1 行を出す */
+    const normal = g.effectivePhaseAction("designing", "full", "normal");
+    expect(normal).toContain("graphhopper-advisor");
+    expect(normal).toContain("graphhopper-critic");
+    expect(normal).toContain("自信がない判断");
+    expect(normal).toContain("advisor 省略");
+
+    /* easy は advisor を呼ばない（記録も不要）。critic は base どおり */
+    const easy = g.effectivePhaseAction("designing", "full", "easy");
+    expect(easy).toContain("difficulty=easy なので advisor は省略");
+    expect(easy).not.toContain("graphhopper-advisor");
+    expect(easy).toContain("graphhopper-critic");
+
+    /* hard は advisor を 1 回呼ぶ */
+    const hard = g.effectivePhaseAction("designing", "full", "hard");
+    expect(hard).toContain("difficulty=hard");
+    expect(hard).toContain("graphhopper-advisor");
+    expect(hard).not.toContain("advisor 省略");
+
     const light = g.effectivePhaseAction("designing", "light");
     expect(light).toContain("内容規約");
     expect(light).not.toContain("thin");
     expect(light).toContain("critic省略");
+    /* light は base 側にも advisor 節を置かない（注記だけで明示する） */
+    expect(light).not.toContain("graphhopper-advisor");
     expect(g.effectivePhaseAction("polish", "light")).toContain("general×1");
-    // full/未判定は advisor → critic の順（判断の第二意見を先に取る）
-    expect(g.effectivePhaseAction("designing", "full")).toContain("graphhopper-advisor");
-    expect(g.effectivePhaseAction("designing", "full")).toContain("graphhopper-critic");
-    // light は advisor も critic も省略する旨を明示する
-    expect(light).toContain("advisor・critic省略");
+
     const advised = g.effectivePhaseAction("designing", "advised");
     expect(advised).toContain("内容規約");
-    expect(advised).not.toContain("thin");
     expect(advised).toContain("graphhopper-advisor");
     // advised は advisor 相談の記録だけが必須で、critic は呼ばない
     expect(advised).toContain("critic省略");
     expect(advised).toContain("記録（graphhopper_consult_set）だけは必須");
+
     const oracle = g.effectivePhaseAction("designing", "oracle");
     expect(oracle).toContain("graphhopper-oracle");
-    // oracle 入口も base の advisor → critic を省略しない
+    // oracle 入口も advisor の要否は難易度と基準で決める（oracle 相談で代用しない）
     expect(oracle).toContain("graphhopper-advisor");
-    expect(oracle).toContain("oracle 相談で代用しない");
-    expect(g.effectivePhaseAction("designing", "direct")).toBe(g.PHASE_ACTION["designing"]);
+    expect(oracle).toContain("oracle が扱わなかった判断");
+  });
+
+  test("phaseGuideText: bind 済み active goal のときだけ全文（ponytail は implementing だけ）", async () => {
+    const g = await import("./gate");
+    const st = await import("./state");
+    const root = mkdtempSync(join(tmpdir(), "gh-phase-guide-"));
+    const a = startGoal(root, "phase guide の goal", "s-main");
+    const implementing = st.setPhaseChecked(root, "implementing", "test");
+    expect(implementing.ok).toBe(true);
+    const active = st.getActive(root);
+    if (!active) throw new Error("active が無い");
+
+    const text = g.phaseGuideText(active, "s-main");
+    expect(text).toContain("phase guide の goal");
+    expect(text).toContain("phase: implementing");
+    expect(text).toContain(g.PHASE_ACTION.implementing);
+    // implementing では ponytail の全文を後ろに付ける
+    expect(text).toContain("YAGNI");
+
+    // 別セッションには出さない（bind されていない）
+    expect(g.phaseGuideText(active, "s-other")).toBeNull();
+
+    /* 同じ phase の間は状態が動いても値が変わらない（毎ターン再送しないため） */
+    st.recordAttempt(root, false, "eval failed: x");
+    const again = g.phaseGuideText(st.getActive(root), "s-main");
+    expect(again).toBe(text);
+
+    // designing は ponytail を含まない
+    st.setPhaseChecked(root, "designing", "test");
+    const designing = g.phaseGuideText(st.getActive(root), "s-main");
+    expect(designing).toContain("phase: designing");
+    expect(designing).not.toContain("YAGNI");
   });
 });
 

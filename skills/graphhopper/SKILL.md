@@ -29,10 +29,27 @@ graphhopper本体（Claude Code版）の3相グラフをopencodeに移植した�
 
 | 入口 | oracle | advisor | critic | 記録の扱い |
 |---|---|---|---|---|
-| full / 未判定 | - | 1回（design を書いたら） | 1回 | consult_set / critic_set とも任意 |
+| full / 未判定 | - | 難易度で決める（下記） | 1回 | consult_set / critic_set とも任意 |
 | light | - | 省略 | 省略 | - |
 | advised | - | 1回 | 省略 | consult_set(kind: 'advisor') が**必須**（機械ゲート） |
-| oracle | 1回（開始時） | 1回 | 1回 | consult_set(kind: 'oracle') が**必須**（機械ゲート）。advisor・critic の記録は任意 |
+| oracle | 1回（開始時） | 難易度で決める（下記。oracle が扱わなかった判断について自信を問う） | 1回 | consult_set(kind: 'oracle') が**必須**（機械ゲート）。advisor・critic の記録は任意 |
+
+full / 未判定 / oracle の advisor は難易度で**分岐する**（裁量があるのは normal / 判定なしだけ。
+ここでの「未判定」は入口 route が未判定、「判定なし」は難易度が未判定を指す）。
+難易度は goal start の応答の `difficulty=` 行か、designing の案内文（easy は省略文・hard は呼ぶ文に
+なっている）で確認する。どちらにも無ければ「判定なし」として扱う。
+
+- **easy**: 省略する（記録も不要）。
+- **hard**: 1回呼ぶ。
+- **normal / 判定なし**: design を書いた後にメインが決める。基準は「捨てた代替案の理由に自信がない判断が 1 つでもあるか」。あれば 1 回呼び（呼び方は designing 節）、無ければ省略して `.graphhopper/plans/<goal-id>.log.md` に `advisor 省略: 判断2・4は実測で裏付けあり` のように、検討した判断と根拠を1行書く。
+- **oracle 入口**: easy / hard は上のとおり。normal / 判定なしのときだけ、開始時の oracle 相談で結論が出た論点を除いて基準を当てる。
+
+phase 案内（次のアクションの全文）は system ではなく**会話の中**に届く。
+`<context key="graphhopper-phase">` が現在の phase と次のアクションで、新しい値が前の値を置き換える
+（古い案内は無効）。入口判定と handoff の通知は `## graphhopper 入口判定` / `## graphhopper handoff メモ`
+で始まるメッセージとして届く。goal start・`graphhopper_phase`・resume・handoff load の応答にも
+`次:` の形で同じ案内が出る（自動遷移では出ない）。案内が見当たらないときは `graphhopper_status` で
+確認する。同期に失敗したときは継続メッセージに全文が付く。
 
 `require_critic: true` にしたプロジェクトだけは、入口に関係なく critic_set の記録が必須になる（既定 false）。
 その場合は critic を省略する light / advised でも、呼ばなかった理由を `reason` に書いて記録する。
@@ -113,7 +130,8 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
 ### 入口トリアージ（decide・route full/light/direct/advised/oracle）
 
 フルループが大袈裟な作業に相応の重さで回す入口判定。**判定は plugin の hook が自動で走らせる**
-（ユーザー入力の prompt admission で d1 を起動し、モデル呼び出し直前に結果を渡す）。
+（メッセージ受付時に d1 を待ち、`## graphhopper 入口判定` で始まるメッセージとして会話に届く。
+受付の遅れを 1.5 秒までに抑えるため待ちは最大 1.5 秒で、間に合わなければ届かない＝判定なしとして扱う）。
 `LIQUID_API_KEY` が要る（無いと判定は走らない）:
 
 - **自動判定が基本**: モデルが `graphhopper_decide` を呼ぶ必要はない。
@@ -147,16 +165,18 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
   中身をゼロから書く必要は無い、scaffoldを埋めればよい
 - **このフェーズではsource編集（Edit/Write）が `tool.execute.before` hookで物理ブロックされる**
   （許可パスは `.graphhopper/plans/` 配下のみ、`.graphhopper/config.json` の `design_gate_allow` で変更可）
-- 書けたらまず `graphhopper_invoke(agent: "graphhopper-advisor")` で**判断の第二意見を1回**取る
-  （design と `.graphhopper/plans/<goal-id>.intent.md` の path を渡し、会話を読ませる。要約して渡さない。
-  別の選択肢・判断の妥当性を返す。反映後に呼び直さない。light は省略、advised は `graphhopper_consult_set(kind: "advisor")` の記録まで必須）
+- 書けたら **full / 未判定 / oracle 入口では advisor を呼ぶかを難易度で決める**（分岐は入口別の表の下）。
+  light は advisor も critic も省略。advised は advisor が必須（`graphhopper_consult_set` の記録も要る）。
+  呼ぶ場合は `graphhopper_invoke(agent: "graphhopper-advisor")` で**判断の第二意見を1回**取る。
+  design と `.graphhopper/plans/<goal-id>.intent.md` の path を渡し、会話を読ませる（要約して渡さない）。
+  別の選択肢・判断の妥当性が返る。反映後に呼び直さない。
 - 次に `graphhopper_invoke(agent: "graphhopper-critic")` で**設計を1回敵対レビュー**する
   （要件漏れ・設計の穴・スコープ逸脱を検出。安価モデル = 常設nodeなので full / 未判定 / oracle 入口では必ず呼ぶ）。
   呼び出しは `execute` の外から直接でよい（`execute` の中は polish のレシピだけ）
 - critic の指摘を design.md に反映してから `graphhopper_phase(phase: "implementing")`
 - 要件の公式doc裏付けが必要なら `graphhopper_invoke(agent: "graphhopper-librarian")` を使う
   （researcherはコードベース事実収集に専念し、外部調査はlibrarianに委ねる）
-- 呼ぶこと自体は full / 未判定 / oracle 入口では必須（運用規則。light / advised は省略）。記録は
+- critic を呼ぶこと自体は full / 未判定 / oracle 入口では必須（運用規則。light / advised は省略）。記録は
   `require_critic: true` のプロジェクトでは **必須**（未記録だと implementing 遷移が機械拒否される。
   既定 false）。それ以外は任意で `graphhopper_phase` の前提条件にはならない
   （「critic を呼んだか」自体の機械チェックはしないので、記録も裁量）
