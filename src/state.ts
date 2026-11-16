@@ -318,8 +318,9 @@ export interface LoopState {
   /** goal start時の未コミット脏れファイル集合（正規化済み）。deep判定の差分基準。
    * null＝legacy/未測定→deepなし。snapshotInitialDiffFilesがstart時に記録する */
   initial_diff_files: string[] | null;
-  /** diff_stash 時点の全文 diff の sha1（design g-mwd3n5bo）。verifier が読んだ入力を
-   * 固定するための退避値。resume/新goal でクリアする */
+  /** diff_stash 時点の diff の sha1（design g-mwd3n5bo）。verifier が読んだ入力を
+   * 固定するための退避値。.graphhopper/ の作業ファイルは含めない（design g-mwiu6lcj）。
+   * resume/新goal でクリアする */
   stash_diff_hash: string | null;
   /** goal 開始時の会話から作った意図ログの path（design g-mwebh9vl）。null＝未作成 */
   intent_path: string | null;
@@ -2141,8 +2142,33 @@ export function isValidBaselineRev(baseline: string): boolean {
  * index/mcpに判断を足したらRISKを見直すこと（不変条件） */
 export const RISK_PATHS: readonly string[] = ["src/state.ts", "src/gate.ts"];
 
+/** 差分の測定に残す `.graphhopper/` 配下のファイル（人が書き、graphhopper は書かない）。
+ * それ以外の `.graphhopper/` は graphhopper の作業ファイル（state.json・history.jsonl・
+ * tmp/・plans/ など）で、測定に含めると記録そのものが差分を変えて diff ゲートが止まる
+ * （design g-mwiu6lcj）。 */
+export const MEASURED_GH_FILES: readonly string[] = [
+  ".graphhopper/config.json",
+  ".graphhopper/config.example.json",
+];
+
+/** jj の fileset（cwd 相対）。`.graphhopper/` を除き、設定だけ残す */
+export function ghFileset(): string {
+  return `~cwd:".graphhopper" | ${MEASURED_GH_FILES.map((f) => `cwd:"${f}"`).join(" | ")}`;
+}
+
+/** git の pathspec（cwd 相対）。`:/\` で測定範囲を従来どおり repo 全体に保ち、`.graphhopper/` を除く */
+export function ghAllSpec(): string[] {
+  return [":/", ":(exclude).graphhopper"];
+}
+
+/** git の pathspec。残す設定は別に取る（exclude したディレクトリの子は同じ pathspec で足せない） */
+export function ghKeepSpec(): string[] {
+  return [...MEASURED_GH_FILES];
+}
+
 /** baseline からの変更ファイル列を測定する（jj → git fallback）。
- * deep検知用。取得不能時は []（fail-open＝deepなし）。 */
+ * 作業ファイル（`.graphhopper/` 配下）は数えない。deep検知用。取得不能時は []
+ * （fail-open＝deepなし）。 */
 export async function measureChangedFiles(
   shell: Shell,
   root: string,
@@ -2155,7 +2181,7 @@ export async function measureChangedFiles(
       .map((l) => l.trim())
       .filter((l) => l.length > 0);
   try {
-    const r = await shell`jj diff --from ${baseline} --name-only`
+    const r = await shell`jj diff --from ${baseline} --name-only -- ${[ghFileset()]}`
       .cwd(root)
       .nothrow()
       .quiet();
@@ -2164,15 +2190,21 @@ export async function measureChangedFiles(
     // ignore → gitへ
   }
   try {
-    const r = await shell`git diff --name-only ${baseline}`
+    const all = await shell`git diff --name-only ${baseline} -- ${ghAllSpec()}`
       .cwd(root)
       .nothrow()
       .quiet();
-    if (r.exitCode === 0) return collect(r.stdout.toString());
+    const keep = await shell`git diff --name-only ${baseline} -- ${ghKeepSpec()}`
+      .cwd(root)
+      .nothrow()
+      .quiet();
+    if (all.exitCode !== 0 || keep.exitCode !== 0) return [];
+    return [
+      ...new Set([...collect(all.stdout.toString()), ...collect(keep.stdout.toString())]),
+    ];
   } catch {
     return [];
   }
-  return [];
 }
 
 /** deep判定＝(現行集合 − 初期集合) ∩ RISK_PATHS（effectiveDiffLinesのファイル版。
@@ -2212,7 +2244,7 @@ export async function measureDiffLines(
     // Bun shell の補間値は自動escapeされるため、baseline を直接埋め込む。
     // 以前の `sh -c "jj diff --from ${baseline} ..."` は sh 内で無escapeだった。
     // pipe (tail) を避け、末行の取り出しは JS で行う。
-    const r = await shell`jj diff --from ${baseline} --stat`
+    const r = await shell`jj diff --from ${baseline} --stat -- ${[ghFileset()]}`
       .cwd(root)
       .nothrow()
       .quiet();
@@ -2225,12 +2257,19 @@ export async function measureDiffLines(
     // ignore
   }
   try {
-    const r = await shell`git diff --shortstat ${baseline}`
+    // 全体（`:/\`）と残す設定の 2 回に分ける: exclude したディレクトリの子は足し戻せない
+    const all = await shell`git diff --shortstat ${baseline} -- ${ghAllSpec()}`
       .cwd(root)
       .nothrow()
       .quiet();
-    const out = r.stdout.toString().trim();
-    return parseDiffShortstat(out) ?? 0;
+    const keep = await shell`git diff --shortstat ${baseline} -- ${ghKeepSpec()}`
+      .cwd(root)
+      .nothrow()
+      .quiet();
+    return (
+      (parseDiffShortstat(all.stdout.toString().trim()) ?? 0) +
+      (parseDiffShortstat(keep.stdout.toString().trim()) ?? 0)
+    );
   } catch {
     return 0;
   }
@@ -2375,7 +2414,7 @@ export async function stashDiff(
     }
   }
   try {
-    const r = await shell`jj diff --from ${baseline}`
+    const r = await shell`jj diff --from ${baseline} -- ${[ghFileset()]}`
       .cwd(root)
       .nothrow()
       .quiet();
@@ -2384,20 +2423,27 @@ export async function stashDiff(
     // git にフォールバック
   }
   try {
-    const r = await shell`git diff ${baseline}`
+    // 実効diff 経路に乗らなかった場合も作業ファイルは載せない（design g-mwiu6lcj）
+    const all = await shell`git diff ${baseline} -- ${ghAllSpec()}`
       .cwd(root)
       .nothrow()
       .quiet();
-    if (r.exitCode === 0) return write(r.stdout.toString());
+    const keep = await shell`git diff ${baseline} -- ${ghKeepSpec()}`
+      .cwd(root)
+      .nothrow()
+      .quiet();
+    if (all.exitCode !== 0 || keep.exitCode !== 0) return null;
+    return write(all.stdout.toString() + keep.stdout.toString());
   } catch {
     return null;
   }
-  return null;
 }
 
 /**
- * baseline からの全文 diff の sha1（design g-mwd3n5bo）。
+ * baseline からの diff の sha1（design g-mwd3n5bo）。
  * 実効diff（stashDiff）と違い初期脏れも含む: goal 中にそのファイルを直した場合も検知するため。
+ * ただし `.graphhopper/` の作業ファイルは含めない（graphhopper 自身の記録が差分を変えて
+ * ゲートが止まるため。design g-mwiu6lcj。設定 2 つは含む）。
  * VCS 不能・baseline 不正は null（ゲートは fail-open）。
  */
 export async function computeDiffHash(
@@ -2407,7 +2453,7 @@ export async function computeDiffHash(
 ): Promise<string | null> {
   if (!baseline || !isValidBaselineRev(baseline)) return null;
   try {
-    const r = await shell`jj diff --from ${baseline} --color=never`
+    const r = await shell`jj diff --from ${baseline} --color=never -- ${[ghFileset()]}`
       .cwd(root)
       .nothrow()
       .quiet();
@@ -2416,12 +2462,19 @@ export async function computeDiffHash(
     // git にフォールバック
   }
   try {
-    const r = await shell`git diff ${baseline}`.cwd(root).nothrow().quiet();
-    if (r.exitCode === 0) return sha1Hex(r.stdout.toString());
+    const all = await shell`git diff ${baseline} -- ${ghAllSpec()}`
+      .cwd(root)
+      .nothrow()
+      .quiet();
+    const keep = await shell`git diff ${baseline} -- ${ghKeepSpec()}`
+      .cwd(root)
+      .nothrow()
+      .quiet();
+    if (all.exitCode !== 0 || keep.exitCode !== 0) return null;
+    return sha1Hex(all.stdout.toString() + keep.stdout.toString());
   } catch {
     return null;
   }
-  return null;
 }
 
 /** diff_stash 時点の指紋を保存する（verifier_set が verdict へ写す） */
@@ -3542,13 +3595,15 @@ export function noteEdit(root: string, filePath: string): LoopState {
 }
 
 /** ワーキングコピー差分（親比）の行数を測る。stateless 測定のため
- * baseline 不要。jj → git fallback。両失敗時は null（何もしない）。 */
+ * baseline 不要。jj → git fallback。両失敗時は null（何もしない）。
+ * `.graphhopper/` の作業ファイルは数えない（履歴が毎ターン伸びて停滞検知が効かなくなるため。
+ * design g-mwiu6lcj）。設定 2 つは数える。 */
 export async function measureWorkingCopyLines(
   shell: Shell,
   root: string,
 ): Promise<number | null> {
   try {
-    const r = await shell`jj diff --stat`.cwd(root).nothrow().quiet();
+    const r = await shell`jj diff --stat -- ${[ghFileset()]}`.cwd(root).nothrow().quiet();
     if (r.exitCode === 0) {
       const lines = r.stdout.toString().trim().split("\n");
       const parsed = parseDiffShortstat(lines[lines.length - 1] ?? "");
@@ -3560,12 +3615,18 @@ export async function measureWorkingCopyLines(
     // ignore
   }
   try {
-    const r = await shell`git diff --shortstat`.cwd(root).nothrow().quiet();
-    if (r.exitCode === 0) {
-      const out = r.stdout.toString().trim();
-      if (out === "") return 0;
-      return parseDiffShortstat(out) ?? 0;
-    }
+    const all = await shell`git diff --shortstat -- ${ghAllSpec()}`.cwd(root).nothrow().quiet();
+    const keep = await shell`git diff --shortstat -- ${ghKeepSpec()}`.cwd(root).nothrow().quiet();
+    if (all.exitCode !== 0 || keep.exitCode !== 0) return null;
+    // 空出力は 0、パース不能は測定不能（null）
+    const one = (out: string): number | null => {
+      const t = out.trim();
+      return t === "" ? 0 : parseDiffShortstat(t);
+    };
+    const a = one(all.stdout.toString());
+    const k = one(keep.stdout.toString());
+    if (a === null || k === null) return null;
+    return a + k;
   } catch {
     // ignore
   }

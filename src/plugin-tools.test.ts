@@ -311,6 +311,45 @@ describe("plugin tool: complete の diff hash ゲート（design g-mwd3n5bo）",
   });
 });
 
+describe("diff ゲート: .graphhopper/ を追跡した repo でも complete できる（design g-mwiu6lcj）", () => {
+  type Out = { output: Record<string, unknown>; content: string };
+  const outOf = (r: unknown): Out => r as Out;
+
+  /** .graphhopper/ を gitignore せず commit した repo（不具合の再現条件） */
+  async function trackedGhRoot(): Promise<string> {
+    const { $ } = await import("bun");
+    const root = tmpRoot();
+    await $`git init -q ${root}`.quiet();
+    await $`git -C ${root} config user.email t@t`.quiet();
+    await $`git -C ${root} config user.name t`.quiet();
+    mkdirSync(join(root, "src"), { recursive: true });
+    mkdirSync(join(root, ".graphhopper", "plans"), { recursive: true });
+    writeFileSync(join(root, "src", "a.ts"), "x\n");
+    writeFileSync(join(root, ".graphhopper", "history.jsonl"), "");
+    writeFileSync(join(root, ".graphhopper", "state.json"), "{}\n");
+    writeFileSync(join(root, ".graphhopper", "config.example.json"), "{}\n");
+    await $`git -C ${root} add -A`.quiet();
+    await $`git -C ${root} commit -qm init`.quiet();
+    return root;
+  }
+
+  test("diff_stash → verifier_set → complete が force なしで通る", async () => {
+    const root = await trackedGhRoot();
+    startGoal(root, "tracked", "s1");
+    writeFileSync(join(root, "src", "a.ts"), "x\ny\n");
+    const m = opsTools(root);
+    await m.get("graphhopper_diff_stash")!.execute({}, { sessionID: "s1" });
+    await m.get("graphhopper_verifier_set")!.execute(
+      { results: [{ lens: "general", level: "clean" }], reason: "ok" },
+      { sessionID: "s1" },
+    );
+    const out = await tools(root)
+      .get("graphhopper_goal")!
+      .execute({ action: "complete" }, { sessionID: "s1" });
+    expect(textOf(out)).toContain("completed");
+  });
+});
+
 describe("plugin tool: resume の catalog 警告（design g-mw8xvsg8）", () => {
   test("catalog に deny モデルが焼かれていると resume 応答に警告が付く", async () => {
     const prevCfg = process.env.GRAPHHOPPER_CONFIG;

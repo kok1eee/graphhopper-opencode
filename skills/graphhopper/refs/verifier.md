@@ -169,12 +169,22 @@ behavior/progress lens と実装 subagent には渡さない（決定を再審�
 #### diff ゲート（design g-mwd3n5bo）
 
 **verifier clean の後に差分を変えると `complete` は止まる**。`verifier_set` が検証時点の
-全文 diff の sha1 を記録し、complete 時に現在値と照合する。止められたら再検証する
-（`recipe: tail` をもう一度）。人間が問題ないと判断した場合だけ `force: true` を使う
+差分の sha1 を記録し、complete 時に現在値と照合する。止められたら冒頭の `recipe: tail` を
+もう一度回す。人間が問題ないと判断した場合だけ `force: true` を使う
 （監査の `goal_complete` に `diff_gate: forced` が残る）。VCS が無い・baseline が取れない
 環境ではゲートは無効（`diff_gate: unavailable`）。
 
-- **diff 肥大は検証コスト3倍**: polish routeは3lensが全差分を読む。748行級は1回で3×748行の
+**測る範囲はゲート・`diff_stash`・`verify` の指紋で共通**: `.graphhopper/`
+配下（`state.json`・`history.jsonl`・`tmp/`・`plans/` など。graphhopper 自身が goal 中に書くもの）は
+入らない。入るのは `.graphhopper/config.json` と `.graphhopper/config.example.json` の 2 つだけ
+（design g-mwiu6lcj）。そのため `.graphhopper/` を gitignore していない repo でも、graphhopper が
+goal 中に書くファイル（`state.json`・`history.jsonl`・退避 diff・`plans/<goal>.md`・
+`plans/<goal>.log.md`）でゲートが止まることはない。検証後にこの 2 つの設定を変えた場合は、
+`force` ではなく同じく冒頭の `recipe: tail` で再検証する（この 2 つの変更は `diff_stash` の
+退避 diff にも入る）。止まった原因が分からないときは
+`graphhopper_diff_stash` の `path` を読んで、何が差分に入っているか確かめる。
+
+- **diff 肥大は検証コスト3倍**: polish routeは3lensが差分（作業ファイル除く）を読む。748行級は1回で3×748行の
   コンテキスト消費。goalを小さく切ってadvisor（verifier×1）に収めるのが最大の節約。
   巻き戻しはさらに3倍するので、criticで初回品質を上げることも節約になる
 - **drift は全件報告させる**（閾値カットしない。「重大なものだけ報告」のような保守的指示は

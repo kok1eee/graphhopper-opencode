@@ -203,6 +203,8 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
 - `action: "list"` は送信候補の列挙、`action: "send"`（`session_id` 指定）は従来の直接送信、
   `action: "clear"` はメモ削除。`session_id` を渡した場合は send 扱い。
 - 注意: `.graphhopper/` が gitignore されていない repo では、メモが commit に乗り得る（write 時に警告が出る）。
+  diff ゲートは `.graphhopper/` の作業ファイルを測らないので、これで complete は止まらない
+  （`.graphhopper/config.json` と `config.example.json` は測る。詳細は [refs/verifier.md](refs/verifier.md)）。
 - **goal が無くても書ける**: active/paused の goal が無いときは `note`（作業メモ）か compaction 要約があれば
   `kind: session` のメモを書く。`load` は goal を再開せず本文を見せるだけ（active な goal があるセッションでは拒否）。
 - **会話の要約を添付**: このセッションが compact していれば、最後の要約（書いたモデル・日時・契機つき）を

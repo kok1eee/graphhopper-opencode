@@ -1891,8 +1891,9 @@ describe("stashDiff（verifier用diff退避）", () => {
       });
       if (joined.includes("--name-only"))
         return ok("old.txt\nnew.txt\n");
-      if (vals.length >= 2) return ok("PER-FILE\n");
-      return ok("FULL DIFF\n");
+      const isFull = JSON.stringify(vals).includes("~cwd:");
+      if (isFull) return ok("FULL DIFF\n");
+      return ok("PER-FILE\n");
     }) as unknown as Shell;
     const root = tmpRoot();
     s.startGoal(root, "t", "s1");
@@ -1930,6 +1931,181 @@ describe("stashDiff（verifier用diff退避）", () => {
     expect(stashed!.lines).toBe(0);
     const { readFileSync } = await import("node:fs");
     expect(readFileSync(stashed!.path, "utf8")).toBe("");
+  });
+});
+
+describe("差分測定の .graphhopper/ 除外（design g-mwiu6lcj）", () => {
+  /** .graphhopper/ を gitignore せず commit した repo（不具合の再現条件） */
+  async function trackedGitRoot(): Promise<string> {
+    const { $ } = await import("bun");
+    const root = tmpRoot();
+    await $`git init -q ${root}`.quiet();
+    await $`git -C ${root} config user.email t@t`.quiet();
+    await $`git -C ${root} config user.name t`.quiet();
+    mkdirSync(join(root, "src"), { recursive: true });
+    mkdirSync(join(root, ".graphhopper", "plans"), { recursive: true });
+    writeFileSync(join(root, "src/a.ts"), "x\n");
+    writeFileSync(join(root, ".graphhopper/history.jsonl"), "");
+    writeFileSync(join(root, ".graphhopper/state.json"), "{}\n");
+    writeFileSync(join(root, ".graphhopper/config.example.json"), "{}\n");
+    await $`git -C ${root} add -A`.quiet();
+    await $`git -C ${root} commit -qm init`.quiet();
+    return root;
+  }
+
+  async function headRev(root: string): Promise<string> {
+    const { $ } = await import("bun");
+    return (await $`git -C ${root} rev-parse HEAD`.text()).trim();
+  }
+
+  test("ghFileset / pathspec は .graphhopper を除き設定2つを残す", async () => {
+    const s = await import("./state");
+    expect(s.ghFileset()).toBe(
+      '~cwd:".graphhopper" | cwd:".graphhopper/config.json" | cwd:".graphhopper/config.example.json"',
+    );
+    expect(s.ghAllSpec()).toEqual([":/", ":(exclude).graphhopper"]);
+    expect(s.ghKeepSpec()).toEqual([
+      ".graphhopper/config.json",
+      ".graphhopper/config.example.json",
+    ]);
+  });
+
+  test("computeDiffHash: 作業ファイルでは変わらず、ソースと設定では変わる", async () => {
+    const s = await import("./state");
+    const { $ } = await import("bun");
+    const root = await trackedGitRoot();
+    const rev = await headRev(root);
+    writeFileSync(join(root, "src/a.ts"), "x\ny\n");
+    const base = await s.computeDiffHash($, root, rev);
+    expect(base).toMatch(/^[0-9a-f]{40}$/);
+    writeFileSync(join(root, ".graphhopper/history.jsonl"), "e1\n");
+    writeFileSync(join(root, ".graphhopper/state.json"), '{"a":1}\n');
+    writeFileSync(join(root, ".graphhopper/plans/g-1.log.md"), "note\n");
+    expect(await s.computeDiffHash($, root, rev)).toBe(base);
+    writeFileSync(join(root, ".graphhopper/config.example.json"), '{"m":1}\n');
+    expect(await s.computeDiffHash($, root, rev)).not.toBe(base);
+  });
+
+  test("measureChangedFiles / measureDiffLines: 作業ファイルを数えない", async () => {
+    const s = await import("./state");
+    const { $ } = await import("bun");
+    const root = await trackedGitRoot();
+    const rev = await headRev(root);
+    writeFileSync(join(root, "src/a.ts"), "x\ny\n");
+    writeFileSync(join(root, ".graphhopper/config.example.json"), '{"m":1}\n');
+    writeFileSync(join(root, ".graphhopper/history.jsonl"), "e1\n");
+    writeFileSync(join(root, ".graphhopper/plans/g-1.log.md"), "note\n");
+    const files = await s.measureChangedFiles($, root, rev);
+    expect(files).toContain("src/a.ts");
+    expect(files).toContain(".graphhopper/config.example.json");
+    expect(files.some((f) => f.includes("history.jsonl"))).toBe(false);
+    expect(files.some((f) => f.includes("state.json"))).toBe(false);
+    expect(files.some((f) => f.includes("plans/"))).toBe(false);
+    const lines = await s.measureDiffLines($, root, rev);
+    writeFileSync(join(root, ".graphhopper/history.jsonl"), Array(80).fill("x").join("\n") + "\n");
+    expect(await s.measureDiffLines($, root, rev)).toBe(lines);
+  });
+
+  test("measureWorkingCopyLines: 作業ファイルの伸びを数えない", async () => {
+    const s = await import("./state");
+    const { $ } = await import("bun");
+    const root = await trackedGitRoot();
+    writeFileSync(join(root, "src/a.ts"), "x\ny\n");
+    const before = await s.measureWorkingCopyLines($, root);
+    expect(before).toBeGreaterThan(0);
+    writeFileSync(join(root, ".graphhopper/history.jsonl"), Array(80).fill("y").join("\n") + "\n");
+    expect(await s.measureWorkingCopyLines($, root)).toBe(before);
+  });
+
+  test("stashDiff を2回続けても退避に作業ファイルが入らない（全文・実効の両経路）", async () => {
+    const s = await import("./state");
+    const { $ } = await import("bun");
+    const root = await trackedGitRoot();
+    const rev = await headRev(root);
+    s.startGoal(root, "t", "s1");
+    writeFileSync(join(root, "src/a.ts"), "x\ny\n");
+    writeFileSync(join(root, ".graphhopper/history.jsonl"), "e1\n");
+    // 初期集合なし（legacy）→ 全文退避の経路
+    const first = await s.stashDiff($, root, rev, "g-abc123");
+    const b1 = readFileSync(first!.path, "utf8");
+    expect(b1).toContain("src/a.ts");
+    expect(b1).not.toContain("history.jsonl");
+    const second = await s.stashDiff($, root, rev, "g-abc123");
+    expect(readFileSync(second!.path, "utf8")).not.toContain("gh-verify-");
+    // 初期集合あり（空）→ 実効diff（per-file）の経路
+    s.snapshotInitialDiffFiles(root, []);
+    const third = await s.stashDiff($, root, rev, "g-abc123");
+    const b3 = readFileSync(third!.path, "utf8");
+    expect(b3).toContain("src/a.ts");
+    expect(b3).not.toContain("history.jsonl");
+    expect(b3).not.toContain("gh-verify-");
+  });
+
+  test("fake: jj には fileset、git には全体と設定の2回を渡す", async () => {
+    const s = await import("./state");
+    const seen: unknown[][] = [];
+    const shell = ((strings: TemplateStringsArray, ...vals: unknown[]) => {
+      const joined = strings.join(" ");
+      const isJj = joined.includes("jj diff");
+      const spec = vals[1];
+      seen.push([joined.trim(), spec]);
+      const out = isJj
+        ? ""
+        : Array.isArray(spec) && String(spec[0]).startsWith(":")
+          ? "src/a.ts\n"
+          : Array.isArray(spec)
+            ? ".graphhopper/config.example.json\n"
+            : "";
+      return {
+        cwd: () => ({
+          nothrow: () => ({
+            quiet: () =>
+              Promise.resolve({
+                exitCode: isJj ? 1 : 0,
+                stdout: { toString: () => out },
+              }),
+          }),
+        }),
+      };
+    }) as unknown as Parameters<typeof s.measureChangedFiles>[0];
+    const files = await s.measureChangedFiles(shell, "/r", "abc123");
+    expect(files).toEqual(["src/a.ts", ".graphhopper/config.example.json"]);
+    const jjCall = seen.find(([cmd]) => String(cmd).includes("jj diff"));
+    expect(JSON.stringify(jjCall?.[1])).toContain("~cwd:");
+    expect(seen.some(([, spec]) => JSON.stringify(spec) === JSON.stringify(s.ghAllSpec()))).toBe(true);
+    expect(seen.some(([, spec]) => JSON.stringify(spec) === JSON.stringify(s.ghKeepSpec()))).toBe(true);
+  });
+});
+
+const jjAvailable = (() => {
+  try {
+    return Bun.spawnSync(["jj", "--version"]).exitCode === 0;
+  } catch {
+    return false;
+  }
+})();
+
+describe("差分測定の .graphhopper/ 除外（実 jj repo）", () => {
+  test.skipIf(!jjAvailable)("作業ファイルを数えず、ソースの変更だけを拾う", async () => {
+    const s = await import("./state");
+    const { $ } = await import("bun");
+    const root = mkdtempSync(join(tmpdir(), "gh-jj-test-"));
+    await $`jj git init ${root}`.quiet();
+    await $`jj config set --repo user.email t@t`.cwd(root).quiet();
+    await $`jj config set --repo user.name t`.cwd(root).quiet();
+    mkdirSync(join(root, "src"), { recursive: true });
+    mkdirSync(join(root, ".graphhopper"), { recursive: true });
+    writeFileSync(join(root, "src/a.ts"), "x\n");
+    writeFileSync(join(root, ".graphhopper/history.jsonl"), "");
+    await $`jj commit -m init`.cwd(root).quiet();
+    const rev = (await $`jj log -r @- -T commit_id --no-graph`.cwd(root).text()).trim();
+    writeFileSync(join(root, "src/a.ts"), "x\ny\n");
+    const base = await s.computeDiffHash($, root, rev);
+    writeFileSync(join(root, ".graphhopper/history.jsonl"), Array(50).fill("x").join("\n") + "\n");
+    expect(await s.computeDiffHash($, root, rev)).toBe(base);
+    const files = await s.measureChangedFiles($, root, rev);
+    expect(files).toContain("src/a.ts");
+    expect(files.some((f) => f.includes("history.jsonl"))).toBe(false);
   });
 });
 

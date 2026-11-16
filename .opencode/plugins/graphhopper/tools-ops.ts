@@ -123,7 +123,7 @@ export function registerOpsTools(
   editor.add({
     name: "graphhopper_diff_stash",
     description:
-      "verifier fan-out用のdiff退避。baselineからの全文diffを.graphhopper/tmpに1回だけ置きpathを返す（3 lensへのinline 3重展開防止。子権限で読めるようrepo内配置）。verify の直前に呼ぶ（simplify適用後・編集後は必ず取り直す）",
+      "verifier fan-out用のdiff退避。baselineからのdiffを.graphhopper/tmpに1回だけ置きpathを返す（3 lensへのinline 3重展開防止。子権限で読めるようrepo内配置）。.graphhopper/ 配下の作業ファイルは含めない（設定2つは含む）。verify の直前に呼ぶ（simplify適用後・編集後は必ず取り直す）",
     input: S.obj({}, []),
     output: S.obj(
       {
