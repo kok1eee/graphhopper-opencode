@@ -25,6 +25,9 @@ graphhopper本体（Claude Code版）の3相グラフをopencodeに移植した�
 
 独立した問いなら並列に投げ、メインが統合する。判断は増やさない（council再発防止）。
 subagent呼び出しは `task(subagent_type: ...)` が既定（文脈共有・TUI可視）。
+**opencode 2.3.0 以降、`task()` はバックグラウンド**（即座にセッションIDを返し、結果は後で届く）。
+結果が届く前に `verifier_set` / `critic_set` / `usability_set` を呼ばないこと。
+同期が必要な場面（結果を待ってすぐ記録する）では `graphhopper_invoke` を使う（`opencode run` を待つ）。
 ただしagent→モデル束縛はセッション開始時に凍結されるため、(1)モデル割当を変えたら
 新規セッションで始める（resume・再起動では直らない）(2)最初の子でDB上のモデルを
 確認してから本流しする。(2)で割当と違うモデルが動いたら、そのセッションでは

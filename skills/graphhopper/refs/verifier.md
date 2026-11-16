@@ -29,6 +29,10 @@ polish前にlens編成の助言が欲しい場合のみ使う（現行routerは�
   `証拠不足` / `診断未実行` / `実行失敗`。原因不明のままlevelだけ付けない
    結果を `graphhopper_verifier_set(results: [{lens: "general", level}], reason: ...)` で記録
    （実行モデルがconfig既定と違う場合は `model` に明示。成績表の帰属に使う）
+- **2.3.0 以降の background subagent**: `task()` は即座にセッションIDを返し、結果は
+  後で親に届く。**結果が届く前に `graphhopper_verifier_set` を呼ばない**（未完了の結果を記録すると
+  self-graded と同じ穴になる）。同期して待ちたい場合は `graphhopper_invoke`（`opencode run` を spawn して待つ）
+  を使う。並列 fan-out は background のままでもよいが、集約は全員の報告が揃ってから行う
 - **route=polish**（大diff・閾値超）: adversarial verifier fan-out を行う
   1. `task(subagent_type: "graphhopper-verifier")` を3回呼ぶ。それぞれ以下の lens 指示をプロンプトに含める:
      - requirement: 「実装がdesign.mdの意図から外れていないか（実装漏れ・解釈ズレ・スコープ逸脱）を検証せよ」
