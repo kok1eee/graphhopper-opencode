@@ -59,7 +59,7 @@
   ただし **eval_cmd設定中はattemptを呼ばない**（idle evalが自動記録するため二重計数になる。
   手動の進捗メモが必要ならnoteに残す）。eval未設定時のみ自己申告フォールバックとして使う
 - **evalは自動**: eval_cmd設定後はターン終了ごとにidle evalが走る。遷移しない場合は `graphhopper_status` で phase と eval_cmd を確認する（goal切替でeval_cmdは消える。start白紙が仕様）
-  - `ok: false` が続き `fail_streak` が `stuck_threshold`（既定3）に達すると `escalate: true` が返る
+  - `ok: false` が続き `fail_streak` が `stuck_threshold`（既定2）に達すると `escalate: true` が返る
   - `escalate: true` が返ったら `graphhopper_invoke(agent: "graphhopper-oracle")` に相談する。これまでの
     失敗試行（何を試して何が起きたか）を渡し、助言を受けて別のアプローチで再試行する
   - 同一goal内の2回目以降のoracle相談も `graphhopper_invoke` を再度呼ぶ（invoke に session 継続は無い）。

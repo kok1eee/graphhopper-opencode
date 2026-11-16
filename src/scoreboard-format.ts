@@ -1,4 +1,4 @@
-/** scoreboard の人間向け整形（MCP と plugin で共有）。 */
+/** scoreboard の人間向け整形（plugin tool が使う）。 */
 import type { Scoreboard } from "./state";
 
 export function formatScoreboard(sb: Scoreboard): string {

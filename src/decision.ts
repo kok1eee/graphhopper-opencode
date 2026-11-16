@@ -2,7 +2,7 @@
  * decision — decision-model 共通基盤（入口route・selector等の利用元が共有）。
  *
  * chat LLMではなくテキストを生成しないため opencode modelとしては配線できず、
- * plugin/MCP toolから直接HTTPSで叩く。プロバイダは2つ（同じ System One 形式）:
+ * plugin tool から直接HTTPSで叩く。プロバイダは2つ（同じ System One 形式）:
  *  - d1: POST https://api.liquid.ai/decisions/v1/systemone（LIQUID_API_KEY 必須）
  *  - jev: POST https://opencode.ai/inference/systemone/v1/systemone
  *         （既定 jev-1.13-free。APIキー無しでも叩ける。有料 jev-1.13 は OPENCODE_API_KEY がある時だけ）
@@ -11,8 +11,8 @@
  * 用途別の関数（decideRoute／selectLenses）を載せる。新しい利用場所を足す時は
  * callDecisionを再利用し、HTTP部分をコピーしないこと。
  *
- * プロバイダ切替は入口判定（decideRoute）だけに適用する。selector/compact/recovery/
- * workflow は d1 固定（既定が無言で変わるのを避ける）。
+ * プロバイダ切替は入口判定（decideRoute）だけに適用する。selector/compact は d1 固定
+ * （既定が無言で変わるのを避ける）。
  * 入口判定は primary とは別プロバイダへ shadow 呼び出しを投げ、較正ログに並べて残す
  * （shadow は route 判定・state に一切影響しない）。
  *
@@ -23,7 +23,6 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import * as state from "./state";
-import { RECOVERY_KINDS } from "./workflow";
 
 export const DECISION_API_URL =
   "https://api.liquid.ai/decisions/v1/systemone";
@@ -40,9 +39,6 @@ export const JEV_PAID_MODEL = "jev-1.13";
 const FALLBACK_STATUSES = new Set([402, 403, 404, 429]);
 /** routeのconfidenceがこれ未満ならfullに倒す（初期値。scoreboardで調整） */
 export const DECISION_CONFIDENCE_FLOOR = 0.6;
-/** 回復手選択専用のconfidence下限。d1の「次の手」判断は routing より本質的に曖昧で、
- * 0.6では全部abortに落ちる（実測: 0.02〜0.52）。0.3は「ほぼ自信がない」場合だけを弾く */
-export const RECOVERY_CONFIDENCE_FLOOR = 0.3;
 export const DECISION_TIMEOUT_MS = 15_000;
 /** selectorはadvisory-onlyで取りこぼしの害が小さい。decision APIはレイテンシがぶれる
  * （無料枠 d1:free の実測で3〜15s超）ため、遅い時は短く切ってfallbackに倒す（待たせない）。
@@ -171,9 +167,6 @@ export type DecisionLog = {
     fail_streak: number;
     escalated: boolean;
     verifier: string | null;
-    /** workflow runner を使った場合のテンプレ名と挿入ノード列 */
-    workflow?: string;
-    inserted?: string[];
   };
 };
 
@@ -198,7 +191,7 @@ export async function logDecision(
   }
 }
 
-/** decide/select 結果を 1 行の要約にする（plugin tool・MCP tool・注入文の共通文面） */
+/** decide/select 結果を 1 行の要約にする（tool 応答と注入文の共通文面） */
 export function formatDecisionSummary(r: DecideResult): string[] {
   const conf = r.confidence === null ? "n/a" : r.confidence.toFixed(2);
   const diff = r.difficulty ?? "unknown";
@@ -717,7 +710,7 @@ export function assembleLenses(
   return { lenses, reason, fallback: false, probs };
 }
 
-/* selector toolの人用テキスト（plugin/MCP両面の単一源泉。文面ズレ防止） */
+/* selector toolの人用テキスト（応答文の単一源泉。文面ズレ防止） */
 export const SELECTOR_TOOL_DESCRIPTION =
   "verifier編成selectorをd1 decision-modelで判定する（advisory-only。現行routerは維持）。design抜粋とdiff統計を渡すとlens（1-3件）を返す。判定不能時はfallback=true（従来routerを継続。general倒しはしない）";
 
@@ -770,87 +763,4 @@ export async function selectLenses(
     });
   }
   return finish(assembleLenses(r.answers, designExcerpt));
-}
-
-/* ───────── workflow 失敗時の回復選択 ───────── */
-
-export const RECOVERY_CRITERIA: Record<string, string> = {
-  oracle: "原因が不明・設計判断の誤りが疑われる。お手上げモデルに助言を求めてから再実行する",
-  escalate_tier: "指示は妥当で、モデルの力不足が疑われる。信頼モデルで同じノードを再実行する",
-  second_opinion: "同じ手順では同じ結果が出そう。別角度のモデルで同じノードを再実行する",
-  abort: "要件が曖昧・環境の問題・人間の判断が要る。自動で続けず人間に戻す",
-};
-
-/* 失敗ノードの回復手をd1で選ぶ。失敗・不正・低confidenceは必ず "abort"。
- * 許可リストの強制（使用済み除外）は呼び出し側 allowRecovery が行う */
-export async function chooseRecovery(
-  failed: { id: string; reason: string; task: string },
-  fetchFn: FetchFn = fetch,
-  opts?: { root?: string },
-): Promise<string> {
-  const t0 = performance.now();
-  const r = await callDecision(
-    `workflowノード失敗\nタスク: ${failed.task.slice(0, 300)}\nノード: ${failed.id}\n理由: ${failed.reason.slice(0, 300)}`,
-    { recovery: { type: "choice", instructions: "失敗への次の手を1つ選べ。迷ったらabort", criteria: RECOVERY_CRITERIA } },
-    fetchFn,
-  );
-  let choice = "abort";
-  let reason = r.ok ? "" : r.reason;
-  let confidence: number | null = null;
-  let raw = "";
-  if (r.ok) {
-    const a = r.answers.recovery;
-    confidence = typeof a?.confidence === "number" ? a.confidence : null;
-    if (typeof a?.choice === "string" && (RECOVERY_KINDS as readonly string[]).includes(a.choice)) {
-      raw = a.choice;
-      if (confidence !== null && confidence < RECOVERY_CONFIDENCE_FLOOR) reason = `低confidence(${confidence})→abort`;
-      else choice = a.choice;
-    } else reason = "不正choice→abort";
-  }
-  if (opts?.root) {
-    await logDecision(opts.root, {
-      kind: "select",
-      request: `recovery:${failed.id} ${failed.reason}`.slice(0, 200),
-      result: choice,
-      confidence,
-      latencyMs: Math.round(performance.now() - t0),
-      fallback: !r.ok,
-      reason: raw && raw !== choice ? `${reason || ""} d1の選択=${raw}` : reason,
-    });
-  }
-  return choice;
-}
-
-/* タスクに適用するworkflowテンプレをd1で選ぶ。失敗・不正・低confidenceは "none"（自動起動しない） */
-export const WORKFLOW_CRITERIA: Record<string, string> = {
-  bugfix: "症状・再現手順のあるバグ修正。再現テスト→修正→検証で進められる",
-  none: "新機能・設計・調査・リファクタなどバグ修正ではない、または曖昧",
-};
-
-export async function chooseWorkflow(task: string, fetchFn: FetchFn = fetch, opts?: { root?: string }): Promise<string> {
-  const t0 = performance.now();
-  const r = await callDecision(
-    `タスク: ${task.slice(0, 400)}`,
-    { workflow: { type: "choice", instructions: "適用するworkflowを1つ選べ。迷ったらnone", criteria: WORKFLOW_CRITERIA } },
-    fetchFn,
-  );
-  let choice = "none";
-  let confidence: number | null = null;
-  if (r.ok) {
-    const a = r.answers.workflow;
-    confidence = typeof a?.confidence === "number" ? a.confidence : null;
-    if (typeof a?.choice === "string" && Object.hasOwn(WORKFLOW_CRITERIA, a.choice) && (confidence === null || confidence >= DECISION_CONFIDENCE_FLOOR)) choice = a.choice;
-  }
-  if (opts?.root) {
-    await logDecision(opts.root, {
-      kind: "select",
-      request: `workflow:${task}`.slice(0, 200),
-      result: choice,
-      confidence,
-      latencyMs: Math.round(performance.now() - t0),
-      fallback: !r.ok,
-      reason: r.ok ? "" : r.reason,
-    });
-  }
-  return choice;
 }

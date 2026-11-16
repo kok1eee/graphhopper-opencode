@@ -3,9 +3,9 @@
  *
  * ファイルは src/ に置いている。`.opencode/` は dot-dir で `bun test` の既定走査対象外のため。
  *
- * なぜ必要か: 本番の主経路は opencode に組み込まれた plugin 側であり、
- * MCP 側の往復テストだけでは plugin の配線（引数の組み立て・拒否理由の返却・
- * 遷移の伝播）を固定できない。実運用経路への回帰を防ぐ。
+ * なぜ必要か: 本番の経路は opencode に組み込まれた plugin であり、純関数テスト
+ * だけでは plugin の配線（引数の組み立て・拒否理由の返却・遷移の伝播）を
+ * 固定できない。実運用経路への回帰を防ぐ。
  */
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
@@ -15,6 +15,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -26,13 +27,17 @@ import { readHandoff, handoffPath } from "./handoff";
 import { resumeGoal } from "./state";
 import { formatScoreboard } from "./scoreboard-format";
 import {
+  buildLineage,
   computeDiffHash,
   pauseGoal,
+  recordEvent,
+  writePendingRoute,
   planPath,
   readTodos,
   readState,
   setVerifierVerdict,
   startGoal,
+  todosPath,
 } from "./state";
 
 interface ToolDef {
@@ -440,9 +445,32 @@ describe("plugin tool: graphhopper_phase の進捗ゲート", () => {
     const out = textOf(await phase!.execute({ phase: "polish" }, ctx));
     expect(out).toContain("phase -> polish");
   });
+
+  test("非法遷移は拒否（designing→done直指定）", async () => {
+    const root = tmpRoot();
+    startGoal(root, "illegal", "s1");
+    const out = textOf(await tools(root).get("graphhopper_phase")!.execute({ phase: "done" }));
+    expect(out).toContain("非法遷移");
+    expect(readState(root).phase).toBe("designing");
+  });
+
+  test("ストアが空なら design.md から seed して進捗ゲートを見る", async () => {
+    const root = tmpRoot();
+    const g = startGoal(root, "t", "s1").goal;
+    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    const phase = tools(root).get("graphhopper_phase");
+    const ctx = { sessionID: "s1" };
+    await phase!.execute({ phase: "implementing" }, ctx);
+    // ストアを消して「移行救済の seed」経路に落とす
+    unlinkSync(todosPath(root, g.id));
+    const out = textOf(await phase!.execute({ phase: "polish" }, ctx));
+    expect(out).toContain("未完了");
+    // seed された結果がストアに残る（0件のまま素通りしない）
+    expect(readTodos(root, g.id).items.length).toBe(2);
+  });
 });
 
-describe("plugin: invoke / scoreboard（MCP一本化）", () => {
+describe("plugin: invoke / scoreboard", () => {
   function opsTools(root: string): Map<string, ToolDef> {
     const map = new Map<string, ToolDef>();
     registerOpsTools({ add: (t: Record<string, unknown>) => void map.set(t.name as string, t as unknown as ToolDef) } as never, {
@@ -508,6 +536,31 @@ describe("plugin: invoke / scoreboard（MCP一本化）", () => {
         hints: ["h"],
       }),
     ).toContain("- verifier m: 2件 (clean 1 / drift 1)");
+    expect(
+      formatScoreboard({
+        models: [],
+        goals: [
+          { id: "g-1", title: "t", status: "done", rewinds: 1, evalPass: 2, evalFail: 1, score: 7 },
+        ],
+        hints: [],
+      }),
+    ).toContain('- g-1 "t" [done] rewinds=1 eval=2/1 score=7');
+  });
+
+  test("selector は key 無しで fallback 文面を返す（formatSelectorResult）", async () => {
+    const saved = process.env["LIQUID_API_KEY"];
+    delete process.env["LIQUID_API_KEY"];
+    try {
+      const out = textOf(
+        await tools(tmpRoot())
+          .get("graphhopper_selector")!
+          .execute({ design_excerpt: "d", diff_stat: "1 file" }),
+      );
+      expect(out).toContain("selector: 判定不能");
+      expect(out).toContain("従来router");
+    } finally {
+      if (saved !== undefined) process.env["LIQUID_API_KEY"] = saved;
+    }
   });
 });
 
@@ -1128,5 +1181,71 @@ describe("verify: prompt 組み立てと判定の読み取り（純粋層）", (
     expect(v.invokeFailure("本文\nerror: opencode run exited with code 143\nstderr")).toBeTruthy();
     // verifier が findings の中で "error:" 行を引用しても判定不能にしない
     expect(v.invokeFailure("finding: src/a.ts:1 で error: を握り潰す\n```json\n{}")).toBeNull();
+  });
+
+  test("extractJsonBlock: 最後のフェンスを採る・フェンス無しと壊れた JSON は null", async () => {
+    const v = await import("./verify");
+    const t = '```json\n{"a":1}\n```\n本文\n```json\n{"a":2}\n```';
+    expect(v.extractJsonBlock(t)).toEqual({ a: 2 });
+    expect(v.extractJsonBlock("なし")).toBeNull();
+    expect(v.extractJsonBlock("```json\n{bad\n```")).toBeNull();
+  });
+});
+
+describe("plugin: 廃止した経路の残骸が無い", () => {
+  test("oracle 相談は invoke 表記・workflow runner の参照も残らない", () => {
+    const dir = join(import.meta.dir, "..", ".opencode", "plugins", "graphhopper");
+    const files = readdirSync(dir).filter((f) => f.endsWith(".ts") || f.endsWith(".tsx"));
+    const hits = files.filter((f) => {
+      const raw = readFileSync(join(dir, f), "utf8");
+      return (
+        raw.includes("task(subagent_type: 'graphhopper-oracle") ||
+        raw.includes("graphhopper_workflow") ||
+        raw.includes("src/workflow")
+      );
+    });
+    expect(hits).toEqual([]);
+  });
+});
+
+describe("lineage: history から goal の系譜を復元する", () => {
+  test("critic / eval / gate block / 編集 / 入口route が載る", () => {
+    const root = tmpRoot();
+    // pending を consume して entry_route=advised で開始（session 無しでも開始できる）
+    writePendingRoute(root, "advised", "r");
+    const { goal } = startGoal(root, "lineage", "");
+    expect(readState(root).entry_route).toBe("advised");
+    recordEvent(root, { type: "critic_review_set", goal: goal.id, level: "clean" });
+    recordEvent(root, { type: "design_gate_block", goal: goal.id, tool: "edit", path: "a.ts" });
+    recordEvent(root, { type: "hash_edit_applied", goal: goal.id, path: "src/a.ts" });
+    recordEvent(root, { type: "eval_run", goal: goal.id, ok: true, fail_streak: 0 });
+    recordEvent(root, { type: "eval_run", goal: goal.id, ok: false, fail_streak: 1 });
+    const lin = buildLineage(root);
+    const l = lin.goals.find((x) => x.id === goal.id);
+    expect(l).toBeDefined();
+    expect(l!.critic).toBe("clean");
+    expect(l!.gateBlocks).toBe(1);
+    expect(l!.editedFiles).toEqual(["src/a.ts"]);
+    expect(l!.evalRuns).toEqual({ pass: 1, fail: 1 });
+    expect(l!.entry_route).toBe("advised");
+  });
+});
+
+describe("plugin: graphhopper_discover_tick（loop-until-dry）", () => {
+  test("2 ラウンド連続で新規 0 なら dry で止まる", async () => {
+    const root = tmpRoot();
+    const ops = opsTools(root);
+    await ops.get("graphhopper_discover_start")!.execute({ target: "バグ", scope: "src" });
+    const tick = ops.get("graphhopper_discover_tick")!;
+    const findings = [
+      { title: "f1", severity: "high", confidence: 90, quote: "q" },
+    ];
+    const first = textOf(await tick.execute({ findings }));
+    expect(first).not.toContain("stopped:");
+    // 新規 0 が 2 連続になるまで回す（既見は新規扱いしない）
+    expect(textOf(await tick.execute({ findings }))).not.toContain("stopped:");
+    const third = textOf(await tick.execute({ findings }));
+    expect(third).toContain("stopped: dry");
+    expect(third).toContain("confirmed: 1件");
   });
 });

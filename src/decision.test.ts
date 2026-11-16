@@ -3,12 +3,11 @@ import {
   assembleLenses,
   callDecision,
   callDecisionWithRetry,
-  chooseRecovery,
-  chooseWorkflow,
   logDecision,
   DECISION_CONFIDENCE_FLOOR,
   decideRoute,
   decisionAvailable,
+  formatSelectorResult,
   JEV_API_URL,
   JEV_DEFAULT_MODEL,
   JEV_PAID_MODEL,
@@ -509,57 +508,21 @@ describe("logDecision（較正ログ）", () => {
   });
 });
 
-describe("chooseRecovery（fail-safe）", () => {
-  const f = { id: "fix", reason: "r", task: "t" };
-  const mk = (a: unknown) =>
-    (async () => ({ ok: true, json: async () => ({ answers: { recovery: a } }) })) as unknown as typeof fetch;
-  test("正常choiceは通す", async () => {
-    setKey("liquid_test");
-    try {
-      expect(await chooseRecovery(f, mk({ choice: "oracle", confidence: 0.9 }))).toBe("oracle");
-      expect(await chooseRecovery(f, mk({ choice: "escalate_tier", confidence: 0.9 }))).toBe("escalate_tier");
-    } finally {
-      restore();
-    }
-  });
-  test("不正choice・低confidence・prototypeキーはabort", async () => {
-    setKey("liquid_test");
-    try {
-      expect(await chooseRecovery(f, mk({ choice: "rm", confidence: 0.9 }))).toBe("abort");
-      expect(await chooseRecovery(f, mk({ choice: "oracle", confidence: 0.01 }))).toBe("abort");
-      expect(await chooseRecovery(f, mk({ choice: "toString", confidence: 0.9 }))).toBe("abort");
-    } finally {
-      restore();
-    }
-  });
-  test("key未設定・HTTP失敗はabort", async () => {
-    setKey(undefined);
-    try {
-      expect(await chooseRecovery(f)).toBe("abort");
-    } finally {
-      restore();
-    }
-  });
-});
-
-describe("chooseWorkflow", () => {
-  const mk = (a: unknown) =>
-    (async () => ({ ok: true, json: async () => ({ answers: { workflow: a } }) })) as unknown as typeof fetch;
-  test("bugfix選択・不正/低confidence/key無しはnone", async () => {
-    setKey("liquid_test");
-    try {
-      expect(await chooseWorkflow("t", mk({ choice: "bugfix", confidence: 0.9 }))).toBe("bugfix");
-      expect(await chooseWorkflow("t", mk({ choice: "bugfix", confidence: 0.01 }))).toBe("none");
-      expect(await chooseWorkflow("t", mk({ choice: "x", confidence: 0.9 }))).toBe("none");
-    } finally {
-      restore();
-    }
-    setKey(undefined);
-    try {
-      expect(await chooseWorkflow("t")).toBe("none");
-    } finally {
-      restore();
-    }
+describe("formatSelectorResult", () => {
+  test("fallback は従来 router 継続、成功は lens 一覧を出す", () => {
+    expect(
+      formatSelectorResult({ lenses: ["general"], reason: "key未設定", fallback: true, probs: {} }),
+    ).toContain("selector: 判定不能");
+    expect(
+      formatSelectorResult({
+        lenses: ["requirement", "behavior"],
+        reason: "d1選択",
+        fallback: false,
+        probs: {},
+      }),
+    ).toBe(
+      "selector: lenses=requirement,behavior（d1選択）。verifier編成の参考にする（advisory-only。採否はmainが決める）。",
+    );
   });
 });
 

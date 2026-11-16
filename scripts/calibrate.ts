@@ -18,11 +18,6 @@ for (const o of rows.filter((r) => r.kind === "outcome" && r.decision_id)) {
 }
 console.table(stats);
 
-const wf = rows.filter((r) => r.kind === "outcome" && r.outcome?.workflow);
-if (wf.length) {
-  console.log("workflow 利用 goal:", wf.length, "/ 挿入:", wf.flatMap((r) => r.outcome.inserted ?? []).join(",") || "なし");
-}
-
 /* ── shadow 比較（primary と別プロバイダの並走結果） ──
  * 突き合わせは decide 行の id ↔ shadow 行の decision_id。
  * 母数=shadow 行。一致率は両方成功の組だけで出す（失敗は別カウント） */

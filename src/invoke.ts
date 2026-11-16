@@ -2,7 +2,7 @@
  * graphhopper_invoke の実体（design g-mu5d6avj）。
  * `opencode run --model --agent` をargv配列でspawnし、結果を文字列で返す。
  * (v2 run に --dir は無い。対象dirはspawn cwdで運ぶ)
- * throwしない（エラーは文字列返却＝MCP流儀）。
+ * throwしない（エラーは文字列返却。呼び出し側は本文の error: 行で判定する）。
  */
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { execSync } from "node:child_process";
@@ -19,7 +19,7 @@ export const MIN_TIMEOUT_MS = 10000;
 export const KILL_GRACE_MS = 5000;
 /** fan-out thundering herd回避用の起動ずらし上限。並列既定は維持しopt-inで使う */
 export const MAX_DELAY_MS = 60000;
-/** 子プロセス生存中のheartbeat間隔（MCP logging経由で「固まり」知覚を防ぐ） */
+/** 子プロセス生存中のheartbeat間隔（無出力の長時間実行を「固まり」と誤認しないための通知間隔） */
 export const HEARTBEAT_MS = 30000;
 export const DEPTH_ENV = "GH_INVOKE_DEPTH";
 export const MAX_DEPTH = 1;
@@ -136,7 +136,7 @@ export interface RunChildOpts {
   timeoutMs: number;
   cwd: string;
   childEnv: NodeJS.ProcessEnv;
-  /** 中断伝播: abortでgroup killしcancelledで返す（MCP CallToolのextra.signal） */
+  /** 中断伝播: abortでgroup killしcancelledで返す（tool 呼び出しの中断 signal） */
   signal?: AbortSignal;
   /** heartbeat間隔ms（onTick呼び出し。0以下で無効） */
   heartbeatMs?: number;
@@ -231,7 +231,7 @@ export function runChild(
     } else {
       opts.signal?.addEventListener("abort", onAbort, { once: true });
     }
-    // heartbeat: 長時間実行の「固まり」知覚を防ぐ（MCP logging等へ中継）
+    // heartbeat: 長時間実行の「固まり」知覚を防ぐ（onTick で呼び出し側へ中継）
     const hb = opts.heartbeatMs ?? HEARTBEAT_MS;
     const beat =
       hb > 0 && opts.onTick
@@ -268,7 +268,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** invoke の構造化版（MCP structuredContent 用）。判定は runChild の機械値を使う。 */
+/** invoke の構造化版（tool の output 用）。判定は runChild の機械値を使う。 */
 export async function invokeStructured(
   args: InvokeArgs,
   spawnFn: SpawnFn = defaultSpawn,

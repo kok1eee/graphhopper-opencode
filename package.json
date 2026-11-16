@@ -10,9 +10,7 @@
     "opencode": "opencode"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "@opencode/plugin": "2.3.0",
-    "zod": "4.6.5"
+    "@opencode/plugin": "2.3.0"
   },
   "devDependencies": {
     "@opencode/theme": "2.3.0",

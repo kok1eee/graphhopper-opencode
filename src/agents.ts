@@ -1,5 +1,5 @@
 /**
- * graphhopper の専用 subagent 定義（config hook で注入）
+ * graphhopper の専用 subagent 定義（plugin の agent.transform と scripts/gen-agents.ts の bake で適用）
  *
  * graphhopper本体（Claude Code版）のtiering をそのまま踏襲する:
  *   researcher = 最下層コスト・高速（高頻度・事実収集専用・判断を含まない）
@@ -10,13 +10,10 @@
  * 呼ぶ、というgraph engineeringの分岐点。無条件で毎回上位モデルを呼ぶのではなく、
  * 本当に必要な時（手詰まり）にだけ上位モデルのコストを払う。
  *
- * 2026-08-06: モデル指定を公開リポジトリから除去し、プロジェクト単位の
- * `.graphhopper/config.json` の `agents` で上書きする方針に変更。
- * 既定（model 未指定）は opencode のセッションメインモデルを継承する。
- * 以前は amazon-bedrock（Claude ファミリ）を既定にしていたが、bedrock の
- * AWS_BEARER_TOKEN_BEDROCK が壊れて認証が通らず verifier 等が空応答を返すため、
- * 公開リポジトリにモデル選択を持たせない運用にした。tier 思想（researcher=最下層
- * / verifier・oracle=上位品質）はそのまま、具体モデルは各プロジェクトで選ぶ。
+ * モデルの実効値は割当表（global / project の `.graphhopper/config.json` の `agents`）が決め、
+ * 下の `model` は割当が無いときの既定。既定は advisor=opus 5.5 / oracle=fable 5.2
+ * （どちらも `claude-oauth` provider）。tier 思想（researcher=最下層 /
+ * verifier・oracle=上位品質）はそのまま、具体モデルは割当表で差し替える。
  * 系列多様性の議論（flywheelの2-vendor構成）はgraphhopperの**判断node**には不要——
  * 判断は「メイン + verifier」の2層で足りるというgraphhopper自体の設計原則
  * （council再発防止）に合わせ、判断系でvendorを増やさない。
@@ -224,9 +221,9 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
 
   "graphhopper-advisor": {
     description:
-      "気軽な相談専用。セカンドオピニオン・advised入口の相談に使う（モデルは .graphhopper/config.json の agents で設定）。入口トリアージ（graphhopper_decide）とselector判定（graphhopper_selector）はd1 toolに移管済み（agent不要）。stuck時はgraphhopper-oracle（advisorで代替しない）。最終決定は呼び出し側",
+      "気軽な相談専用。セカンドオピニオン・advised入口の相談・full の designing で判断の第二意見を取りたいときに使う（モデルは .graphhopper/config.json の agents で設定）。入口トリアージ（graphhopper_decide）とselector判定（graphhopper_selector）はd1 toolに移管済み（agent不要）。stuck時はgraphhopper-oracle（advisorで代替しない）。最終決定は呼び出し側",
     mode: "all",
-    model: { providerID: "amazon-bedrock", model: "glm-5.3" },
+    model: { providerID: "claude-oauth", model: "claude-opus-5-5" },
     temperature: 0.2,
     bash: SEARCH_ONLY_BASH,
     system: [
@@ -264,6 +261,14 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
       "- 要件漏れ: goalから要件理解・設計判断・実装タスク列に欠落はないか",
       "- 設計の穴: トレードオフが明示されているか、タスク列で実行可能か",
       "- スコープ逸脱: goalと無関係な作業・過剰設計・ゴールドプレーティングがないか",
+      "",
+      "機械的に確認できる観点（各項目を yes/no で判定し、no のものだけ finding にする）:",
+      "1. 各設計判断に代替案と棄却理由が書かれているか",
+      "2. 各設計判断に反証条件（この観測が出たら間違い）が書かれているか",
+      "3. 「触らないもの」は具体的か（「必要に応じて」「適宜」などの逃げがないか）",
+      "4. §2 現状の主張に file:line の証拠が付き、主張と対応しているか",
+      "5. §3 の各判断に対応するタスクが §4 にあるか（漏れ、判断に無いタスク）",
+      "6. 判断が実装詳細（定数・関数名の列挙・手順）に踏み込みすぎていないか",
       "",
       "drift（乖離）を検出したら全件報告する（confidence/severity付き、閾値カットしない）。",
       "無ければ「driftなし」と明記する。",
@@ -383,7 +388,7 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
     description:
       "手詰まり時の相談役。graphhopper_attemptのfail_streakがstuck_thresholdに達した時に呼ぶ。アーキテクチャ判断・複雑なデバッグ・不慣れなパターンについて助言する（モデルは .graphhopper/config.json の agents で設定）",
     mode: "all",
-    model: { providerID: "claude-oauth", model: "claude-opus-5-5" },
+    model: { providerID: "claude-oauth", model: "claude-fable-5-2" },
     temperature: 0.2,
     bash: SEARCH_ONLY_BASH,
     system: [

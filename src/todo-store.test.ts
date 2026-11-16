@@ -15,6 +15,7 @@ import {
   readState,
   readTodos,
   readTodosStatus,
+  runEval,
   setPhase,
   setPhaseChecked,
   startGoal,
@@ -227,7 +228,7 @@ describe("implementing→polish の進捗ゲート", () => {
     expect(readState(root).phase).toBe("implementing");
   });
 
-  test("evalTransitionInput: baseline と実効 diff を返す（plugin/MCP 共通の配線）", async () => {
+  test("evalTransitionInput: baseline と実効 diff を返す（plugin の配線）", async () => {
     const root = tmpRoot();
     startGoal(root, "t", "s");
     // baseline を明示すればその値を使い、差分を測る
@@ -250,6 +251,43 @@ describe("implementing→polish の進捗ゲート", () => {
     });
     expect(t.transitioned).toBe(true);
     expect(readState(root).phase).toBe("polish");
+  });
+
+  test("evalToPolish: baseline 未取得なら baseline 分岐で polish へ進む（simplify スキップ）", async () => {
+    const root = tmpRoot();
+    const g = startGoal(root, "t", "s").goal;
+    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    setPhase(root, "implementing");
+    // タスクを片付けて進捗ゲートを通す
+    todoAction(root, g.id, "done", { id: "t1" });
+    todoAction(root, g.id, "cancel", { id: "t2", reason: "不要" });
+    const t = await evalToPolish(shell(), root, { cmd: "true", baseline: null, diffLines: 0 });
+    expect(t.transitioned).toBe(true);
+    expect(t.note).toContain("baseline not captured");
+    expect(readState(root).phase).toBe("polish");
+  });
+
+  test("evalToPolish: baseline 未取得でも未完了タスクがあれば遷移しない", async () => {
+    const root = tmpRoot();
+    const g = startGoal(root, "t", "s").goal;
+    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    setPhase(root, "implementing");
+    const t = await evalToPolish(shell(), root, { cmd: "true", baseline: null, diffLines: 0 });
+    expect(t.transitioned).toBe(false);
+    expect(t.note).toContain("polish へ進めない");
+    expect(readState(root).phase).toBe("implementing");
+  });
+
+  test("runEval: exit code で合否が決まり、失敗時は出力を返す", async () => {
+    const root = tmpRoot();
+    const ok = await runEval(shell(), root, "true");
+    expect(ok.ok).toBe(true);
+    const bad = await runEval(shell(), root, "echo boom; exit 3");
+    expect(bad.ok).toBe(false);
+    expect(bad.output).toContain("boom");
+    // cwd が消えている等で shell 自体が失敗しても throw せず ok:false に倒す
+    const broken = await runEval(shell(), "/nonexistent-dir-gh-test", "true");
+    expect(broken.ok).toBe(false);
   });
 
   test("reopen で cancelled タスクを pending に戻せる", () => {

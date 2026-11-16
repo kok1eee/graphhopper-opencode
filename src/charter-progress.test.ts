@@ -1,17 +1,25 @@
 /**
- * progress lens charter の埋め込みと lineage resource の進捗表示のテスト。
+ * progress lens charter の埋め込みと進捗ビューのテスト。
  *
  * goal の中心的な主張「progress lens と TUI が同じ進捗を見る」を固定する。
- * ここは MCP prompt 経路（charter にタスク一覧を直接埋め込む）と
- * lineage resource（goals.json の tasks / planTasks）。
+ * charter は lens 指示文にタスク一覧を直接埋め込み、TUI は todoProgressView を読む。
  */
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PROMPT_DEFS } from "./prompts";
-import { lineageEnriched } from "./mcp";
-import { planPath, startGoal, todoAction, todosPath } from "./state";
+import {
+  ensureTodos,
+  planPath,
+  readTodosStatus,
+  startGoal,
+  todoAction,
+  todoProgressView,
+  todoSummaryLine,
+  todosPath,
+} from "./state";
+import { parseTaskLines } from "./todos";
 
 function tmpRoot(): string {
   return mkdtempSync(join(tmpdir(), "gh-charter-test-"));
@@ -55,6 +63,14 @@ describe("progress lens charter への進捗埋め込み", () => {
     expect(out).toContain("手動追加タスク");
   });
 
+  test("goalId を省くと active goal を使い、active が無ければ throw する", () => {
+    const root = tmpRoot();
+    const def = PROMPT_DEFS.find((d) => d.name === "graphhopper-verifier-progress")!;
+    expect(() => def.render({}, root)).toThrow("no active goal");
+    const g = startGoal(root, "t", "s").goal;
+    expect(def.render({}, root)).toContain(g.id);
+  });
+
   test("graphhopper-verifier-general にもタスク一覧が載る（progress と非対称にしない）", () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
@@ -96,33 +112,36 @@ describe("progress lens charter への進捗埋め込み", () => {
   });
 });
 
-describe("lineage resource の進捗表示", () => {
-  test("tasks はストア基準・planTasks は design.md 由来", async () => {
+describe("進捗ビュー（progress lens と TUI が同じ数え方をする）", () => {
+  test("ストア基準の進捗と design.md 由来のタスクが一致する", () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
     writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    ensureTodos(root, g.id);
     todoAction(root, g.id, "add", { text: "手動追加タスク" });
     todoAction(root, g.id, "done", { id: "t1" });
-    const lin = await lineageEnriched(root);
-    const goal = lin.goals.find((x) => x.id === g.id);
-    expect(goal).toBeDefined();
     // ストア基準: design.md の2件 + 手動1件 = 3件、うち1件完了
-    expect(goal!.tasks.total).toBe(3);
-    expect(goal!.tasks.done).toBe(1);
-    expect(goal!.tasks.open).toBe(2);
-    // design.md 由来の planTasks は done=0（design.md は immutable なので check されない）
-    expect(goal!.planTasks.total).toBe(2);
-    expect(goal!.planTasks.done).toBe(0);
+    const loaded = readTodosStatus(root, g.id);
+    const view = todoProgressView(loaded);
+    expect(view.total).toBe(3);
+    expect(view.done).toBe(1);
+    expect(view.open).toBe(2);
+    expect(view.unreadable).toBeUndefined();
+    // design.md 由来は done=0（design.md は immutable なので check されない）
+    const planTasks = parseTaskLines(DESIGN_WITH_TASKS);
+    expect(planTasks.length).toBe(2);
+    expect(planTasks.filter((t) => t.done).length).toBe(0);
+    expect(todoSummaryLine(root, g.id)).toContain("1/3");
   });
 
-  test("ストア不読なら tasks.unreadable が立つ（0件に潰さない）", async () => {
+  test("ストア不読なら unreadable が立つ（0件に潰さない）", () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
     const p = todosPath(root, g.id);
     mkdirSync(dirname(p), { recursive: true });
     writeFileSync(p, "{ broken", "utf8");
-    const lin = await lineageEnriched(root);
-    const goal = lin.goals.find((x) => x.id === g.id);
-    expect(goal!.tasks.unreadable).toBe(true);
+    const loaded = readTodosStatus(root, g.id);
+    expect(loaded.valid).toBe(false);
+    expect(todoProgressView(loaded).unreadable).toBe(true);
   });
 });

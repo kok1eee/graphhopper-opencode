@@ -357,8 +357,6 @@ export interface CascadeConfig {
   baseline: string;
   /** 昇格時に使う "provider/model#variant" */
   escalate: string;
-  /** 別角度の再試行に使うモデル（省略時は escalate にフォールバック） */
-  second?: string;
   /** お手上げ段（oracle 用）のモデル（省略時は escalate にフォールバック） */
   expert?: string;
   /** strong モード（goal start の strong: true）で使うモデル。省略時は expert→escalate */
@@ -413,8 +411,8 @@ export interface GraphhopperConfig {
    * 出たらループと判定する。1以下なら tool 検知を無効化 */
   loop_tool_repeat_threshold: number;
   /** eval_cmd / attempt の連続失敗数がこれに達したら giveUp し goal を pause する
-   * （既定 6 = stuck_threshold 既定 3 の2倍。fail 3,4,5 で escalate 相談→
-   * 改善なければ 6 で諦めの順序）。0以下で無効。有効時は stuck_threshold
+   * （既定 6 = stuck_threshold 既定 2 の3倍。fail 2 で escalate 相談→改善なければ
+   * 6 で諦めの順序）。0以下で無効。有効時は stuck_threshold
    * 以上にクランプされる（相談前に諦める逆転を防ぐ） */
   max_eval_fails: number;
   /** 同一ファイルへの連続 edit/write がこの回数に達したら stuck 扱いにする。
@@ -436,11 +434,6 @@ export interface GraphhopperConfig {
   loop_wait_limit_ms: number;
   /** true ならラウンド途中で落ちた goal を起動時に pause する（既定 true） */
   loop_restart_pause: boolean;
-  /** dynamic workflow runner の設定 */
-  workflow?: {
-    /** 1ノードのタイムアウト(ms)。省略時は 10 分 */
-    node_timeout_ms?: number;
-  };
   /** モデルカスケード。既定無効 */
   cascade: CascadeConfig;
 }
@@ -449,7 +442,7 @@ export const DEFAULT_CONFIG: GraphhopperConfig = {
   router_threshold_lines: 400,
   design_gate_allow: [".graphhopper/plans/"],
   agents: {},
-  stuck_threshold: 3,
+  stuck_threshold: 2,
   loop_stop_threshold: 6,
   loop_stop_max: 3,
   loop_tool_window: 8,
@@ -467,7 +460,6 @@ export const DEFAULT_CONFIG: GraphhopperConfig = {
     enabled: false,
     baseline: "minimax/MiniMax-M3.1-Flash",
     escalate: "claude-oauth/claude-sonnet-5-5",
-    second: "opencode-go/deepseek-v4.1-flash",
     expert: "claude-oauth/claude-opus-5-5",
     escalate_on: ["hard"],
     fail_threshold: 2,
@@ -509,7 +501,7 @@ export function planPath(root: string, goalId: string): string {
 
 /* ---------- 進捗 todo ストア ----------
  * 進捗の source of truth。design.md は planning 終端で immutable なので計測源にできない。
- * goal ごとに 1 ファイル。plugin / MCP 両方から read・write できる。 */
+ * goal ごとに 1 ファイル。plugin の tool と hook の両方から read・write できる。 */
 export function todosPath(root: string, goalId: string): string {
   return join(dir(root), "todos", `${goalId}.json`);
 }
@@ -656,7 +648,7 @@ export function ensureTodos(
 export type TodoAction = "list" | "start" | "done" | "cancel" | "add" | "reopen";
 
 /**
- * 進捗タスクの1行サマリ。タスク 0 件なら null（行ごと落とす）。plugin/MCP 共通の単一源泉。
+ * 進捗タスクの1行サマリ。タスク 0 件なら null（行ごと落とす）。応答文の単一源泉。
  * 読み取り専用（seed しない）。seed は designing→implementing 遷移と todoAction のみ。
  */
 export function todoSummaryLine(root: string, goalId: string): string | null {
@@ -722,7 +714,7 @@ const TODO_ACTION_STATUS: Record<
 };
 
 /**
- * 進捗タスクの操作（plugin / MCP 共通の単一入口）。
+ * 進捗タスクの操作（tool からの唯一の入口）。
  * 読み・検証・書き込み・監査記録まで行う。失敗時はストアを弄らない。
  */
 export function todoAction(
@@ -1139,10 +1131,6 @@ export function readConfig(root: string): GraphhopperConfig {
       raw.stuck_diff_stall ?? DEFAULT_CONFIG.stuck_diff_stall,
     lsp_servers: raw.lsp_servers ?? DEFAULT_CONFIG.lsp_servers,
     require_critic: raw.require_critic ?? DEFAULT_CONFIG.require_critic,
-    workflow: {
-      ...(global.workflow ?? {}),
-      ...(project.workflow ?? {}),
-    },
     cascade: {
       ...DEFAULT_CONFIG.cascade,
       ...(raw.cascade ?? {}),
@@ -1923,7 +1911,7 @@ export function appendCascadeChild(root: string, child: CascadeChild): ActiveLoo
   return mutateActive(root, () => ({ state: { cascade: { ...base, children } } }));
 }
 
-/** active goal が無い状態でも cascade だけ消す（MCP経由の終了などで残った孤児の後始末） */
+/** active goal が無い状態でも cascade だけ消す（終了の途中で落ちて残った孤児の後始末） */
 export function clearCascadeState(root: string): void {
   const s = readState(root);
   if (!s.cascade) return;
@@ -2002,7 +1990,7 @@ export function setPhase(
  *
  * 進捗ゲート（implementing→polish で未完了タスクがある）はここで効く。
  * setPhase だけをゲートすると eval_cmd 通過による自動 polish 遷移
- * （hooks.ts / mcp.ts が setPhase を直接呼ぶ）が素通りするため、
+ * （hooks.ts が setPhase を直接呼ぶ）が素通りするため、
  * 遷移の実効点である setPhase 側に置いている。
  */
 export function setPhaseChecked(
@@ -2139,7 +2127,7 @@ export function isValidBaselineRev(baseline: string): boolean {
 
 /** deep検知の対象（状態遷移核）。repo相対・正規化済みパスで照合する。
  * 他repoでは一致せずfail-open（deepなし）。判断はstate/gateに閉じる——
- * index/mcpに判断を足したらRISKを見直すこと（不変条件） */
+ * index.ts の判断に足したらRISKを見直すこと（不変条件） */
 export const RISK_PATHS: readonly string[] = ["src/state.ts", "src/gate.ts"];
 
 /** 差分の測定に残す `.graphhopper/` 配下のファイル（人が書き、graphhopper は書かない）。
@@ -2639,7 +2627,7 @@ export async function recordRouterCheckWithRisk(
   return recordRouterCheck(root, baseline, diffLines, route, { deep, reason });
 }
 
-/** eval 遷移の応答（plugin の evalNote / MCP の返り値） */
+/** eval 遷移の応答（idle hook の evalNote と tool の返り値） */
 export interface EvalToPolishResult {
   /** polish へ遷移したか */
   transitioned: boolean;
@@ -2648,7 +2636,7 @@ export interface EvalToPolishResult {
 }
 
 /**
- * eval 成功時の implementing→polish 遷移。**plugin（hooks.ts）と MCP（mcp.ts）の単一実装**。
+ * eval 成功時の implementing→polish 遷移。**idle hook（hooks.ts）と tool の単一実装**。
  *
  * 規則（2 経路に散らばせないこと）:
  * - 遷移するのは「baseline 取得失敗」と「diff>0」の 2 分岐だけ。
@@ -2658,7 +2646,7 @@ export interface EvalToPolishResult {
  */
 /**
  * eval 遷移の入力（baseline と実効 diff 行数）を計算する。
- * plugin（hooks.ts）と MCP（mcp.ts）が同じ物を使う（配線の取り違えを防ぐ）。
+ * hooks.ts と tool が同じ物を使う（配線の取り違えを防ぐ）。
  */
 export async function evalTransitionInput(
   shell: Shell,
@@ -3898,7 +3886,7 @@ export function clearDiscover(root: string): void {
 
 /* ================================================================== *
  * lineage（作業グラフの第一歩）: goals.json + history.jsonl から
- * goal ごとの系譜を導出する。MCP の lineage.json resource が読む。
+ * goal ごとの系譜を導出する。scoreboard（buildScoreboard）とテストが読む。
  * graft（コードの構造）に対する「作業の構造」側の edge 素材。
  * ================================================================== */
 

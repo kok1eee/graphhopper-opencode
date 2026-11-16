@@ -7,12 +7,24 @@
  *
  * 出力契約は agent の system ではなく prompt 側に置く。system は本文（findings と
  * 証拠状態）の書き方を定めているだけで末尾の形式は指定していないため、追記ならぶつからない。
- * （workflow.ts の verify ノードは末尾 json に別形式を要求するので、system には書かない）
  */
 import { existsSync } from "node:fs";
 import { PROMPT_DEFS } from "./prompts";
 import type { DriftTarget, VerdictLevel, VerifierLens } from "./state";
-import { extractJsonBlock } from "./workflow";
+
+/** 最後の ```json フェンスをパース。無い・不正は null */
+export function extractJsonBlock(text: string): Record<string, unknown> | null {
+  const re = /```json\s*\n([\s\S]*?)```/g;
+  let last: string | null = null;
+  for (let m = re.exec(text); m; m = re.exec(text)) last = m[1] ?? null;
+  if (last === null) return null;
+  try {
+    const v = JSON.parse(last) as unknown;
+    return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
 
 /** 判定の json フェンス規約（prompt に足す。パースは parseLensVerdict） */
 export const VERDICT_CONTRACT = [

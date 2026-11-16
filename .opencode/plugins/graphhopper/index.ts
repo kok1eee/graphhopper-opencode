@@ -9,7 +9,6 @@ import { registerHooks } from "./hooks";
 import { registerCoreTools } from "./tools-core";
 import { registerLspTools } from "./tools-lsp";
 import { registerOpsTools } from "./tools-ops";
-import { registerWorkflowTool } from "./workflow";
 import type { Gh } from "./shared";
 
 export default Plugin.define({
@@ -52,13 +51,12 @@ export default Plugin.define({
     });
 
     /* graphhopper_* tools＋7 lsp_* tools (namespace無し・生名登録。M1)。
-     * invoke は spawn 版 (src/invoke.ts) を薄く包む。opencode では MCP を無効にし本経路に一本化。
+     * invoke は spawn 版 (src/invoke.ts) を薄く包む。
      * TUI 内の子起動は task() が正 (native・可視・並列)。 */
     await ctx.tool.transform((editor) => {
       registerCoreTools(editor, gh);
       registerOpsTools(editor, gh);
       registerLspTools(editor, gh);
-      registerWorkflowTool(editor, gh);
     });
 
     return registerHooks(gh);

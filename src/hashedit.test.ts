@@ -25,7 +25,7 @@ import {
   checkHashEditAccess,
   isGateTargetTool,
   isIntentLogPath,
-  readGraphhopperHash,
+  readGraphhopperHashValue,
   runGraphhopperEdit,
 } from "./gate";
 import {
@@ -398,7 +398,7 @@ describe("runGraphhopperEdit統合経路（分岐→アクション対応）", (
   test("hash→edit往復で適用＋applied記録", () => {
     const { root, session } = setup();
     writeFileSync(join(root, "a.txt"), "hello world", "utf8");
-    const { sha1 } = JSON.parse(readGraphhopperHash(root, "a.txt"));
+    const { sha1 } = readGraphhopperHashValue(root, "a.txt");
     const out = JSON.parse(
       runGraphhopperEdit(root, session, {
         filePath: "a.txt",
@@ -430,7 +430,7 @@ describe("runGraphhopperEdit統合経路（分岐→アクション対応）", (
   test("複数一致はthrow（throwとreturnの取り違え防止）", () => {
     const { root, session } = setup();
     writeFileSync(join(root, "a.txt"), "aa aa", "utf8");
-    const { sha1 } = JSON.parse(readGraphhopperHash(root, "a.txt"));
+    const { sha1 } = readGraphhopperHashValue(root, "a.txt");
     expect(() =>
       runGraphhopperEdit(root, session, {
         filePath: "a.txt",
@@ -445,7 +445,7 @@ describe("runGraphhopperEdit統合経路（分岐→アクション対応）", (
   test("子セッションはthrow（returnとの取り違え防止）", () => {
     const { root, session } = setup();
     writeFileSync(join(root, "a.txt"), "hello", "utf8");
-    const { sha1 } = JSON.parse(readGraphhopperHash(root, "a.txt"));
+    const { sha1 } = readGraphhopperHashValue(root, "a.txt");
     expect(() =>
       runGraphhopperEdit(root, "sess-child", {
         filePath: "a.txt",
@@ -502,7 +502,7 @@ describe("runGraphhopperEdit統合経路（分岐→アクション対応）", (
     const bin = join(root, "sjis.txt");
     writeFileSync(bin, Buffer.from([0x93, 0xfa, 0x96, 0x7b, 0xff]));
     const before = readFileSync(bin);
-    expect(() => readGraphhopperHash(root, "sjis.txt")).toThrow(
+    expect(() => readGraphhopperHashValue(root, "sjis.txt")).toThrow(
       "not valid UTF-8",
     );
     expect(() =>
@@ -608,12 +608,23 @@ describe("continuationText 3段階文面", () => {
     expect(light).not.toContain("thin");
     expect(light).toContain("critic省略");
     expect(g.effectivePhaseAction("polish", "light")).toContain("general×1");
+    // full/未判定は advisor → critic の順（判断の第二意見を先に取る）
+    expect(g.effectivePhaseAction("designing", "full")).toContain("graphhopper-advisor");
+    expect(g.effectivePhaseAction("designing", "full")).toContain("graphhopper-critic");
+    // light は advisor も critic も省略する旨を明示する
+    expect(light).toContain("advisor・critic省略");
     const advised = g.effectivePhaseAction("designing", "advised");
     expect(advised).toContain("内容規約");
     expect(advised).not.toContain("thin");
     expect(advised).toContain("graphhopper-advisor");
+    // advised は advisor 相談の記録だけが必須で、critic は呼ばない
+    expect(advised).toContain("critic省略");
+    expect(advised).toContain("記録（graphhopper_consult_set）だけは必須");
     const oracle = g.effectivePhaseAction("designing", "oracle");
     expect(oracle).toContain("graphhopper-oracle");
+    // oracle 入口も base の advisor → critic を省略しない
+    expect(oracle).toContain("graphhopper-advisor");
+    expect(oracle).toContain("oracle 相談で代用しない");
     expect(g.effectivePhaseAction("designing", "direct")).toBe(g.PHASE_ACTION["designing"]);
   });
 });

@@ -1,7 +1,7 @@
 ---
 description: "手詰まり時の相談役。graphhopper_attemptのfail_streakがstuck_thresholdに達した時に呼ぶ。アーキテクチャ判断・複雑なデバッグ・不慣れなパターンについて助言する（モデルは .graphhopper/config.json の agents で設定）"
 mode: all
-model: "claude-oauth/claude-opus-5-5"
+model: "claude-oauth/claude-fable-5-2"
 permissions:
   - { action: "edit", resource: "*", effect: "deny" }
   - { action: "shell", resource: "*", effect: "deny" }

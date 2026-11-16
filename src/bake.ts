@@ -186,7 +186,6 @@ export function checkCatalogPolicy(input: {
   cascade?: {
     baseline?: string;
     escalate?: string;
-    second?: string;
     expert?: string;
     strong?: string;
     main_fallback?: string;
@@ -212,7 +211,6 @@ export function checkCatalogPolicy(input: {
     const entries: [string, string | undefined][] = [
       ["cascade.baseline", c.baseline],
       ["cascade.escalate", c.escalate],
-      ["cascade.second", c.second],
       ["cascade.expert", c.expert],
       ["cascade.strong", c.strong],
       ["cascade.main_fallback", c.main_fallback],

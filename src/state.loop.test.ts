@@ -800,7 +800,8 @@ describe("config 2層解決（グローバル既定 → プロジェクト上書
     withGlobal(null, () => {
       const cfg = readConfig(tmpRoot());
       expect(cfg.agents).toEqual({});
-      expect(cfg.stuck_threshold).toBe(CFG.stuck_threshold);
+      // 既定は 2（oracle 相談を早める。CFG は明示設定の検証用フィクスチャ）
+      expect(cfg.stuck_threshold).toBe(2);
     });
   });
 
@@ -812,7 +813,7 @@ describe("config 2層解決（グローバル既定 → プロジェクト上書
     try {
       const cfg = readConfig(tmpRoot());
       expect(cfg.agents).toEqual({});
-      expect(cfg.stuck_threshold).toBe(CFG.stuck_threshold);
+      expect(cfg.stuck_threshold).toBe(2);
     } finally {
       if (prev === undefined) delete process.env.GRAPHHOPPER_CONFIG;
       else process.env.GRAPHHOPPER_CONFIG = prev;
@@ -880,13 +881,15 @@ describe("evalリトライ上限 giveUp", () => {
     const root = tmpRoot();
     startGoal(root, "test goal", "sess1");
     let r = recordAttempt(root, false, "");
-    expect(r.escalate).toBe(false);
+    expect(r.escalate).toBe(false); // fail_streak=1 < stuck_threshold=2
     expect(r.giveUp).toBe(false);
     r = recordAttempt(root, false, "");
-    expect(r.escalate).toBe(false);
+    expect(r.fail_streak).toBe(2);
+    expect(r.escalate).toBe(true); // stuck_threshold=2（既定）
+    expect(r.giveUp).toBe(false);
     r = recordAttempt(root, false, "");
     expect(r.fail_streak).toBe(3);
-    expect(r.escalate).toBe(true); // stuck_threshold=3
+    expect(r.escalate).toBe(true);
     expect(r.giveUp).toBe(false);
     r = recordAttempt(root, false, "");
     r = recordAttempt(root, false, "");
@@ -1345,6 +1348,7 @@ describe("design scaffold＋構造ゲート", () => {
     expect(scaffoldErr).toContain("規約に違反");
     expect(scaffoldErr).toContain("§2");
     fillCompliantDesign(root);
+    // full（未判定）は advisor 相談の記録が無くても進める（運用規則で、機械ゲートではない）
     expect(checkPhaseMove(root, "implementing")).toBeNull();
     writeFileSync(planPath(root, g.id), "# empty\n");
     const err = checkPhaseMove(root, "implementing");

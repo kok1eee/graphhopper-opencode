@@ -14,12 +14,12 @@ import { applySingleEdit, decodeUtf8Strict, sha1Hex, verifyHash } from "./hashed
 import * as state from "./state";
 import { parseTaskLines, todoGateError, todoStoreError } from "./todos";
 
-/* フェーズごとの次のアクション指示文（plugin tool応答・MCP応答の単一源泉）。
+/* フェーズごとの次のアクション指示文（tool 応答・注入文の単一源泉）。
  * plugin entry（index.ts）には置けない（loaderが非関数exportでload失敗するため）。
- * 内容を変えたらplugin/MCP両方の応答に反映される。 */
+ * 内容を変えたら tool 応答と注入文の両方に反映される。 */
 export const PHASE_ACTION: Record<state.Phase, string> = {
   designing:
-    "goalを理解し、設計判断・実装タスク列を .graphhopper/plans/<goal-id>.md に書く。source編集はここではブロックされる。書けたら graphhopper_invoke(agent: 'graphhopper-critic') で設計を1回敵対レビューし、指摘を design.md に反映してから graphhopper_phase(phase: 'implementing') へ（任意で graphhopper_critic_set に結果を記録できる。opt-inでphase遷移の前提条件ではない）。design.md はこのフェーズを抜けた後は不変になる（verifierのdrift検出アンカーのため）——決定の経緯・棄却した代替案・進捗はここで固めず、実装中は .graphhopper/plans/<goal-id>.log.md に追記すること",
+    "goalを理解し、設計判断・実装タスク列を .graphhopper/plans/<goal-id>.md に書く。source編集はここではブロックされる。書けたら graphhopper_invoke(agent: 'graphhopper-advisor') に design と .graphhopper/plans/<goal-id>.intent.md（無ければ design だけ）の path を渡し、判断の第二意見を1回求めよ（要約せず会話を読ませる。反映後に呼び直さない。記録は graphhopper_consult_set で任意）。次に graphhopper_invoke(agent: 'graphhopper-critic') で設計を1回敵対レビューし、指摘を design.md に反映してから graphhopper_phase(phase: 'implementing') へ（任意で graphhopper_critic_set に結果を記録できる。phase遷移の前提条件になるのは config が require_critic: true のプロジェクトだけ）。design.md はこのフェーズを抜けた後は不変になる（verifierのdrift検出アンカーのため）——決定の経緯・棄却した代替案・進捗はここで固めず、実装中は .graphhopper/plans/<goal-id>.log.md に追記すること",
   implementing:
     "design.md のタスクを実装する。進捗タスク（.graphhopper/todos/）は graphhopper_todo で完了・cancel を申告する（全タスクが completed か cancelled でないと polish へ進めない）。goal中のsource編集は graphhopper_edit（hash検証付き）を使え、素のedit/writeはフォールバック。まず graphhopper_set_eval(cmd) で合否を機械判定できるコマンド（テスト/lint/typecheck）を1度設定せよ。設定後はターン終了ごとに自動実行され、passならpolishへ自動遷移、failならfail_streakが機械カウントされ、escalateが返ったら graphhopper_invoke(agent: 'graphhopper-oracle') に相談する。eval_cmdが無い（機械判定できない）場合のみ graphhopper_attempt(ok, note) の自己申告にフォールバックする。外部公式doc裏付けが必要なら graphhopper_invoke(agent: 'graphhopper-librarian') を使える",
   polish:
@@ -32,7 +32,7 @@ export const PHASE_ACTION: Record<state.Phase, string> = {
  * （design g-mtwhdb4t）。done は continuation 自体が発火しない（idle ハンドラが
  * phase==="done" で早期return）ため実質未使用だが、Record の型完全性のために残す。 */
 export const PHASE_ACTION_SHORT: Record<state.Phase, string> = {
-  designing: "設計ドキュメントを書き、criticレビュー後にimplementingへ",
+  designing: "設計ドキュメントを書き、advisorとcriticのレビュー後にimplementingへ",
   implementing: "design.mdのタスクを実装し、eval_cmdを設定。タスク完了はgraphhopper_todoで申告",
   polish: "router_checkのrouteに従いsimplify/verifierを実行",
   done: "goalをcompleteする",
@@ -90,9 +90,15 @@ export function effectivePhaseAction(
       entryRoute === "advised"
         ? "implementing前にgraphhopper_invoke(agent: 'graphhopper-advisor')で相談1回し、graphhopper_consult_set(kind: 'advisor')で記録（機械ゲート）。"
         : "";
+    // light は advisor も critic も省略。advised は advisor が機械ゲートなので critic だけ省略
+    const reviewers = entryRoute === "light" ? "advisor・critic省略、" : "critic省略、";
     const note =
-      `（entry_route=${entryRoute}軽量: designingは内容規約（判断の理由・代替案・反証条件、§5 触らないもの、§2 の file:line 証拠、§4 のタスク紐付け）を満たすこと。critic省略、` +
+      `（entry_route=${entryRoute}軽量: designingは内容規約（判断の理由・代替案・反証条件、§5 触らないもの、§2 の file:line 証拠、§4 のタスク紐付け）を満たすこと。${reviewers}` +
       `polishのverifierはgeneral×1。${advisor}` +
+      (entryRoute === "advised"
+        ? "advisor相談の記録（graphhopper_consult_set）だけは必須（上の designing 指示の「記録は graphhopper_consult_set で任意」より優先）。criticは呼ばない。"
+        : "") +
+      "require_critic: true のプロジェクトだけは、criticを呼ばなかった理由を graphhopper_critic_set に記録する。" +
       "詰まったらgraphhopper_escalateでfullへ昇格）";
     // 単一源泉則: light/advised designingもPHASE_ACTION.designingを基にし、差分は例外条項で明示する
     return `${base}${note}`;
@@ -100,15 +106,22 @@ export function effectivePhaseAction(
   if (entryRoute === "oracle") {
     return (
       `${base}（entry_route=oracle多角: 開始時にgraphhopper_invoke(agent: 'graphhopper-oracle')で` +
-      "相談1回し、graphhopper_consult_set(kind: 'oracle')で記録（機械ゲート）。再度相談するときは同じ agent を invoke し、前回のやり取りを prompt に要約して渡す）"
+      "相談1回し、graphhopper_consult_set(kind: 'oracle')で記録（機械ゲート）。" +
+      "その後の設計レビューは base どおり（advisor 1回 → critic 1回。oracle 相談で代用しない。この2つの記録は任意で、critic_set が必須になるのは require_critic: true のときだけ）。" +
+      "oracle に再度相談するときは graphhopper-oracle を invoke し、前回のやり取りを prompt に要約して渡す）"
     );
   }
   return base;
 }
 
-/* 昇格後の次アクション定型文（plugin/MCPの昇格系3箇所の単一源泉） */
+/* 昇格後の次アクション定型文（pluginの昇格系3箇所の単一源泉） */
 export const ESCALATE_NEXT =
   "次: design.mdを肉付けし、graphhopper_invoke(agent: 'graphhopper-critic')で1回レビューしてから implementing へ。polishでは verifier fan-out×3（requirement/behavior/progress）が必須。";
+
+/* stuck 時に oracle へ相談させる定型文（idle eval・attempt・stuck 検知の単一源泉）。
+ * 相談は同期の graphhopper_invoke で行う（task() だと同じターンで助言を受け取れない）。 */
+export const ORACLE_ASK =
+  "graphhopper_invoke(agent: 'graphhopper-oracle') に相談せよ。これまでの失敗試行（何を試して何が起きたか）を prompt に渡すこと。";
 
 /* （旧buildJevPromptは削除。入口判定は decision.ts のdecideRouteに移管） */
 
@@ -181,10 +194,6 @@ export function readGraphhopperHashValue(root: string, filePath: string): FileHa
     size: Buffer.byteLength(content, "utf8"),
     mtime: st.mtime.toISOString(),
   };
-}
-
-export function readGraphhopperHash(root: string, filePath: string): string {
-  return JSON.stringify(readGraphhopperHashValue(root, filePath));
 }
 
 export interface HashEditArgs {
@@ -276,7 +285,7 @@ export function runGraphhopperEdit(
   });
 }
 
-/* 拒否文の単一源泉（plugin hook の throw 文と MCP の error 返却で共有）。
+/* 拒否文の単一源泉（hook の throw 文と tool の error 返却で共有）。
  * 文面を変えると両方の応答に反映される。 */
 export function designGateRefusal(
   toolName: string | undefined,
@@ -383,15 +392,6 @@ export function designDocLockedRefusal(
  * 拒否ではなく注意に留める: attempt(ok:true)のリセットには意味があるため） */
 export const EVAL_MANAGED_NOTE =
   "（note: eval_cmd設定中のためfail系はeval側でも計数される。evalかattemptのどちらかに寄せ、二重計上に注意せよ）";
-
-/* 単一driver警告（TUI bind中のgoalへの別session操作）。
- * 拒否ではなく警告に留める: handoff等の正規フローがあるため */
-export function foreignBoundNote(boundId: string): string {
-  return (
-    `（note: goal は別session（${boundId}）にbind中。二重駆動に注意。` +
-    `意図的な引き継ぎなら session_id を指定して resume で bind し直せ）`
-  );
-}
 
 /* design doc構造検証（exit gate用）。骨格の有無だけ見て質は見ない。
  * 質の厳格化は「薄く書いて回避する」自己判断エロージョンを再生産するため。
@@ -630,7 +630,7 @@ export function checkDesignContent(raw: string): string[] {
   return problems;
 }
 
-/* phase遷移前の機械チェック（plugin/MCP両callerで共有）。
+/* phase遷移前の機械チェック（hook と tool の両 caller で共有）。
  * 通れば null、ダメならそのまま返す error 文。 */
 export function checkPhaseMove(
   root: string,

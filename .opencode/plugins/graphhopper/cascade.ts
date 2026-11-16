@@ -22,7 +22,6 @@ import {
 } from "../../../src/cascade";
 import { describeModelDenial } from "../../../src/model-policy";
 import * as state from "../../../src/state";
-import { readRun } from "../../../src/workflow";
 import { logDecision } from "../../../src/decision";
 import { INTERNAL_PROMPT_METADATA_KEY } from "../../../src/entry-decide";
 import type { CascadeChild } from "../../../src/state";
@@ -222,7 +221,7 @@ export function mergeChildren(
 
 /**
  * active goal が無いのに cascade だけ残っている場合の後始末。
- * MCP サーバー経由で complete/clear された場合、plugin 側の finishCascade が走らないため、
+ * complete/clear の途中でプロセスが落ちると finishCascade が走らないため、
  * 次の idle でここが復元する（state.cascade は complete/clear では消えない）。
  */
 export async function flushOrphanCascade(gh: Gh): Promise<string | null> {
@@ -240,7 +239,6 @@ export async function flushOrphanCascade(gh: Gh): Promise<string | null> {
 export async function finishCascade(gh: Gh): Promise<string | null> {
   const active = state.getActive(gh.root);
   if (active) {
-    const run = readRun(gh.root, active.goal.id);
     /* decision_id は「このセッションの最後の成功 decide」を優先する。
      * goal start の保険は非同期で decide 行を書くため、start 時点の id では
      * 保険行に紐付かない。goal 中は hook が active_goal で skip するので、
@@ -264,7 +262,6 @@ export async function finishCascade(gh: Gh): Promise<string | null> {
         fail_streak: active.state.fail_streak,
         escalated: active.state.cascade?.level === "escalated",
         verifier: active.state.last_verifier?.level ?? null,
-        ...(run ? { workflow: run.workflow, inserted: run.inserted } : {}),
       },
     });
   }

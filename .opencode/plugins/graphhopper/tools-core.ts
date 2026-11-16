@@ -13,6 +13,7 @@ import {
   ESCALATE_NEXT,
   EVAL_MANAGED_NOTE,
   formatUsabilityLine,
+  ORACLE_ASK,
   parseEntryRoute,
   policyDocsChanged,
   usabilityGateRefusal,
@@ -30,7 +31,6 @@ import { ensureEntryDecision } from "../../../src/entry-decide";
 import { formatIntentLine, renderIntent } from "../../../src/intent";
 import { catalogPolicyWarning } from "../../../src/bake";
 import * as state from "../../../src/state";
-import { readRun, summarizeRun } from "../../../src/workflow";
 import { clearWaitTimer, noteSession, S, text, type Gh } from "./shared";
 import { checkBuiltinGoal } from "../../../src/goal-conflict";
 
@@ -322,7 +322,6 @@ export function registerCoreTools(
                 .slice(-3)
                 .map((c) => `  child: ${c.agent} → ${c.model}${c.readback_match ? "" : " (readback不一致)"}`)
             : []),
-          ...(summarizeRun(readRun(root, a.goal.id)) ? [summarizeRun(readRun(root, a.goal.id))!] : []),
           `difficulty: ${a.state.difficulty ?? "unknown"}`,
           `loop: stop_count=${a.state.loop_stop_count}/${state.readConfig(root).loop_stop_max} resume_blocked=${state.isResumeBlocked(root)} streak=${a.state.loop_streak}`,
           a.state.notes ? `notes: ${a.state.notes}` : null,
@@ -531,7 +530,7 @@ export function registerCoreTools(
   editor.add({
     name: "graphhopper_attempt",
     description:
-      "implementingでの実装試行の成否を記録する（graphhopper_set_evalでeval_cmdを設定していない場合の自己申告フォールバック。eval_cmd設定済みなら自動実行されるのでこのツールは不要）。連続失敗がstuck_threshold（既定3）に達したら escalate=true を返し、graphhopper-oracleへの相談を促す。okな試行やphase遷移でfail_streakはリセットされる",
+      "implementingでの実装試行の成否を記録する（graphhopper_set_evalでeval_cmdを設定していない場合の自己申告フォールバック。eval_cmd設定済みなら自動実行されるのでこのツールは不要）。連続失敗がstuck_threshold（既定2）に達したら escalate=true を返し、graphhopper_invoke(agent: 'graphhopper-oracle') での相談を促す。okな試行やphase遷移でfail_streakはリセットされる",
     input: S.obj(
       {
         ok: { type: "boolean", description: "この試行は成功したか（テストが通った・目的の変更が完了した等）" },
@@ -572,7 +571,7 @@ export function registerCoreTools(
           [
             `attempt recorded: fail (fail_streak=${r.fail_streak})`,
             "escalate: true",
-            "次: task(subagent_type: 'graphhopper-oracle') に相談せよ。これまでの失敗試行（何を試して何が起きたか）を渡すこと。",
+            `次: ${ORACLE_ASK}`,
             managed,
             cascadeNote,
           ]
@@ -600,7 +599,7 @@ export function registerCoreTools(
           [
             `attempt recorded: fail (fail_streak=${r.fail_streak})`,
             `escalate: true (stuck: ${stuck.reasons.join(", ")})`,
-            "次: task(subagent_type: 'graphhopper-oracle') に相談せよ。これまでの失敗試行・編集履歴を渡すこと。",
+            `次: ${ORACLE_ASK}`,
             managed,
             cascadeNote,
           ]

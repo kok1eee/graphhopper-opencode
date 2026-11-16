@@ -22,6 +22,7 @@ import {
   effectivePhaseAction,
   ESCALATE_NEXT,
   isGateTargetTool,
+  ORACLE_ASK,
   isIntentLogPath,
   PHASE_ACTION_BRIEF,
   PONYTAIL_BRIEF,
@@ -50,7 +51,6 @@ import { readHandoff } from "../../../src/handoff";
 import * as state from "../../../src/state";
 import { isDesignDocLocked, isDesignGateBlocked } from "../../../src/state";
 import { LSPServerManager } from "../../../src/lsp/client";
-import { handleGrandchild } from "./workflow";
 import { clearAllWaitTimers, clearWaitTimer, setWaitTimer, type Gh } from "./shared";
 
 const SYSTEM_GUIDE = `## graphhopper（designing/implementing/polishループ）の存在
@@ -501,7 +501,6 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
         try {
           if (event.type === "session.created") {
             const created = event.data as Record<string, unknown> | undefined;
-            if (handleGrandchild(gh, created)) continue;
             handleChildSessionCreated(gh, created);
             continue;
           }
@@ -675,7 +674,7 @@ async function onIdle(
    * 待っている場合だけ、下で張り直す */
   clearWaitTimer(sessionID);
   let cascadeNote: string | null = null;
-  /* MCP経由の complete/clear で残った cascade を先に復元する */
+  /* goal 終了・clear の途中で落ちて残った cascade を先に復元する（孤児の保険） */
   try {
     const orphanNote = await flushOrphanCascade(gh);
     if (orphanNote) cascadeNote = orphanNote;
@@ -877,7 +876,7 @@ async function onIdle(
       state.recordEvent(root, { type: "eval_run", goal: active.goal.id, ok: result.ok, fail_streak: r.fail_streak });
     }
     if (result.ok) {
-      // 遷移入力・遷移判定は MCP 側と同一の実装を使う（分岐の食い違いを防ぐ）
+      // 遷移入力・遷移判定は tool 側と同一の実装を使う（分岐の食い違いを防ぐ）
       const inp = await state.evalTransitionInput($, root, active.state.router.baseline_rev);
       const t = await state.evalToPolish($, root, { cmd, ...inp });
       evalNote = t.note;
@@ -904,14 +903,14 @@ async function onIdle(
     } else {
       let stuckLine = "";
       if (r.escalate) {
-        stuckLine = "escalate: task(subagent_type: 'graphhopper-oracle') に相談せよ。";
+        stuckLine = `escalate: ${ORACLE_ASK}`;
       } else {
         const stuck = state.checkStuck(root);
         if (stuck.escalate && state.noteStuckNotified(root, stuck.reasons)) {
           const esc = autoEscalateOnStuck(root);
           stuckLine = esc
             ? `stuck: ${stuck.reasons.join(", ")} → light/advised→full自動昇格（designingに巻き戻し）。${ESCALATE_NEXT}`
-            : `stuck: ${stuck.reasons.join(", ")} — task(subagent_type: 'graphhopper-oracle') に相談せよ。これまでの失敗試行・編集履歴を渡すこと。`;
+            : `stuck: ${stuck.reasons.join(", ")} — ${ORACLE_ASK}`;
         }
       }
       evalNote = [`eval_cmd FAILED (fail_streak=${r.fail_streak}): ${cmd}`, tail, stuckLine].filter(Boolean).join("\n");

@@ -12,7 +12,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerHooks } from "../.opencode/plugins/graphhopper/hooks";
-import { startGoal } from "./state";
+import { setPhase as stateSetPhase, startGoal } from "./state";
 
 type HookCb = (event: unknown) => void | Promise<void>;
 
@@ -387,5 +387,40 @@ describe("plugin hook: 入口d1判定の context hook（注入）", () => {
       if (prevCfg === undefined) delete process.env.GRAPHHOPPER_CONFIG;
       else process.env.GRAPHHOPPER_CONFIG = prevCfg;
     }
+  });
+});
+
+describe("plugin hook: designing の編集ゲート（execute.before）", () => {
+  /** execute.before を1回叩く。拒否は throw で返る */
+  const runBefore = async (root: string, tool: string, filePath: string): Promise<unknown> => {
+    const { ctx, hooks } = fakeCtx();
+    await registerHooks({ ctx: ctx as never, root });
+    const cb = hooks.get("execute.before")?.[0];
+    if (!cb) throw new Error("execute.before hook が登録されていない");
+    return await cb({ tool, input: { filePath } });
+  };
+
+  test("designing 中は source 編集を拒否し、plans 配下と intent ログの扱いが分かれる", async () => {
+    const root = tmpRoot();
+    const g = startGoal(root, "gate", "s1").goal;
+    await expect(runBefore(root, "edit", "src/a.ts")).rejects.toThrow(/"designing" phase/);
+    // plans 配下は design を書くために通す
+    await expect(runBefore(root, "edit", `.graphhopper/plans/${g.id}.md`)).resolves.toBeUndefined();
+    // intent ログは phase を問わず不変
+    await expect(
+      runBefore(root, "edit", `.graphhopper/plans/${g.id}.intent.md`),
+    ).rejects.toThrow(/immutable record/);
+  });
+
+  test("implementing 移行後は design doc が locked になる", async () => {
+    const root = tmpRoot();
+    const g = startGoal(root, "gate", "s1").goal;
+    writeFileSync(join(root, ".graphhopper", "plans", `${g.id}.md`), "# design\n", "utf8");
+    stateSetPhase(root, "implementing");
+    await expect(
+      runBefore(root, "write", `.graphhopper/plans/${g.id}.md`),
+    ).rejects.toThrow(/immutable once the/);
+    // source は通る
+    await expect(runBefore(root, "edit", "src/a.ts")).resolves.toBeUndefined();
   });
 });

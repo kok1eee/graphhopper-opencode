@@ -300,7 +300,7 @@ export function registerOpsTools(
   editor.add({
     name: "graphhopper_consult_set",
     description:
-      "entry相談の記録。kind=advisorはadvised入口の第二意見、kind=oracleはoracle入口の開始時相談。相談自体はtask(graphhopper-advisor/oracle)／graphhopper_invokeで別途行い、ここでは記録のみする（実在は検証しない）。designing→implementingの機械ゲートの入力になる",
+      "entry相談の記録。kind=advisorはadvised入口の第二意見、kind=oracleはoracle入口の開始時相談。相談自体はgraphhopper_invoke(agent: 'graphhopper-advisor' または 'graphhopper-oracle')で別途行い、ここでは記録のみする（実在は検証しない）。designing→implementingの機械ゲートの入力になる",
     input: S.obj(
       {
         kind: S.enumOf(["advisor", "oracle"]),

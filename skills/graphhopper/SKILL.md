@@ -17,13 +17,27 @@ graphhopper本体（Claude Code版）の3相グラフをopencodeに移植した�
 |---|---|---|
 | 計画の敵対検証 | critic（designingで1回） | 要件漏れ・設計の穴・スコープ逸脱。質はここ |
 | 実装後のdrift検出 | verifier（polishでfan-out） | requirement/behavior/progressの3lens |
-| 手詰まり打開 | oracle（escalate時のみ） | 失敗文脈を渡して助言のみ受け取る |
-| 気軽な相談 | `graphhopper-advisor` | セカンドオピニオン・advised入口の相談。stuck時はoracle（advisorで代替しない）。出力は非拘束。selector判定はd1 tool（`graphhopper_selector`）に移管 |
+| 手詰まり打開 | oracle（escalate時、および oracle 入口の開始時） | 失敗文脈を渡して助言のみ受け取る |
+| 気軽な相談 | `graphhopper-advisor` | セカンドオピニオン・advised入口の相談・full の designing で判断の第二意見。stuck時はoracle（advisorで代替しない）。出力は非拘束。selector判定はd1 tool（`graphhopper_selector`）に移管 |
 | repo内事実収集 | researcher（read-only） | graft-first。判断を含めない |
 | repo外公式doc | librarian（read-only） | URL・引用付き。判断を含めない |
 | 大diff整理 | simplify（route=polishのみ） | 提案のみ。適用はメイン |
 
 独立した問いなら並列に投げ、メインが統合する。判断は増やさない（council再発防止）。
+
+**入口ごとの reviewing（designing → implementing）**:
+
+| 入口 | oracle | advisor | critic | 記録の扱い |
+|---|---|---|---|---|
+| full / 未判定 | - | 1回（design を書いたら） | 1回 | consult_set / critic_set とも任意 |
+| light | - | 省略 | 省略 | - |
+| advised | - | 1回 | 省略 | consult_set(kind: 'advisor') が**必須**（機械ゲート） |
+| oracle | 1回（開始時） | 1回 | 1回 | consult_set(kind: 'oracle') が**必須**（機械ゲート）。advisor・critic の記録は任意 |
+
+`require_critic: true` にしたプロジェクトだけは、入口に関係なく critic_set の記録が必須になる（既定 false）。
+その場合は critic を省略する light / advised でも、呼ばなかった理由を `reason` に書いて記録する。
+記録を省く運用なら false のままにする。
+
 **opencode 2本立て**: `task()`/`subagent` は TUI からは呼べるが **`execute` のカタログには無い**。
 2.3.0 以降 `task()` はバックグラウンド（結果は後で届く）なので、判定を待って記録する経路
 （verifier）は `graphhopper_verify`（lens ごとに `opencode run` を待つ）か
@@ -79,12 +93,11 @@ cascade の切替先（baseline/escalate/quality 等）も deny で拒否され�
 - 無効時: `cascade.enabled: false` なら strong は効かない。goal は開始され、start 応答に注意が出る
 - 終了: `complete`（force 含む）と `clear` で解除され、`cascade.restore`（内部状態。設定キーではなく
   goal 開始時のモデル）に戻る
-- MCP: フラグを立てるだけで、切替は plugin の sync（同じセッションの次の phase/idle）で起きる。
-  plugin が動いていない環境では切り替わらない
+- フラグを立てるだけで、切替は plugin の sync（同じセッションの次の phase/idle）で起きる
 - 通常昇格（difficulty/fail_streak）とは独立。strong は target のモデルだけを変え、
   `cascade.escalate` の設定は変えない
 goal 開始時の会話は `.graphhopper/plans/<goal>.intent.md` に `me:`/`assistant:` 付きで保存される。
-critic と requirement/general lens はこれを読む（behavior/progress と実装 subagent には渡さない）。
+advisor・critic と requirement/general lens はこれを読む（behavior/progress と実装 subagent には渡さない）。
 verifier clean の後に差分を変えると `complete` は止まる（検証時点の diff の sha1 と照合）。
 再検証するか、人間の判断で `force: true`（`goal_complete` に `diff_gate: forced`）。
 
@@ -113,7 +126,7 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
   `graphhopper_route_set(route, reason)`。手動の decide も同じログに記録される
 - **full=フル**（現行通り）/**light=軽量**（design の内容規約は full と同じ。判断は少なくてよいが1件以上、critic省略、verifier general×1）/
   **direct=直行**（loopなし・goalを作らない。historyに1行のみ残る）/
-  **advised=軽量＋第二意見**（light相当＋implementing前にadvisor相談1回）/
+  **advised=軽量＋第二意見**（light相当＋implementing前にadvisor相談1回。lightはadvisor・critic省略）/
   **oracle=多角**（full相当＋開始時にoracle相談1回。stuck時は同session継続）
 - parse失敗・範囲外・未記録は**fullに倒す**（fail-safe。state null＝full）。
   旧A/B/Cも受理しfull/light/directに写像する
@@ -134,15 +147,19 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
   中身をゼロから書く必要は無い、scaffoldを埋めればよい
 - **このフェーズではsource編集（Edit/Write）が `tool.execute.before` hookで物理ブロックされる**
   （許可パスは `.graphhopper/plans/` 配下のみ、`.graphhopper/config.json` の `design_gate_allow` で変更可）
-- 書けたら `graphhopper_invoke(agent: "graphhopper-critic")` で**設計を1回敵対レビュー**する
-  （要件漏れ・設計の穴・スコープ逸脱を検出。安価モデル = 常設nodeなので毎goal必ず呼ぶ）。
+- 書けたらまず `graphhopper_invoke(agent: "graphhopper-advisor")` で**判断の第二意見を1回**取る
+  （design と `.graphhopper/plans/<goal-id>.intent.md` の path を渡し、会話を読ませる。要約して渡さない。
+  別の選択肢・判断の妥当性を返す。反映後に呼び直さない。light は省略、advised は `graphhopper_consult_set(kind: "advisor")` の記録まで必須）
+- 次に `graphhopper_invoke(agent: "graphhopper-critic")` で**設計を1回敵対レビュー**する
+  （要件漏れ・設計の穴・スコープ逸脱を検出。安価モデル = 常設nodeなので full / 未判定 / oracle 入口では必ず呼ぶ）。
   呼び出しは `execute` の外から直接でよい（`execute` の中は polish のレシピだけ）
 - critic の指摘を design.md に反映してから `graphhopper_phase(phase: "implementing")`
 - 要件の公式doc裏付けが必要なら `graphhopper_invoke(agent: "graphhopper-librarian")` を使う
   （researcherはコードベース事実収集に専念し、外部調査はlibrarianに委ねる）
-- 呼ぶこと自体は毎goal必須（運用規則）。記録は `require_critic: true` のプロジェクトでは **必須**
-  （未記録だと implementing 遷移が機械拒否される）。それ以外は任意で `graphhopper_phase` の前提条件には
-  ならない（「critic を呼んだか」自体の機械チェックはしないので、記録も裁量）
+- 呼ぶこと自体は full / 未判定 / oracle 入口では必須（運用規則。light / advised は省略）。記録は
+  `require_critic: true` のプロジェクトでは **必須**（未記録だと implementing 遷移が機械拒否される。
+  既定 false）。それ以外は任意で `graphhopper_phase` の前提条件にはならない
+  （「critic を呼んだか」自体の機械チェックはしないので、記録も裁量）
 - **design.md はこのフェーズを抜けた後は不変になる**（`tool.execute.before` が
   designing以外での該当パスへの書き込みを常にブロックする）。verifierがdrift検出の
   アンカーとして読むため、実装に合わせて書き直せると「driftをdesign.md側の書き換えで

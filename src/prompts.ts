@@ -1,17 +1,15 @@
 /**
- * prompts — graphhopper reviewer/調査役の lens 指示文（MCP prompts）。
+ * prompts — verifier 4 lens の指示文（純粋層）。
  *
- * 背景: API 経由セッションの task には opencode 側 subagent が配膳されず、
- * 指示文は応答文・SKILL.md に散っていた。MCP prompts として公開すれば
- * どの client でも同品質の指示で回せて、graphhopper_invoke と組で loop が閉じる。
- * TUI 側の task(subagent_type: ...) 運用とは文面を合わせる（両対応）。
+ * 背景: verifier の呼び出しは lens 指示文・渡し物の path・出力契約をメインが毎回
+ * 手書きしていた。手書きは path の渡し忘れを招くため、ここに固定して
+ * src/verify.ts（buildLensPrompt）から使う。reviewer の役割定義は src/agents.ts の
+ * system が正で、ここは verifier lens の文面だけを持つ。
  */
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import * as state from "./state";
 import { formatTodoList } from "./todos";
 
-/* 言語版ガード（critic/verifier 共通）。PEP 758 系の誤検知を止める。
+/* 言語版ガード（verifier 共通）。PEP 758 系の誤検知を止める。
  * SKILL.md の同名ルールと一対で維持すること。 */
 export const VERSION_GUARD_RULE = [
   "言語版ガード: 構文・API の指摘前に requires-python / .python-version / toolchain の版を必ず確認する。",
@@ -48,18 +46,10 @@ export const VERIFIER_EFFICIENCY_RULE = [
   "ただし診断クリーン≠driftなし（挙動 drift は診断に出ない）。",
 ].join("\n");
 
-/* PromptArgDef/PromptDef は prompts.ts 内のみで使用（公開面は PROMPT_DEFS）。
- * 将来の外部利用に備え型自体は残すが export はしない */
-interface PromptArgDef {
-  name: string;
-  description: string;
-  required?: boolean;
-}
-
+/* PromptDef は prompts.ts 内のみで使用（公開面は PROMPT_DEFS）。
+ * tool/agent の引数定義は持たない（plugin の tool が入力スキーマの正）。 */
 interface PromptDef {
   name: string;
-  description: string;
-  arguments: PromptArgDef[];
   render: (args: Record<string, string>, root: string) => string;
 }
 
@@ -68,12 +58,6 @@ function activeGoalId(root: string, goalId?: string): string {
   const a = state.getActive(root);
   if (!a) throw new Error("no active goal (goalId を明示するか goal を start せよ)");
   return a.goal.id;
-}
-
-function readDesignDoc(root: string, goalId: string): string {
-  const p = join(root, ".graphhopper", "plans", `${goalId}.md`);
-  if (!existsSync(p)) throw new Error(`design doc が無い: plans/${goalId}.md`);
-  return readFileSync(p, "utf8");
 }
 
 /**
@@ -123,71 +107,9 @@ function goalHeader(root: string, goalId: string): string {
   return `goal: ${goalId} [${s}]`;
 }
 
-function recentFailures(root: string, goalId: string, n = 10): string {
-  const lines = state
-    .readHistory(root)
-    .filter((h) => (h as { goal?: unknown }).goal === goalId)
-    .filter(
-      (h) =>
-        (h.type === "attempt" && !h.ok) ||
-        (h.type === "eval_run" && !h.ok) ||
-        h.type === "eval_gave_up" ||
-        h.type === "stuck_hint",
-    )
-    .slice(-n);
-  if (lines.length === 0) return "(失敗記録なし)";
-  return lines
-    .map((h) => {
-      if (h.type === "attempt") return `- attempt fail_streak=${h.fail_streak}: ${h.note}`;
-      if (h.type === "eval_run") return `- eval fail_streak=${h.fail_streak}`;
-      if (h.type === "eval_gave_up") return `- giveUp fail_streak=${h.fail_streak}`;
-      if (h.type === "stuck_hint") return `- stuck: ${h.reasons.join(", ")}`;
-      return `- ${h.type}`;
-    })
-    .join("\n");
-}
-
 export const PROMPT_DEFS: PromptDef[] = [
   {
-    name: "graphhopper-critic",
-    description:
-      "design.md の敵対レビュー用の指示文（designing→implementing 遷移前に1回）。design doc を埋め込んで返す",
-    arguments: [
-      { name: "root", description: "対象プロジェクト（省略時は client roots→cwd）" },
-      { name: "goalId", description: "対象 goal（省略時は active）" },
-    ],
-    render: (args, root) => {
-      const id = activeGoalId(root, args["goalId"]);
-      return [
-        "あなたは graphhopper の critic（設計レビューの敵対者）である。",
-        "以下の design.md を検証し、要件漏れ・設計の穴・スコープ逸脱を指摘せよ。",
-        "優しい読み替えは禁止。書いてあることだけを根拠に、finding ごとに severity（critical/high/medium/low）と根拠箇所を付けろ。",
-        "",
-        "## 検査観点（各項目を yes/no で判定し、no のものだけ finding にする）",
-        "1. 各設計判断に代替案と棄却理由が書かれているか",
-        "2. 各設計判断に反証条件（この観測が出たら間違い）が書かれているか",
-        "3. 「触らないもの」は具体的か（「必要に応じて」「適宜」などの逃げがないか）",
-        "4. §2 現状の主張に file:line の証拠が付き、主張と対応しているか",
-        "5. §3 の各判断に対応するタスクが §4 にあるか（漏れ、判断に無いタスク）",
-        "6. 判断が実装詳細（定数・関数名の列挙・手順）に踏み込みすぎていないか",
-        "",
-        VERSION_GUARD_RULE,
-        "",
-        goalHeader(root, id),
-        "",
-        "## design.md",
-        "",
-        readDesignDoc(root, id),
-      ].join("\n");
-    },
-  },
-  {
     name: "graphhopper-verifier-requirement",
-    description: "polish verifier の requirement lens 用指示文（done の定義に直結）",
-    arguments: [
-      { name: "root", description: "対象プロジェクト（省略時は client roots→cwd）" },
-      { name: "goalId", description: "対象 goal（省略時は active）" },
-    ],
     render: (args, root) => {
       const id = activeGoalId(root, args["goalId"]);
       return [
@@ -201,11 +123,6 @@ export const PROMPT_DEFS: PromptDef[] = [
   },
   {
     name: "graphhopper-verifier-behavior",
-    description: "polish verifier の behavior lens 用指示文（挙動の正しさ）",
-    arguments: [
-      { name: "root", description: "対象プロジェクト（省略時は client roots→cwd）" },
-      { name: "goalId", description: "対象 goal（省略時は active）" },
-    ],
     render: (args, root) => {
       const id = activeGoalId(root, args["goalId"]);
       return [
@@ -220,11 +137,6 @@ export const PROMPT_DEFS: PromptDef[] = [
   },
   {
     name: "graphhopper-verifier-progress",
-    description: "polish verifier の progress lens 用指示文（goal への収束）",
-    arguments: [
-      { name: "root", description: "対象プロジェクト（省略時は client roots→cwd）" },
-      { name: "goalId", description: "対象 goal（省略時は active）" },
-    ],
     render: (args, root) => {
       const id = activeGoalId(root, args["goalId"]);
       const todos = todoSection(root, id);
@@ -241,11 +153,6 @@ export const PROMPT_DEFS: PromptDef[] = [
   },
   {
     name: "graphhopper-verifier-general",
-    description: "advisor route 用の統合 verifier 指示文（3観点を1回で）",
-    arguments: [
-      { name: "root", description: "対象プロジェクト（省略時は client roots→cwd）" },
-      { name: "goalId", description: "対象 goal（省略時は active）" },
-    ],
     render: (args, root) => {
       const id = activeGoalId(root, args["goalId"]);
       const todos = todoSection(root, id);
@@ -256,67 +163,6 @@ export const PROMPT_DEFS: PromptDef[] = [
         "",
         goalHeader(root, id),
         todos,
-      ].join("\n");
-    },
-  },
-  {
-    name: "graphhopper-oracle",
-    description: "手詰まり時の相談役の指示文。直近の失敗記録を埋め込んで返す",
-    arguments: [
-      { name: "root", description: "対象プロジェクト（省略時は client roots→cwd）" },
-      { name: "goalId", description: "対象 goal（省略時は active）" },
-    ],
-    render: (args, root) => {
-      const id = activeGoalId(root, args["goalId"]);
-      return [
-        "あなたは graphhopper の oracle（手詰まり打開の相談役）である。",
-        "以下の失敗記録を踏まえ、別のアプローチを2〜3案提示せよ。各案に確信度と検証手順を付けろ。実装はしない（助言のみ）。",
-        "",
-        goalHeader(root, id),
-        "",
-        "## 直近の失敗記録",
-        "",
-        recentFailures(root, id),
-      ].join("\n");
-    },
-  },
-  {
-    name: "graphhopper-researcher",
-    description: "repo内事実収集の調査指示（graft-first・判断なし）",
-    arguments: [
-      { name: "root", description: "対象プロジェクト（省略時は client roots→cwd）" },
-      { name: "query", description: "調査クエリ", required: true },
-      { name: "scope", description: "範囲（パス・モジュール）" },
-    ],
-    render: (args) => {
-      if (!args["query"]) throw new Error("query は必須");
-      return [
-        "あなたは graphhopper の researcher（事実収集専任）である。",
-        "判断・提案は禁止。証拠（file:line 付き）だけを返せ。",
-        "入口探索は graft-first、位置特定済みの点照会は LSP、構造パターンは ast-grep、最終手段 rg。",
-        "",
-        `query: ${args["query"]}`,
-        args["scope"] ? `scope: ${args["scope"]}` : null,
-      ]
-        .filter(Boolean)
-        .join("\n");
-    },
-  },
-  {
-    name: "graphhopper-librarian",
-    description: "repo外公式doc調査の指示（URL・引用付き・判断なし）",
-    arguments: [
-      { name: "query", description: "調査クエリ（対象ライブラリ・版を含む）", required: true },
-    ],
-    render: (args) => {
-      if (!args["query"]) throw new Error("query は必須");
-      return [
-        "あなたは graphhopper の librarian（外部公式doc専任）である。",
-        "公式 doc・仕様を webfetch / context7 で引け。URL と引用付きで返し、判断は含めるな。",
-        "context7 に無い一般 web（issue・blog・changelog）は websearch、コード例は grep.app にフォールバック。",
-        "版ズレ注意：対象の版を特定してから引け（不明なら版不明と明記）。",
-        "",
-        `query: ${args["query"]}`,
       ].join("\n");
     },
   },
