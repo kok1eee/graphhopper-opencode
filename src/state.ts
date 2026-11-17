@@ -102,6 +102,11 @@ export interface GoalSnapshot {
   start_baseline_rev: string | null;
   /** baseline の取得元（design g-mwkgfssi）。旧 state は null */
   baseline_source: BaselineSource | null;
+  /** goal 開始時に凍結した complete ゲートのモード（design g-mwmnvx3x 判断3）。
+   * null＝旧 goal（config の現在値を使う） */
+  gate_modes: GateModes | null;
+  /** goal 開始時に凍結した採点基準の sha1（design g-mwmnvx3x 判断1）。null＝未凍結 */
+  rubric_hash: string | null;
   /** goal start の strong: true（goal の間だけ強いモデルで回す） */
   strong_mode: boolean;
 }
@@ -161,7 +166,16 @@ export interface VerifierVerdict {
   /** 検証した差分の sha1（design g-mwd3n5bo）。null/欠測＝計算不能。
    * complete 時に現在の差分と照合し、変わっていれば再検証を要求する */
   diff_hash?: string | null;
+  /** lens ごとの重要度の件数（design g-mwmnvx3x 判断4）。undefined＝未申告。
+   * 同じ要素を lens をまたいで重複計上しうるので合計は「延べ」で出す */
+  severity?: VerifierSeverityEntry[];
   at: string;
+}
+
+/** lens 1 件分の severity（未申告は counts: null） */
+export interface VerifierSeverityEntry {
+  lens: VerifierLens;
+  counts: { must_fix: number; should_fix: number; nit: number; pre_existing: number } | null;
 }
 
 /** ルール文書の usability レビュー結果（design g-mwfltxyt） */
@@ -332,6 +346,11 @@ export interface LoopState {
   start_baseline_rev: string | null;
   /** baseline の取得元（design g-mwkgfssi）。旧 state は null */
   baseline_source: BaselineSource | null;
+  /** goal 開始時に凍結した complete ゲートのモード（design g-mwmnvx3x 判断3）。
+   * null＝旧 goal（config の現在値を使う） */
+  gate_modes: GateModes | null;
+  /** goal 開始時に凍結した採点基準の sha1（design g-mwmnvx3x 判断1）。null＝未凍結 */
+  rubric_hash: string | null;
   /** goal start の strong: true（goal の間だけ強いモデルで回す） */
   strong_mode: boolean;
   /** 入口判定のroute。null＝full（未呼び出し・legacy）。light/advised→full昇格のみ可 */
@@ -386,6 +405,14 @@ export interface CascadeConfig {
   };
 }
 
+/** complete ゲートのモード（design g-mwmnvx3x 判断3）。
+ * enforce=拒否 / observe=記録して通す。off は用意しない（逃げ道は force）。 */
+export type GateMode = "enforce" | "observe";
+
+export type GateName = "usability" | "verifier" | "diff_hash" | "verifier_self_modified";
+
+export type GateModes = Record<GateName, GateMode>;
+
 export interface GraphhopperConfig {
   /** router gate の分岐閾値（diff行数）。超えたら polish、以下なら advisor 相当の自己レビューで足りる */
   router_threshold_lines: number;
@@ -399,6 +426,9 @@ export interface GraphhopperConfig {
   /** 拒否するモデルの glob（全体一致・大小文字区別）。allow より優先。
    * global と project の和集合（禁止は単調に強くする） */
   model_deny?: string[];
+  /** complete ゲートのモード（goal 開始時に凍結される）。既定は既存 3 つ enforce・
+   * verifier_self_modified だけ observe（verifier 自体を直す goal を止めないため） */
+  gates: GateModes;
   /** implementing の連続失敗数がこれに達したら graphhopper-oracle への相談を促す */
   stuck_threshold: number;
   /** echoループ（直前のassistantメッセージとほぼ同一のuserメッセージ）を
@@ -442,8 +472,41 @@ export interface GraphhopperConfig {
   cascade: CascadeConfig;
 }
 
+export const DEFAULT_GATES: GateModes = {
+  usability: "enforce",
+  verifier: "enforce",
+  diff_hash: "enforce",
+  verifier_self_modified: "observe",
+};
+
+export function normalizeGates(raw: unknown): { modes: GateModes; invalid: GateName[] } {
+  const rec = (raw && typeof raw === "object" && !Array.isArray(raw)
+    ? raw
+    : {}) as Record<string, unknown>;
+  const invalid: GateName[] = [];
+  const pick = (k: GateName): GateMode => {
+    const v = rec[k];
+    if (v === "enforce" || v === "observe") return v;
+    if (v !== undefined) invalid.push(k);
+    return DEFAULT_GATES[k];
+  };
+  for (const k of Object.keys(rec)) {
+    if (!(k in DEFAULT_GATES)) invalid.push(k as GateName);
+  }
+  return {
+    modes: {
+      usability: pick("usability"),
+      verifier: pick("verifier"),
+      diff_hash: pick("diff_hash"),
+      verifier_self_modified: pick("verifier_self_modified"),
+    },
+    invalid,
+  };
+}
+
 export const DEFAULT_CONFIG: GraphhopperConfig = {
   router_threshold_lines: 400,
+  gates: DEFAULT_GATES,
   design_gate_allow: [".graphhopper/plans/"],
   agents: {},
   stuck_threshold: 2,
@@ -888,6 +951,9 @@ export type HistoryEvent =
       forced?: boolean;
       /** 差分ゲートの結果。unavailable＝ハッシュが取れずゲート不能 */
       diff_gate?: "ok" | "forced" | "unavailable";
+   
+      /** complete 時点の実効ゲート（observe で通ったものも含む） */
+      gates?: { mode: GateMode; gate: GateName; observed: boolean }[];
     }
   | { type: "phase"; goal: string; from: Phase; to: Phase; notes?: string }
   | {
@@ -908,6 +974,24 @@ export type HistoryEvent =
       /** lens並列の実行モデル（混成run用。旧eventは欠測→[model] fallback） */
       models?: (string | null)[];
     }
+  | {
+      /* complete ゲートを observe で通した（design g-mwmnvx3x 判断3） */
+      type: "complete_gate_observe";
+      goal: string;
+      gate: GateName;
+      reason: string;
+    }
+  | {
+      /* goal 開始時の採点基準の凍結結果（design g-mwmnvx3x 判断1） */
+      type: "rubric_frozen";
+      goal: string;
+      hash: string;
+    }
+  | { type: "rubric_snapshot_failed"; goal: string }
+  | { type: "rubric_changed"; goal: string }
+  | { type: "verifier_self_modified"; goal: string; code: boolean; agent: boolean }
+  | { type: "config_invalid_gate"; goal: string; gate: string }
+  | { type: "severity_inconsistent"; goal: string; must_fix: number }
   | { type: "design_gate_block"; goal: string; tool: string; path: string }
   | {
       type: "design_doc_locked_block";
@@ -1136,7 +1220,9 @@ export function readConfig(root: string): GraphhopperConfig {
   const stuck_threshold =
     raw.stuck_threshold ?? DEFAULT_CONFIG.stuck_threshold;
   const maxRaw = raw.max_eval_fails ?? DEFAULT_CONFIG.max_eval_fails;
+  const gates = normalizeGates(raw.gates);
   return {
+    gates: gates.modes,
     router_threshold_lines:
       raw.router_threshold_lines ?? DEFAULT_CONFIG.router_threshold_lines,
     design_gate_allow:
@@ -1248,6 +1334,8 @@ function emptyState(): LoopState {
     usability_review: null,
     start_baseline_rev: null,
     baseline_source: null,
+    gate_modes: null,
+    rubric_hash: null,
     strong_mode: false,
     updated_at: new Date().toISOString(),
   };
@@ -1407,6 +1495,8 @@ export function pauseGoal(root: string): ActiveLoop | null {
         usability_review: state.usability_review,
         start_baseline_rev: state.start_baseline_rev,
         baseline_source: state.baseline_source,
+        gate_modes: state.gate_modes,
+        rubric_hash: state.rubric_hash,
         strong_mode: state.strong_mode,
       },
     },
@@ -1471,6 +1561,8 @@ export function resumeGoal(
               usability_review: snap.usability_review ?? null,
               start_baseline_rev: snap.start_baseline_rev ?? null,
               baseline_source: snap.baseline_source ?? null,
+              gate_modes: snap.gate_modes ?? null,
+              rubric_hash: snap.rubric_hash ?? null,
               strong_mode: snap.strong_mode ?? false,
             }
           : {}),
@@ -1489,7 +1581,12 @@ export function resumeGoal(
 
 export function completeGoal(
   root: string,
-  opts?: { forced?: boolean; diff_gate?: "ok" | "forced" | "unavailable" },
+  opts?: {
+    forced?: boolean;
+    diff_gate?: "ok" | "forced" | "unavailable";
+    /** 実効ゲート（observe で通したものも残す。design g-mwmnvx3x 判断3） */
+    gates?: { mode: GateMode; gate: GateName; observed: boolean }[];
+  },
 ): ActiveLoop | null {
   const r = mutateActive(root, () => ({
     goal: { status: "done", done_at: new Date().toISOString() },
@@ -1518,6 +1615,7 @@ export function completeGoal(
         score: score.value,
         ...(opts?.forced ? { forced: true } : {}),
         ...(opts?.diff_gate ? { diff_gate: opts.diff_gate } : {}),
+        ...(opts?.gates?.length ? { gates: opts.gates } : {}),
       },
       buildGoalSummary(root, r.goal.id, { score: score.value }),
     ]);
@@ -2637,6 +2735,23 @@ export function usabilityStale(root: string): boolean {
   return hashFiles(root, u.files) !== u.doc_hash;
 }
 
+/** config の gates を global < project でマージして読む（凍結前の実効値） */
+export function readGateModes(root: string): { modes: GateModes; invalid: GateName[] } {
+  const global = readJson<{ gates?: unknown }>(globalConfigPath(), {});
+  const project = readJson<{ gates?: unknown }>(configPath(root), {});
+  return normalizeGates({ ...(global.gates ?? {}), ...(project.gates ?? {}) });
+}
+
+/** goal 開始時にゲートのモードと採点基準のハッシュを凍結する（design g-mwmnvx3x 判断1・3） */
+export function freezeGoalGates(
+  root: string,
+  modes: GateModes,
+  rubricHash: string | null,
+): void {
+  const state = readState(root);
+  writeState(root, { ...state, gate_modes: modes, rubric_hash: rubricHash });
+}
+
 /** goal 開始時の baseline rev を保存する（design g-mwfltxyt） */
 export function setStartBaselineRev(
   root: string,
@@ -2806,6 +2921,43 @@ export interface VerifierResult {
   level: VerdictLevel;
   target?: DriftTarget | null;
   model?: string | null;
+  /** 重要度の件数（design g-mwmnvx3x 判断4）。undefined＝未申告 */
+  severity?: VerifierSeverityCounts;
+}
+
+export type VerifierSeverityCounts = {
+  must_fix: number;
+  should_fix: number;
+  nit: number;
+  pre_existing: number;
+};
+
+/** lens ごとの severity 内訳（未申告は counts: null） */
+export function collectSeverity(results: VerifierResult[]): VerifierSeverityEntry[] {
+  return results.map((r) => ({ lens: r.lens, counts: r.severity ?? null }));
+}
+
+/** 延べ件数（lens をまたいで同じ指摘を重複計上しうる） */
+export function sumSeverity(entries: VerifierSeverityEntry[]): VerifierSeverityCounts {
+  const sum: VerifierSeverityCounts = { must_fix: 0, should_fix: 0, nit: 0, pre_existing: 0 };
+  /* ゼロの数値は parseSeverity と揃える（片方だけ増やさない） */
+  for (const e of entries) {
+    if (!e.counts) continue;
+    sum.must_fix += e.counts.must_fix;
+    sum.should_fix += e.counts.should_fix;
+    sum.nit += e.counts.nit;
+    sum.pre_existing += e.counts.pre_existing;
+  }
+  return sum;
+}
+
+/** status 1 行。未申告の lens を「0 件」と混ぜない（design g-mwmnvx3x 判断4） */
+export function formatSeverity(entries: VerifierSeverityEntry[] | undefined): string {
+  if (!entries || entries.length === 0) return "";
+  const sum = sumSeverity(entries);
+  const missing = entries.filter((e) => !e.counts).map((e) => e.lens);
+  const head = `must-fix ${sum.must_fix} / should-fix ${sum.should_fix} / nit ${sum.nit}`;
+  return missing.length > 0 ? `${head}（${missing.join(",")}: 未申告）` : head;
 }
 
 /* verifier の lens 編成（単一源泉。design g-mwiocibp 判断5）。

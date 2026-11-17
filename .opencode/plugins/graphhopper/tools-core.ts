@@ -38,6 +38,7 @@ import * as state from "../../../src/state";
 import { clearWaitTimer, noteSession, S, text, type Gh } from "./shared";
 import { checkBuiltinGoal } from "../../../src/goal-conflict";
 import { parseSeedTasks } from "../../../src/todos";
+import { rubricAgentHash, rubricCodeHash, rubricStatus, snapshotRubric } from "../../../src/verify";
 
 type Ctx = { sessionID: string };
 
@@ -205,6 +206,31 @@ export function registerCoreTools(
           } catch {
             // 測定不能は無視（initial null＝旧挙動）
           }
+          /* complete ゲートのモードと採点基準を開始時に凍結する（design g-mwmnvx3x 判断1・3）。
+           * どちらも失敗しても start は止めない（記録だけ残す） */
+          let rubricNote = "";
+          try {
+            const normalized = state.readGateModes(root);
+            for (const k of normalized.invalid) {
+              state.recordEvent(root, { type: "config_invalid_gate", goal: a.goal.id, gate: k });
+            }
+            const snap = snapshotRubric(root, a.goal.id);
+            state.freezeGoalGates(root, normalized.modes, snap?.hash ?? null);
+            rubricNote = snap
+              ? `rubric: 凍結（${snap.hash.slice(0, 8)}。この goal の検証は開始時の採点基準で行う）`
+              : "rubric: 未凍結（snapshot 失敗。採点基準は現行を使う）";
+            if (snap) {
+              state.recordEvent(root, {
+                type: "rubric_frozen",
+                goal: a.goal.id,
+                hash: snap.hash,
+              });
+            } else {
+              state.recordEvent(root, { type: "rubric_snapshot_failed", goal: a.goal.id });
+            }
+          } catch {
+            rubricNote = "rubric: 未凍結（snapshot 失敗）";
+          }
           // 意図ログ（design g-mwebh9vl）: goal 開始時点の会話を話者ラベル付きで保存。
           // 取得失敗・oversize は null のまま（start は止めない）
           let intentNote = "";
@@ -259,7 +285,7 @@ export function registerCoreTools(
               }`
             : "baseline: 取得できず（差分ゲートは fail-open・未 commit があると実効 diff が漏れうる）";
           return text(
-            `goal started: "${started.goal.title}" (${started.goal.id})\n${consumed}${started.state.difficulty ? ` / difficulty=${started.state.difficulty}` : ""}\nphase: designing${cascadeNote ? `\n${cascadeNote}` : ""}${strongNote ? `\n${strongNote}` : ""}${intentNote ? `\n${intentNote}` : ""}\n${baselineNote}\n次: ${effectivePhaseAction("designing", started.state.entry_route, started.state.difficulty)}`,
+            `goal started: "${started.goal.title}" (${started.goal.id})\n${consumed}${started.state.difficulty ? ` / difficulty=${started.state.difficulty}` : ""}\nphase: designing${cascadeNote ? `\n${cascadeNote}` : ""}${strongNote ? `\n${strongNote}` : ""}${intentNote ? `\n${intentNote}` : ""}\n${baselineNote}${rubricNote ? `\n${rubricNote}` : ""}\n次: ${effectivePhaseAction("designing", started.state.entry_route, started.state.difficulty)}`,
           );
         }
         case "pause": {
@@ -299,9 +325,63 @@ export function registerCoreTools(
           const a = state.getActive(root);
           if (!a) return text("no active goal");
           clearWaitTimer(sessionID);
+          /* ゲートの実効モードは goal 開始時に凍結した値を使う（design g-mwmnvx3x 判断3）。
+           * 旧 goal（未凍結）だけ config の現在値にフォールバックする */
+          const modes = a.state.gate_modes ?? state.readGateModes(root).modes;
+          const effective: { mode: state.GateMode; gate: state.GateName; observed: boolean }[] = [];
+          /* 拒否するか、observe として記録して通す。enforce なら理由を返す */
+          const gate = (name: state.GateName, reason: string): string | null => {
+            const mode = modes[name];
+            if (mode === "observe") {
+              if (!args.force) {
+                state.recordEvent(root, {
+                  type: "complete_gate_observe",
+                  goal: a.goal.id,
+                  gate: name,
+                  reason,
+                });
+                effective.push({ mode, gate: name, observed: true });
+              }
+              return null;
+            }
+            effective.push({ mode, gate: name, observed: false });
+            return args.force ? null : reason;
+          };
+
+          /* 採点基準の凍結（design g-mwmnvx3x 判断1）。検証の信頼性に直結するので最初に見る */
+          const rubricNotes: string[] = [];
+          if (a.state.rubric_hash) {
+            const rs = rubricStatus(root, a.goal.id, a.state.rubric_hash);
+            if (!rs.frozen || rs.tampered) {
+              const r = gate(
+                "verifier_self_modified",
+                "error: 採点基準の凍結ファイルが無い／内容が開始時と違います（改ざんの可能性）。" +
+                  "force: true で完了するか、新しい goal でやり直してください。",
+              );
+              if (r) return text(r);
+            } else if (rs.selfModified) {
+              const r = gate(
+                "verifier_self_modified",
+                "error: 採点に使うコードか verifier の system prompt が goal 中に変わっています（自己改変）。" +
+                  "変更を戻すか、force: true で完了してください。",
+              );
+              if (r) return text(r);
+              state.recordEvent(root, {
+                type: "verifier_self_modified",
+                goal: a.goal.id,
+                code: rs.codeChanged,
+                agent: rs.agentChanged,
+              });
+            }
+            if (rs.changed) {
+              rubricNotes.push("rubric: goal 中に採点基準が変わった（この goal の検証は開始時の基準）");
+              state.recordEvent(root, { type: "rubric_changed", goal: a.goal.id });
+            }
+          }
+
+          const baseline = await state.resolveBaseline($, root, a.state);
           // ルール文書の usability ゲート（design g-mwfltxyt）。verifier clean より前に判定する
           {
-            const baseline = await state.resolveBaseline($, root, a.state);
             const docs = policyDocsChanged(
               await state.measureChangedFiles($, root, baseline),
               a.state.initial_diff_files,
@@ -312,25 +392,31 @@ export function registerCoreTools(
               docs,
               currentHash,
             );
-            if (refusal && !args.force) return text(refusal);
+            if (refusal) {
+              const r = gate("usability", refusal);
+              if (r) return text(r);
+            }
           }
-          if (!args.force && a.state.last_verifier?.level !== "clean") {
-            return text(
+          if (a.state.last_verifier?.level !== "clean") {
+            const r = gate(
+              "verifier",
               "error: complete には直近の graphhopper_verifier_set（集約 clean）が必要です（self-graded 完了は禁止）。" +
                 "小diffで verifier fan-out が不要なら、人間の明示的な判断がある場合のみ force: true を使ってください。",
             );
+            if (r) return text(r);
           }
           // 検証後の変更検知（design g-mwd3n5bo）。両方の指紋が取れて不一致なら止める
-          const baseline = await state.resolveBaseline($, root, a.state);
           const currentHash = await state.computeDiffHash($, root, baseline);
           const verifiedHash = a.state.last_verifier?.diff_hash ?? null;
           const mismatch =
             !!currentHash && !!verifiedHash && currentHash !== verifiedHash;
-          if (mismatch && !args.force) {
-            return text(
+          if (mismatch) {
+            const r = gate(
+              "diff_hash",
               "error: 検証後に差分が変わっています（verifier clean の時点と不一致）。graphhopper_verifier_set で再検証してから complete してください。" +
                 "差分が問題ないと人間が判断した場合のみ force: true を使ってください（監査ログに diff_gate: forced が残ります）。",
             );
+            if (r) return text(r);
           }
           const diffGate = mismatch
             ? "forced"
@@ -341,10 +427,21 @@ export function registerCoreTools(
           const done = state.completeGoal(root, {
             forced: args.force === true,
             diff_gate: diffGate,
+            gates: effective,
           });
+          const observed = effective.filter((e) => e.observed);
           return text(
             done
-              ? `completed: "${done.goal.title}"${args.force ? " (forced)" : ""}${restored ? `\n${restored}` : ""}`
+              ? [
+                  `completed: "${done.goal.title}"${args.force ? " (forced)" : ""}`,
+                  observed.length
+                    ? `observe で通したゲート: ${observed.map((e) => e.gate).join(", ")}（history に理由を記録）`
+                    : "",
+                  ...rubricNotes,
+                  restored,
+                ]
+                  .filter(Boolean)
+                  .join("\n")
               : "no active goal",
           );
         }
@@ -370,6 +467,14 @@ export function registerCoreTools(
       if (!a) return text("no active goal");
       const v = a.state.last_verifier;
       const lensModels = v ? state.formatLensModels(v.lens, v.models, v.model) : "";
+      const severityLine = v ? state.formatSeverity(v.severity) : "";
+      /* 採点基準の凍結状態（design g-mwmnvx3x 判断1） */
+      const rs = a.state.rubric_hash ? rubricStatus(root, a.goal.id, a.state.rubric_hash) : null;
+      const rubricLine = !a.state.rubric_hash
+        ? "rubric: 未凍結（legacy goal）"
+        : !rs?.frozen || rs.tampered
+          ? "rubric: 改ざんの疑い（凍結ファイルが無い／内容が不一致）"
+          : `rubric: 凍結${rs.changed ? "・goal 中に基準が変わった" : ""}${rs.selfModified ? "・採点コードか verifier 定義が変わった" : ""}`;
       return text(
         [
           `goal: "${a.goal.title}" (${a.goal.id}) [${a.goal.status}]`,
@@ -391,6 +496,11 @@ export function registerCoreTools(
           a.state.last_verifier
             ? `last_verifier: level=${a.state.last_verifier.level} target=${a.state.last_verifier.target ?? "-"} lens=${a.state.last_verifier.lens.join(",") || "-"}${lensModels ? ` models=${lensModels}` : ""} reason=${a.state.last_verifier.reason}`
             : "last_verifier: (none)",
+          severityLine ? `verifier_severity: ${severityLine}` : null,
+          rubricLine,
+          `gates: ${Object.entries(a.state.gate_modes ?? state.readGateModes(root).modes)
+            .map(([k, v2]) => `${k}=${v2}`)
+            .join(" ")}${a.state.gate_modes ? "（開始時に凍結）" : "（未凍結・config の現在値）"}`,
           a.state.critic_review
             ? `critic_review: level=${a.state.critic_review.level} reason=${a.state.critic_review.reason}`
             : "critic_review: (none, opt-in)",

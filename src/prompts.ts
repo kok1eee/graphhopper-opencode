@@ -50,6 +50,10 @@ export const VERIFIER_EFFICIENCY_RULE = [
  * tool/agent の引数定義は持たない（plugin の tool が入力スキーマの正）。 */
 interface PromptDef {
   name: string;
+  /** 固定部分（役割・lensPreamble）。goal 開始時に凍結する対象（design g-mwmnvx3x 判断1） */
+  staticText: string[];
+  /** 動的部分（goalHeader・todoSection）。verify のたびに現行から作る */
+  dynamic: (root: string, goalId: string) => string[];
   render: (args: Record<string, string>, root: string) => string;
 }
 
@@ -110,60 +114,83 @@ function goalHeader(root: string, goalId: string): string {
 export const PROMPT_DEFS: PromptDef[] = [
   {
     name: "graphhopper-verifier-requirement",
+    staticText: [
+      "あなたは graphhopper の verifier（requirement lens）である。",
+      "実装が design.md の意図（done の定義）から外れていないかを検証せよ。",
+      ...lensPreamble({ parallel: true, versionGuard: true }),
+    ],
+    dynamic: (root, id) => [goalHeader(root, id)],
     render: (args, root) => {
       const id = activeGoalId(root, args["goalId"]);
       return [
-        "あなたは graphhopper の verifier（requirement lens）である。",
-        "実装が design.md の意図（done の定義）から外れていないかを検証せよ。",
-        ...lensPreamble({ parallel: true, versionGuard: true }),
+        ...PROMPT_STATIC["graphhopper-verifier-requirement"],
         "",
-        goalHeader(root, id),
+        ...PROMPT_DYNAMIC["graphhopper-verifier-requirement"](root, id),
       ].join("\n");
     },
   },
   {
     name: "graphhopper-verifier-behavior",
+    staticText: [
+      "あなたは graphhopper の verifier（behavior lens）である。",
+      "変更の挙動が正しいか、テストが実際のユーザーパスを検証しているかを検証せよ。",
+      "エッジケース・境界値・失敗時の振る舞いを見ろ。",
+      ...lensPreamble({ parallel: true, versionGuard: true }),
+    ],
+    dynamic: (root, id) => [goalHeader(root, id)],
     render: (args, root) => {
       const id = activeGoalId(root, args["goalId"]);
       return [
-        "あなたは graphhopper の verifier（behavior lens）である。",
-        "変更の挙動が正しいか、テストが実際のユーザーパスを検証しているかを検証せよ。",
-        "エッジケース・境界値・失敗時の振る舞いを見ろ。",
-        ...lensPreamble({ parallel: true, versionGuard: true }),
+        ...PROMPT_STATIC["graphhopper-verifier-behavior"],
         "",
-        goalHeader(root, id),
+        ...PROMPT_DYNAMIC["graphhopper-verifier-behavior"](root, id),
       ].join("\n");
     },
   },
   {
     name: "graphhopper-verifier-progress",
+    staticText: [
+      "あなたは graphhopper の verifier（progress lens）である。",
+      "変更が goal に収束しているか、スコープ外の膨張・未完の残骸が無いかを検証せよ。",
+      "決定の経緯・棄却した代替案が .log.md に追記されているかも見ろ。",
+      ...lensPreamble({ parallel: true, versionGuard: false }),
+    ],
+    dynamic: (root, id) => [goalHeader(root, id), todoSection(root, id)],
     render: (args, root) => {
       const id = activeGoalId(root, args["goalId"]);
-      const todos = todoSection(root, id);
+      const dyn = PROMPT_DYNAMIC["graphhopper-verifier-progress"](root, id);
       return [
-        "あなたは graphhopper の verifier（progress lens）である。",
-        "変更が goal に収束しているか、スコープ外の膨張・未完の残骸が無いかを検証せよ。",
-        "決定の経緯・棄却した代替案が .log.md に追記されているかも見ろ。",
-        ...lensPreamble({ parallel: true, versionGuard: false }),
+        ...PROMPT_STATIC["graphhopper-verifier-progress"],
         "",
-        goalHeader(root, id),
-        todos,
+        ...dyn,
       ].join("\n");
     },
   },
   {
     name: "graphhopper-verifier-general",
+    staticText: [
+      "あなたは graphhopper の verifier（general lens）である。",
+      "「実装が design.md の意図から外れていないか・テストが実際のユーザーパスを検証しているか・変更が goal に収束しているか、3観点をまとめてレビューせよ」。",
+      ...lensPreamble({ parallel: false, versionGuard: true }),
+    ],
+    dynamic: (root, id) => [goalHeader(root, id), todoSection(root, id)],
     render: (args, root) => {
       const id = activeGoalId(root, args["goalId"]);
-      const todos = todoSection(root, id);
+      const dyn = PROMPT_DYNAMIC["graphhopper-verifier-general"](root, id);
       return [
-        "あなたは graphhopper の verifier（general lens）である。",
-        "「実装が design.md の意図から外れていないか・テストが実際のユーザーパスを検証しているか・変更が goal に収束しているか、3観点をまとめてレビューせよ」。",
-        ...lensPreamble({ parallel: false, versionGuard: true }),
+        ...PROMPT_STATIC["graphhopper-verifier-general"],
         "",
-        goalHeader(root, id),
-        todos,
+        ...dyn,
       ].join("\n");
     },
   },
 ];
+
+
+/* 固定部分と動的部分の索引（verify の凍結で使う。design g-mwmnvx3x 判断1）。
+ * PROMPT_DEFS から組み立てるので、lens を足しても追随する。 */
+export const PROMPT_STATIC: Record<string, string[]> = Object.fromEntries(
+  PROMPT_DEFS.map((d) => [d.name, d.staticText]),
+);
+export const PROMPT_DYNAMIC: Record<string, (root: string, goalId: string) => string[]> =
+  Object.fromEntries(PROMPT_DEFS.map((d) => [d.name, d.dynamic]));

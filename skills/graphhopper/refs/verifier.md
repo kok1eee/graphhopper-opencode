@@ -90,6 +90,22 @@ return { stop: "clean", summaries: v.summaries, completed };
   - phase は polish のままなので巻き戻しは要らない（`tail` は `phase(done)` を呼ばない。
     done への遷移は `completeGoal` が行う）
 
+#### 採点基準の凍結（design g-mwmnvx3x 判断1）
+
+- `verify` は goal 開始時に凍結した lens 指示（固定部分）と出力契約で prompt を作る。
+  goal 中に `src/prompts.ts` / `src/verify.ts` を直しても、その goal の判定には効かない
+  （次の goal から効く）。進捗タスク・phase などの動的部分は毎回現行から作る
+- 凍結ファイル（`.graphhopper/plans/<goal>.rubric.json`）が無い・内容が合わないと
+  `verify` は止まる（`rubric_tampered`）。**verify に force は無い**。改ざん前に clean を取っていれば
+  `complete` は `verifier_self_modified` ゲートの設定に従う（既定 observe は記録して通る）。
+  取っていなければ `verifier` ゲートで complete も止まる。回避は「採点基準を戻して再検証」か
+  「新しい goal」。`graphhopper_goal(action: "complete", force: true)` は全ゲートを飛ばし、
+  observe の記録も残らない
+- `verifier_self_modified` の対象は、採点コード（`src/verify.ts` / `src/prompts.ts` / `src/state.ts`）と
+  verifier の system prompt（agent md）、および凍結ファイルの欠落・不一致（改ざん）。
+  `verify` では記録のみ（改ざんは除く。改ざんは verify を止める）、`complete` でゲート設定に従う
+- 凍結されていない旧 goal は従来どおり現行の基準で走る（fail-open）
+
 #### 何が自動で守られるか（散文で守らなくてよい）
 
 - **path の受け渡し**: `verify` が design・意図ログ・退避 diff・診断の path を自分で解決して

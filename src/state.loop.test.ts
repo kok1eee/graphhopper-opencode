@@ -47,6 +47,7 @@ import {
   readHistory,
   readState,
   recordAttempt,
+  DEFAULT_GATES,
   recordEvent,
   resetLoopForClear,
   resumeGoal,
@@ -65,6 +66,7 @@ import {
 } from "./state";
 
 const CFG: GraphhopperConfig = {
+  gates: DEFAULT_GATES,
   router_threshold_lines: 400,
   design_gate_allow: [".graphhopper/plans/"],
   agents: {},

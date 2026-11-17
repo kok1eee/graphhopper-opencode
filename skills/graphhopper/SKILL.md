@@ -300,6 +300,29 @@ compaction時はd1 keep-listが自動注入される（要約落ち防止の制�
 > 詳細は [refs/gotchas.md](refs/gotchas.md) を読め（該当時に参照）
 
 
+## 検証のゲートと採点基準の凍結
+
+- **採点基準は goal 開始時に凍結される**。verifier の lens 指示（固定部分）と出力契約は
+  `.graphhopper/plans/<goal>.rubric.json` の文面で走る。goal 中に `src/prompts.ts` や
+  `src/verify.ts` を直しても、その goal の検証には効かない（次の goal から効く）
+- 凍結ファイルを消す・書き換えると `verify` は止まる（`rubric_tampered`）。**verify に force は無い**。
+  改ざん前に clean を取っていれば `complete` はゲート設定に従う（既定 observe は記録して通る）。
+  取っていなければ `verifier` ゲート（既定 enforce）で complete も止まるので、採点基準を戻して
+  再検証するか、新しい goal でやり直す（`force` は complete 専用で、全ゲートをまとめて飛ばす。
+  force すると observe の記録も残らない）
+- **complete のゲートは goal 開始時に凍結される**（`.graphhopper/config.json` の `gates`）。
+  各ゲートは `enforce`（拒否）か `observe`（理由を history に記録して通す）。既定は usability /
+  verifier / diff_hash が enforce、`verifier_self_modified` が observe（verifier 自体を直す goal を
+  止めないため）。goal 中に config を変えても効かない
+- `verifier_self_modified` は「採点コード（`src/verify.ts` / `src/prompts.ts` / `src/state.ts`）か
+  verifier の system prompt（agent md）が goal 中に変わった」ことを検知するゲート。
+  凍結ファイルの欠落・不一致（改ざん）も同じゲートで扱う
+- verifier の出力 json には任意で `severity`（`{must_fix,should_fix,nit,pre_existing}`）を付ける
+  （`graphhopper_verifier_set` では lens ごとの `severity` 引数）。**重要度の目安**で
+  drift/clean の判定は変えない。数えられないときは省略し、`0` と書かない（未申告と 0 件は別物。
+  status の `verifier_severity` 行で `（behavior: 未申告）` のように出る）
+
+
 ## ユーザーの承認が要るもの
 
 次は実行前にユーザーへ聞き、承認を得てから進める（goal 中の phase 遷移では代替できない）。

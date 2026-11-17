@@ -1419,3 +1419,101 @@ describe("plugin tool: 難易度の判定（design g-mwjsd3om 判断4・6）", (
     });
   });
 });
+
+describe("plugin tool: complete ゲートの observe（design g-mwmnvx3x 判断3）", () => {
+  const writeGates = (root: string, gates: Record<string, string>) => {
+    mkdirSync(join(root, ".graphhopper"), { recursive: true });
+    writeFileSync(
+      join(root, ".graphhopper", "config.json"),
+      JSON.stringify({ gates }, null, 2),
+      "utf8",
+    );
+  };
+  const historyTypes = (root: string): Record<string, unknown>[] => {
+    try {
+      return readFileSync(join(root, ".graphhopper", "history.jsonl"), "utf8")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as Record<string, unknown>);
+    } catch {
+      return [];
+    }
+  };
+
+  test("observe なら拒否理由を記録して complete が通る", async () => {
+    const root = tmpRoot();
+    writeGates(root, { verifier: "observe", usability: "enforce", diff_hash: "enforce" });
+    startGoal(root, "observe test", "s1");
+    const out = await tools(root)
+      .get("graphhopper_goal")!
+      .execute({ action: "complete" }, { sessionID: "s1" });
+    expect(textOf(out)).toContain("completed");
+    expect(textOf(out)).toContain("observe で通したゲート: verifier");
+    const rows = historyTypes(root);
+    const observed = rows.find((r) => r["type"] === "complete_gate_observe");
+    expect(observed).toMatchObject({ gate: "verifier" });
+    expect(String(observed?.["reason"])).toContain("verifier");
+  });
+
+  test("enforce なら従来どおり拒否する", async () => {
+    const root = tmpRoot();
+    startGoal(root, "enforce test", "s1");
+    const out = await tools(root)
+      .get("graphhopper_goal")!
+      .execute({ action: "complete" }, { sessionID: "s1" });
+    expect(textOf(out)).toContain("error:");
+    expect(textOf(out)).toContain("graphhopper_verifier_set");
+  });
+
+  test("goal 開始時に凍結したモードは、goal 中の config 変更で変わらない", async () => {
+    const root = tmpRoot();
+    startGoal(root, "frozen test", "s1");
+    const state = await import("./state");
+    state.freezeGoalGates(root, state.DEFAULT_GATES, null);
+    /* goal の途中で config を緩める */
+    writeGates(root, { verifier: "observe", usability: "observe", diff_hash: "observe" });
+    const out = await tools(root)
+      .get("graphhopper_goal")!
+      .execute({ action: "complete" }, { sessionID: "s1" });
+    expect(textOf(out)).toContain("error:");
+  });
+
+  test("rubric の凍結ファイルが消えたら verifier_self_modified ゲート（既定 observe）で記録して通す", async () => {
+    const root = tmpRoot();
+    startGoal(root, "tamper test", "s1");
+    const state = await import("./state");
+    const verify = await import("./verify");
+    state.freezeGoalGates(
+      root,
+      {
+        usability: "observe",
+        verifier: "observe",
+        diff_hash: "observe",
+        verifier_self_modified: "observe",
+      },
+      "deadbeef",
+    );
+    expect(verify.loadRubric(root, state.getActive(root)!.goal.id)).toBeNull();
+    const out = await tools(root)
+      .get("graphhopper_goal")!
+      .execute({ action: "complete" }, { sessionID: "s1" });
+    expect(textOf(out)).toContain("completed");
+    expect(textOf(out)).toContain("verifier_self_modified");
+    const rows = historyTypes(root);
+    expect(rows.some((r) => r["type"] === "complete_gate_observe" && r["gate"] === "verifier_self_modified")).toBe(true);
+  });
+
+  test("status にゲートの実効モードと rubric の状態が出る", async () => {
+    const root = tmpRoot();
+    startGoal(root, "status test", "s1");
+    const state = await import("./state");
+    state.freezeGoalGates(root, state.DEFAULT_GATES, null);
+    const out = await tools(root).get("graphhopper_status")!.execute({}, { sessionID: "s1" });
+    const body = textOf(out);
+    expect(body).toContain("gates:");
+    expect(body).toContain("verifier_self_modified=observe");
+    expect(body).toContain("（開始時に凍結）");
+    expect(body).toContain("rubric: 未凍結（legacy goal）");
+  });
+});

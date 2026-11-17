@@ -29,6 +29,7 @@ import {
   runGraphhopperEdit,
 } from "./gate";
 import {
+  DEFAULT_GATES,
   isDesignDocLocked,
   isDesignGateBlocked,
   startGoal,
@@ -37,6 +38,7 @@ import {
 } from "./state";
 
 const CFG: GraphhopperConfig = {
+  gates: DEFAULT_GATES,
   router_threshold_lines: 400,
   design_gate_allow: [".graphhopper/plans/"],
   agents: {},

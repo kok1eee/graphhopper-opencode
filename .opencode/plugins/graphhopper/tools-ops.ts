@@ -17,6 +17,7 @@ import { INTERNAL_PROMPT_METADATA_KEY } from "../../../src/entry-decide";
 import { latestSummary } from "../../../src/compaction-store";
 import * as handoff from "../../../src/handoff";
 import { MAX_TIMEOUT_MS, invokeStructured, resolveModel } from "../../../src/invoke";
+import { rubricStatus } from "../../../src/verify";
 import { formatScoreboard } from "../../../src/scoreboard-format";
 import { catalogPolicyWarning } from "../../../src/bake";
 import { buildLensPrompt, invokeFailure, lensPaths, parseLensVerdict } from "../../../src/verify";
@@ -31,6 +32,8 @@ interface LensRun {
   level?: state.VerdictLevel;
   target?: state.DriftTarget;
   summary?: string;
+  /** 重要度の件数（未申告は undefined。design g-mwmnvx3x 判断4） */
+  severity?: state.VerifierSeverityCounts;
   body: string;
   reason?: string;
 }
@@ -161,6 +164,11 @@ export function registerOpsTools(
               level: S.enumOf(["clean", "drift"]),
               target: S.enumOf(["implementing", "design", "requirements"], "drift時の巻き戻し先（level=drift なら必須）。clean時は不要"),
               model: S.optStr("このlensを実行したモデル（deep時の上位モデル等。省略時はトップレベルmodel→config既定）"),
+              severity: {
+                type: "object",
+                description:
+                  "重要度の件数（任意）。{must_fix,should_fix,nit,pre_existing}。判定は変えない観測値。数えられないなら省略（未申告）し、0 と書かない",
+              },
             },
             ["lens", "level"],
           ),
@@ -199,6 +207,7 @@ export function registerOpsTools(
       const diffHash =
         state.getStashDiffHash(root) ??
         (await state.computeDiffHash($, root, baseline));
+      const severityEntries = state.collectSeverity(results);
       const result = state.setVerifierVerdict(root, {
         level: decided.level,
         reason: args.reason,
@@ -207,7 +216,13 @@ export function registerOpsTools(
         model: args.model,
         models: results.map((r) => r.model ?? args.model ?? null),
         diff_hash: diffHash,
+        severity: severityEntries,
       });
+      /* severity の矛盾（clean なのに must-fix）は記録だけ（判定は変えない） */
+      const sev = state.sumSeverity(severityEntries);
+      if (decided.level === "clean" && sev.must_fix > 0 && active) {
+        state.recordEvent(root, { type: "severity_inconsistent", goal: active.goal.id, must_fix: sev.must_fix });
+      }
       const lens = results.map((r) => r.lens);
       if (result.last_verifier?.level === "clean") {
         const next = "graphhopper_goal(action: 'complete')（done への遷移は complete が行う）";
@@ -424,6 +439,26 @@ export function registerOpsTools(
       const active = state.getActive(root);
       if (!active) throw new Error("no active goal");
       const goalId = active.goal.id;
+      /* 採点基準の改ざんは検証を止める（design g-mwmnvx3x 判断1）。
+       * 採点コード/system prompt の変更は記録だけ（complete のゲートで扱う） */
+      if (active.state.rubric_hash) {
+        const rs = rubricStatus(root, goalId, active.state.rubric_hash);
+        if (!rs.frozen || rs.tampered) {
+          throw new Error(
+            "rubric_tampered: 採点基準の凍結ファイルが無い／内容が開始時と違います。" +
+              "採点基準を戻すか、新しい goal でやり直してください（verify に force は無い）",
+          );
+        }
+        if (rs.changed) state.recordEvent(root, { type: "rubric_changed", goal: goalId });
+        if (rs.selfModified) {
+          state.recordEvent(root, {
+            type: "verifier_self_modified",
+            goal: goalId,
+            code: rs.codeChanged,
+            agent: rs.agentChanged,
+          });
+        }
+      }
       const plan = state.planVerifier({
         route: active.state.router.route,
         entryRoute: active.state.entry_route,
@@ -489,6 +524,7 @@ export function registerOpsTools(
             level: parsed.verdict.level,
             ...(parsed.verdict.target ? { target: parsed.verdict.target } : {}),
             summary: parsed.verdict.summary,
+            ...(parsed.verdict.severity ? { severity: parsed.verdict.severity } : {}),
             body: r.output,
           };
         }),
@@ -504,6 +540,7 @@ export function registerOpsTools(
           level: x.level as state.VerdictLevel,
           ...(x.target ? { target: x.target as state.DriftTarget } : {}),
           ...(modelName ? { model: modelName } : {}),
+          ...(x.severity ? { severity: x.severity } : {}),
           summary: x.summary ?? "",
         }));
       const merged = state.mergeSavedVerify(state.readSavedVerify(root, goalId), current, next).filter(

@@ -15,5 +15,11 @@
         "graphhopper-simplify": "claude-oauth/claude-sonnet-5-5"
       }
     }
+  },
+  "gates": {
+    "usability": "enforce",
+    "verifier": "enforce",
+    "diff_hash": "enforce",
+    "verifier_self_modified": "observe"
   }
 }
