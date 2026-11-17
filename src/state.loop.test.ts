@@ -1320,6 +1320,8 @@ describe("design scaffold＋構造ゲート", () => {
     const raw = readFileSync(p, "utf8");
     expect(raw).toContain("## 1. goal理解");
     expect(raw).toContain("## 4. 実装タスク列");
+    /* 承認の要否を design 時点で書かせる（design g-mwkgfssi 判断5） */
+    expect(raw).toContain("## 6. ユーザーの承認が要るもの");
     writeFileSync(p, "# custom\n");
     expect(scaffoldDesignDoc(root, g.id, "t")).toBe(false);
     expect(readFileSync(p, "utf8")).toBe("# custom\n");
@@ -2772,6 +2774,100 @@ describe("baseline の一元解決（design g-mwfltxyt）", () => {
       }),
     ).toBe("b");
     expect(await s.resolveBaseline(noShell, root, null)).toBeNull();
+  });
+});
+
+describe("captureStartBaseline / captureBaselineRev（design g-mwkgfssi 判断1・2）", () => {
+  /** sh -c のコマンド文字列を見て結果を返す fake shell。発行されたコマンドも記録する */
+  const fakeShell = (replies: Array<{ match: (cmd: string) => boolean; out: string }>) => {
+    const issued: string[] = [];
+    const shell = ((_strings: TemplateStringsArray, ...vals: unknown[]) => {
+      const cmd = String(vals[0] ?? "");
+      issued.push(cmd);
+      const hit = replies.find((r) => r.match(cmd));
+      const out = hit?.out ?? "";
+      const exitCode = hit ? 0 : 1;
+      return {
+        cwd: () => ({
+          nothrow: () => ({
+            quiet: () =>
+              Promise.resolve({
+                exitCode,
+                stdout: { toString: () => out },
+              }),
+          }),
+        }),
+      };
+    }) as unknown as Parameters<typeof import("./state").captureStartBaseline>[0];
+    return { shell, issued };
+  };
+
+  test("jj は @ の commit id を返す（heads() を使わない）", async () => {
+    const s = await import("./state");
+    const { shell, issued } = fakeShell([
+      { match: (c) => c.startsWith("jj log"), out: "abc123\n" },
+    ]);
+    const r = await s.captureStartBaseline(shell, tmpRoot());
+    expect(r).toEqual({ rev: "abc123", source: "jj@" });
+    expect(issued[0]).toContain("-r @");
+    expect(issued.join("\n")).not.toContain("heads()");
+  });
+
+  test("jj が失敗したら git の一時 index で作業コピーの commit を作る", async () => {
+    const s = await import("./state");
+    const { shell, issued } = fakeShell([
+      { match: (c) => c.startsWith("jj log"), out: "" },
+      { match: (c) => c.includes("commit-tree"), out: "def456\n" },
+    ]);
+    const r = await s.captureStartBaseline(shell, tmpRoot());
+    expect(r).toEqual({ rev: "def456", source: "git-worktree" });
+    const worktreeCmd = issued.find((c) => c.includes("commit-tree")) ?? "";
+    /* 実 index を汚さない（GIT_INDEX_FILE を分ける）・未追跡も含める（add -A） */
+    expect(worktreeCmd).toContain("GIT_INDEX_FILE");
+    expect(worktreeCmd).toContain("add -A");
+  });
+
+  test("jj も一時 index も失敗したら stash create → HEAD の順に落ちる", async () => {
+    const s = await import("./state");
+    const stashOnly = fakeShell([
+      { match: (c) => c.startsWith("jj log"), out: "" },
+      { match: (c) => c.includes("commit-tree"), out: "" },
+      { match: (c) => c.startsWith("git stash create"), out: "ccc777\n" },
+    ]);
+    expect(await s.captureStartBaseline(stashOnly.shell, tmpRoot())).toEqual({
+      rev: "ccc777",
+      source: "git-stash",
+    });
+
+    const headOnly = fakeShell([
+      { match: (c) => c.startsWith("jj log"), out: "" },
+      { match: (c) => c.includes("commit-tree"), out: "" },
+      { match: (c) => c.startsWith("git rev-parse HEAD"), out: "ddd888\n" },
+    ]);
+    expect(await s.captureStartBaseline(headOnly.shell, tmpRoot())).toEqual({
+      rev: "ddd888",
+      source: "git-HEAD",
+    });
+  });
+
+  test("どれも取れなければ null（fail-open）", async () => {
+    const s = await import("./state");
+    const { shell } = fakeShell([]);
+    expect(await s.captureStartBaseline(shell, tmpRoot())).toBeNull();
+    expect(await s.captureBaselineRev(shell, tmpRoot())).toBeNull();
+  });
+
+  test("captureBaselineRev は最後に commit された rev（jj @- / git HEAD）", async () => {
+    const s = await import("./state");
+    const jj = fakeShell([{ match: (c) => c.startsWith("jj log"), out: "eee999\n" }]);
+    expect(await s.captureBaselineRev(jj.shell, tmpRoot())).toBe("eee999");
+    expect(jj.issued[0]).toContain("-r '@-'");
+
+    const git = fakeShell([
+      { match: (c) => c.startsWith("jj log"), out: "" },
+      { match: (c) => c.startsWith("git rev-parse HEAD"), out: "fff000\n" },
+    ]);
+    expect(await s.captureBaselineRev(git.shell, tmpRoot())).toBe("fff000");
   });
 });
 

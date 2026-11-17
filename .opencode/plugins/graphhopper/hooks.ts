@@ -643,7 +643,10 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
 
 /** 子セッション（subagent）か。parentID があれば親あり。
  * 取得失敗・時間切れは null（不明）を返す。不明は「判定しない」側に倒す
- * （design g-mwkfisl7 判断2。subagent の内部 prompt を decisions.jsonl に混ぜない） */
+ * （design g-mwkfisl7 判断2。subagent の内部 prompt を decisions.jsonl に混ぜない）。
+ * 不明は判定しないので、待つ意味は薄い。400ms で打ち切る（design g-mwkgfssi 判断4） */
+const CHILD_SESSION_LOOKUP_TIMEOUT_MS = 400;
+
 async function isChildSession(
   ctx: Gh["ctx"],
   sessionID: string,
@@ -652,7 +655,7 @@ async function isChildSession(
     /* admission 経路なので応答が詰まるとユーザー入力が止まる。短く切る */
     const info = await ctx.session.get(
       { sessionID },
-      { signal: AbortSignal.timeout(1000) },
+      { signal: AbortSignal.timeout(CHILD_SESSION_LOOKUP_TIMEOUT_MS) },
     );
     return !!info?.parentID;
   } catch {

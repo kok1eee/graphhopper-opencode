@@ -195,6 +195,9 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
 - 骨格（goal理解／現状／設計判断／タスク列／棄却＋タスク行）を埋める。
   **骨格不足だと `implementing` 遷移が機械拒否される**（構造のみ・質はcriticの領分）。
   中身をゼロから書く必要は無い、scaffoldを埋めればよい
+- 骨格の「6. ユーザーの承認が要るもの」は必ず埋める（無ければ「なし（理由: …）」）。
+  基準はこの文書の「ユーザーの承認が要るもの」節。ここで書いた項目は implementing 中に
+  ユーザーへ確認する（design の時点で洗い出すことで、実装中の手戻りと無断の本番操作を防ぐ）
 - **このフェーズではsource編集（Edit/Write）が `tool.execute.before` hookで物理ブロックされる**
   （許可パスは `.graphhopper/plans/` 配下のみ、`.graphhopper/config.json` の `design_gate_allow` で変更可）
 - 書けたら **full / 未判定 / oracle 入口では advisor を呼ぶかを難易度で決める**（分岐は入口別の表の下）。

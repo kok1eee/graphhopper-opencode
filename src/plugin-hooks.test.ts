@@ -56,9 +56,20 @@ function fakeCtx(opts: {
     tool: { hook: async (name: string, cb: HookCb) => add(name, cb) },
     session: {
       hook: async (name: string, cb: HookCb) => add(name, cb),
-      get: async ({ sessionID }: { sessionID: string }) => {
+      get: async (
+        { sessionID }: { sessionID: string },
+        getOpts?: { signal?: AbortSignal },
+      ) => {
         if (opts.get === "throws") throw new Error("session get failed");
-        if (opts.get === "hangs") await new Promise(() => {});
+        if (opts.get === "hangs") {
+          /* 実 API と同じく signal で打ち切られる（design g-mwkgfssi 判断4） */
+          await new Promise((_resolve, reject) => {
+            const signal = getOpts?.signal;
+            if (!signal) return;
+            if (signal.aborted) reject(new Error("aborted"));
+            signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+          });
+        }
         return {
           id: sessionID,
           parentID: opts.parentID ?? null,
@@ -267,7 +278,10 @@ describe("plugin hook: 入口d1判定の prompt hook", () => {
         if (!promptHook) throw new Error("hook が登録されていない");
         startGoal(root, "手切れのテスト", "ses_a");
         writeHandoff(root, { sessionID: "ses_a" });
+        const startedAt = Date.now();
         await promptHook({ sessionID: "s-new", prompt: { text: "続きをやる" } });
+        /* 待ちは 400ms（design g-mwkgfssi 判断4）。hook 予算 1500ms まで待たない */
+        expect(Date.now() - startedAt).toBeLessThan(600);
         const rows = readRows(root);
         expect(rows.some((r) => r.kind === "decide")).toBe(false);
         expect(rows[0]).toMatchObject({ kind: "decide-skip", result: "child_unknown" });

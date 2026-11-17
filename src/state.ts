@@ -100,6 +100,8 @@ export interface GoalSnapshot {
   usability_review: UsabilityVerdict | null;
   /** goal 開始時の baseline rev（commit）。usability と diff hash の基準に使う */
   start_baseline_rev: string | null;
+  /** baseline の取得元（design g-mwkgfssi）。旧 state は null */
+  baseline_source: BaselineSource | null;
   /** goal start の strong: true（goal の間だけ強いモデルで回す） */
   strong_mode: boolean;
 }
@@ -328,6 +330,8 @@ export interface LoopState {
   usability_review: UsabilityVerdict | null;
   /** goal 開始時の baseline rev（commit）。usability と diff hash の基準に使う */
   start_baseline_rev: string | null;
+  /** baseline の取得元（design g-mwkgfssi）。旧 state は null */
+  baseline_source: BaselineSource | null;
   /** goal start の strong: true（goal の間だけ強いモデルで回す） */
   strong_mode: boolean;
   /** 入口判定のroute。null＝full（未呼び出し・legacy）。light/advised→full昇格のみ可 */
@@ -800,6 +804,11 @@ export function designTemplate(goalId: string, title: string): string {
     ``,
     `- （この goal で変えないもの。境界を具体的に）`,
     ``,
+    `## 6. ユーザーの承認が要るもの`,
+    ``,
+    `- （本番変更・戻せない削除・push・キー操作など。基準は skills/graphhopper/SKILL.md の`,
+    `  「ユーザーの承認が要るもの」節。無ければ「なし（理由: …）」と書く）`,
+    ``,
   ].join("\n");
 }
 
@@ -1238,6 +1247,7 @@ function emptyState(): LoopState {
     intent_path: null,
     usability_review: null,
     start_baseline_rev: null,
+    baseline_source: null,
     strong_mode: false,
     updated_at: new Date().toISOString(),
   };
@@ -1396,6 +1406,7 @@ export function pauseGoal(root: string): ActiveLoop | null {
         intent_path: state.intent_path,
         usability_review: state.usability_review,
         start_baseline_rev: state.start_baseline_rev,
+        baseline_source: state.baseline_source,
         strong_mode: state.strong_mode,
       },
     },
@@ -1459,6 +1470,7 @@ export function resumeGoal(
               intent_path: snap.intent_path ?? null,
               usability_review: snap.usability_review ?? null,
               start_baseline_rev: snap.start_baseline_rev ?? null,
+              baseline_source: snap.baseline_source ?? null,
               strong_mode: snap.strong_mode ?? false,
             }
           : {}),
@@ -2120,37 +2132,82 @@ export function unbindSession(root: string, sessionID: string): void {
 import type { $ as BunShell } from "bun";
 type Shell = typeof BunShell;
 
-/** baseline_rev を VCS から取得（jj → git → null） */
+/** baseline の取得元（goal start の応答と state に残す。design g-mwkgfssi 判断3） */
+export type BaselineSource = "jj@" | "git-worktree" | "git-stash" | "git-HEAD";
+
+/** goal 開始時の baseline: **作業コピーそのもの**の commit。
+ *
+ * jj: `@`（コマンド実行前の自動スナップショット＝未 commit 分を含む）の commit id。
+ *     `heads()` はこの jj で引数必須のため使わない（旧実装は常に失敗し git に落ちていた）。
+ * git: 未追跡も含めた「今の状態」の commit を一時 index で作る（作業ツリーと実 index は触らない）。
+ *     失敗時は `git stash create`、次に HEAD。
+ *
+ * 実行時のフォールバック（start_baseline_rev が無い legacy goal）は captureBaselineRev を使う。
+ * そちらは「最後に commit された状態」を返す（作業コピーを基準にすると差分が常に 0 になる）。
+ */
+export async function captureStartBaseline(
+  shell: Shell,
+  root: string,
+): Promise<{ rev: string; source: BaselineSource } | null> {
+  const run = async (cmd: string): Promise<string | null> => {
+    try {
+      const r = await shell`sh -c ${cmd}`.cwd(root).nothrow().quiet();
+      const out = r.stdout.toString().trim();
+      if (r.exitCode !== 0 || !out) return null;
+      const rev = out.split("\n")[0] ?? null;
+      return rev && isValidBaselineRev(rev) ? rev : null;
+    } catch {
+      return null;
+    }
+  };
+
+  /* jj: 作業コピーの commit id（未 commit 分を含む） */
+  const jj = await run("jj log -r @ -T commit_id --no-graph");
+  if (jj) return { rev: jj, source: "jj@" };
+
+  /* git: 一時 index に全変更（未追跡含む）を載せて commit を作る。
+   * GIT_INDEX_FILE を分けるので実 index は変わらない。 */
+  const worktree = await run(
+    [
+      'idx=$(mktemp) || exit 1',
+      "GIT_INDEX_FILE=$idx git read-tree HEAD || { rm -f $idx; exit 1; }",
+      "GIT_INDEX_FILE=$idx git add -A . || { rm -f $idx; exit 1; }",
+      'tree=$(GIT_INDEX_FILE=$idx git write-tree) || { rm -f $idx; exit 1; }',
+      "rm -f $idx",
+      'git commit-tree "$tree" -p HEAD -m "graphhopper baseline"',
+    ].join("; "),
+  );
+  if (worktree) return { rev: worktree, source: "git-worktree" };
+
+  const stash = await run("git stash create");
+  if (stash) return { rev: stash, source: "git-stash" };
+
+  const head = await run("git rev-parse HEAD");
+  if (head) return { rev: head, source: "git-HEAD" };
+  return null;
+}
+
+/** 最後に commit された rev（jj: `@-`、git: HEAD）。start_baseline_rev が無い
+ * legacy goal の差分測定に使う。作業コピーを基準にすると差分が常に 0 になるため、
+ * goal start では captureStartBaseline を使う（design g-mwkgfssi 判断1・2）。 */
 export async function captureBaselineRev(
   shell: Shell,
   root: string,
 ): Promise<string | null> {
-  try {
-    const r =
-      await shell`sh -c ${"jj log -r 'heads() & ~empty()' -T commit_id --no-graph --limit 1"}`
-        .cwd(root)
-        .nothrow()
-        .quiet();
-    const out = r.stdout.toString().trim();
-    if (r.exitCode === 0 && out) {
+  const run = async (cmd: string): Promise<string | null> => {
+    try {
+      const r = await shell`sh -c ${cmd}`.cwd(root).nothrow().quiet();
+      const out = r.stdout.toString().trim();
+      if (r.exitCode !== 0 || !out) return null;
       const rev = out.split("\n")[0] ?? null;
-      if (rev && isValidBaselineRev(rev)) return rev;
+      return rev && isValidBaselineRev(rev) ? rev : null;
+    } catch {
       return null;
     }
-  } catch {
-    // ignore
-  }
-  try {
-    const r = await shell`sh -c ${"git rev-parse HEAD"}`
-      .cwd(root)
-      .nothrow()
-      .quiet();
-    const out = r.stdout.toString().trim();
-    if (r.exitCode === 0 && out && isValidBaselineRev(out)) return out;
-  } catch {
-    // ignore
-  }
-  return null;
+  };
+  const jj = await run("jj log -r '@-' -T commit_id --no-graph");
+  if (jj) return jj;
+  return run("git rev-parse HEAD");
 }
 
 /** baseline_rev の形式検証（jj commit_id / git sha は共に full hex）。
@@ -2581,9 +2638,13 @@ export function usabilityStale(root: string): boolean {
 }
 
 /** goal 開始時の baseline rev を保存する（design g-mwfltxyt） */
-export function setStartBaselineRev(root: string, rev: string | null): void {
+export function setStartBaselineRev(
+  root: string,
+  rev: string | null,
+  source: BaselineSource | null = null,
+): void {
   const state = readState(root);
-  writeState(root, { ...state, start_baseline_rev: rev });
+  writeState(root, { ...state, start_baseline_rev: rev, baseline_source: source });
 }
 
 /** usability レビュー結果を保存する（design g-mwfltxyt） */

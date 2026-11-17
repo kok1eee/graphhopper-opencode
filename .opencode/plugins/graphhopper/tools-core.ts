@@ -196,11 +196,11 @@ export function registerCoreTools(
             difficulty: judged,
           });
           try {
-            const rev = await state.captureBaselineRev($, root);
-            if (rev) {
-              state.setStartBaselineRev(root, rev);
-              state.snapshotInitialDirt(root, await state.measureDiffLines($, root, rev));
-              state.snapshotInitialDiffFiles(root, await state.measureChangedFiles($, root, rev));
+            const captured = await state.captureStartBaseline($, root);
+            if (captured) {
+              state.setStartBaselineRev(root, captured.rev, captured.source);
+              state.snapshotInitialDirt(root, await state.measureDiffLines($, root, captured.rev));
+              state.snapshotInitialDiffFiles(root, await state.measureChangedFiles($, root, captured.rev));
             }
           } catch {
             // 測定不能は無視（initial null＝旧挙動）
@@ -248,8 +248,18 @@ export function registerCoreTools(
               ? "strong: on（goal の間は cascade.strong→expert→escalate）"
               : "strong: 指定されたが cascade が無効のため効かない"
             : "";
+          /* baseline の由来を見える化する（design g-mwkgfssi 判断3）。
+           * 前 goal は baseline が親 commit になり、今回の変更が実効 diff から漏れた */
+          const bs = started.state;
+          const baselineNote = bs.start_baseline_rev
+            ? `baseline: ${bs.baseline_source ?? "不明"} ${bs.start_baseline_rev.slice(0, 8)}${
+                bs.baseline_source === "git-HEAD"
+                  ? "（開始前の未 commit は含まない）"
+                  : "（開始前の未 commit を基準に含む）"
+              }`
+            : "baseline: 取得できず（差分ゲートは fail-open・未 commit があると実効 diff が漏れうる）";
           return text(
-            `goal started: "${started.goal.title}" (${started.goal.id})\n${consumed}${started.state.difficulty ? ` / difficulty=${started.state.difficulty}` : ""}\nphase: designing${cascadeNote ? `\n${cascadeNote}` : ""}${strongNote ? `\n${strongNote}` : ""}${intentNote ? `\n${intentNote}` : ""}\n次: ${effectivePhaseAction("designing", started.state.entry_route, started.state.difficulty)}`,
+            `goal started: "${started.goal.title}" (${started.goal.id})\n${consumed}${started.state.difficulty ? ` / difficulty=${started.state.difficulty}` : ""}\nphase: designing${cascadeNote ? `\n${cascadeNote}` : ""}${strongNote ? `\n${strongNote}` : ""}${intentNote ? `\n${intentNote}` : ""}\n${baselineNote}\n次: ${effectivePhaseAction("designing", started.state.entry_route, started.state.difficulty)}`,
           );
         }
         case "pause": {
