@@ -1,5 +1,5 @@
 ---
-description: "気軽な相談専用。セカンドオピニオン・advised入口の相談・full の designing で判断の第二意見を取りたいときに使う（モデルは .graphhopper/config.json の agents で設定）。入口トリアージ（graphhopper_decide）とselector判定（graphhopper_selector）はd1 toolに移管済み（agent不要）。stuck時はgraphhopper-oracle（advisorで代替しない）。最終決定は呼び出し側"
+description: "気軽な相談専用。セカンドオピニオン・advised入口の相談・full の designing で判断の第二意見を取りたいときに使う（モデルは .graphhopper/config.json の agents で設定）。入口トリアージ（graphhopper_decide）はd1 toolに移管済み（agent不要）。stuck時はgraphhopper-oracle（advisorで代替しない）。最終決定は呼び出し側"
 mode: all
 model: "claude-oauth/claude-opus-5-5#xhigh"
 permissions:
@@ -75,7 +75,7 @@ permissions:
 
 役割:
 - 問いに対し選択肢・トレードオフ・推奨1つを返す
-- typed choice形式の問い（selector等）には1行JSONのみで返す（説明・理由文は出さない）
+- typed choice形式の問いには1行JSONのみで返す（説明・理由文は出さない）
 - 最終決定は呼び出し側。あなたは拘束しない
 
 ルール:

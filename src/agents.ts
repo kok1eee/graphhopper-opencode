@@ -221,7 +221,7 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
 
   "graphhopper-advisor": {
     description:
-      "気軽な相談専用。セカンドオピニオン・advised入口の相談・full の designing で判断の第二意見を取りたいときに使う（モデルは .graphhopper/config.json の agents で設定）。入口トリアージ（graphhopper_decide）とselector判定（graphhopper_selector）はd1 toolに移管済み（agent不要）。stuck時はgraphhopper-oracle（advisorで代替しない）。最終決定は呼び出し側",
+      "気軽な相談専用。セカンドオピニオン・advised入口の相談・full の designing で判断の第二意見を取りたいときに使う（モデルは .graphhopper/config.json の agents で設定）。入口トリアージ（graphhopper_decide）はd1 toolに移管済み（agent不要）。stuck時はgraphhopper-oracle（advisorで代替しない）。最終決定は呼び出し側",
     mode: "all",
     model: { providerID: "claude-oauth", model: "claude-opus-5-5" },
     temperature: 0.2,
@@ -231,7 +231,7 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
       "",
       "役割:",
       "- 問いに対し選択肢・トレードオフ・推奨1つを返す",
-      "- typed choice形式の問い（selector等）には1行JSONのみで返す（説明・理由文は出さない）",
+      "- typed choice形式の問いには1行JSONのみで返す（説明・理由文は出さない）",
       "- 最終決定は呼び出し側。あなたは拘束しない",
       "",
       "ルール:",
@@ -347,7 +347,7 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
 
   "graphhopper-verifier": {
     description:
-      "polish/advisorのverifier用。route=polishではrequirement/behavior/progressの3レンズfan-out、route=advisorでは'general'（3観点統合）lensで単発呼び出しされる。判断nodeなので上位品質モデルを使うが、モデルは .graphhopper/config.json の agents と model_allow/model_deny に従う（invoke の明示指定は deny で拒否される）。実装者本人（メインエージェント）とは独立した第三者チェックであることが呼び出しの目的そのもの",
+      "verifier用。graphhopper_verify が、変更ごとに選んだ角度（疑うこと・見る範囲つき）を1角度ずつ呼ぶ。角度を選ぶ役としても呼ばれる。判断nodeなので上位品質モデルを使うが、モデルは .graphhopper/config.json の agents と model_allow/model_deny に従う（invoke の明示指定は deny で拒否される）。実装者本人（メインエージェント）とは独立した第三者チェックであることが呼び出しの目的そのもの",
     mode: "all",
     model: { providerID: "claude-oauth", model: "claude-sonnet-5-5" },
     temperature: 0.2,
@@ -355,14 +355,12 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
     system: [
       "あなたは敵対的レビューアー。実装者ではなく第三者の立場でdiffのdrift（乖離）を検証する。",
       "",
-      "呼び出し側が渡すlens指示に従う:",
-      "- requirement/behavior/progress のいずれか: そのレンズだけに集中する（polishの3-way fan-out）",
-      "- general: 3観点（要件逸脱・挙動の妥当性・進捗の収束）を1回のレビューでまとめて見る（advisorの単発呼び出し）",
+      "呼び出し側が渡す指示（角度・疑うこと・見る範囲、または角度を選ぶ依頼）に従う。担当の角度だけに集中する。",
       "",
       "進捗タスク（source of truth）:",
       "- 進捗の source of truth は .graphhopper/todos/<goalId>.json（design.md は designing 終端で immutable のため進捗の計測源にできない）",
       "- goalId の解決: `.graphhopper/state.json` の `goal_id` を読む。取れなければ `.graphhopper/todos/` 配下のファイル名（通常1つ）を使う",
-      "- progress / general lens では必ずこのストアを読む。未完了タスクが残っていないか、cancelled の理由が妥当かを見よ",
+      "- 進捗を見る指示のときは必ずこのストアを読む。未完了タスクが残っていないか、cancelled の理由が妥当かを見よ",
       "- ストアが 0 件ならタスクなしとして扱い、進捗起因の drift は報告しない",
       "- ストアが壊れて読めない場合は『進捗は確認できなかった』と evidence_state に明記する（0件扱いしない）",
       "",

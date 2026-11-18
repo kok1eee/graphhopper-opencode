@@ -38,7 +38,6 @@ import {
   noteContinuation,
   noteEvalFingerprint,
   parseDiffShortstat,
-  planVerifier,
   pauseGoal,
   readConfig,
   readDiscover,
@@ -957,6 +956,18 @@ describe("evalリトライ上限 giveUp", () => {
   });
 });
 
+const planOf = (diff_hash: string, ids: string[]) => ({
+  diff_hash,
+  entries: ids.map((id) => ({
+    id,
+    title: id,
+    doubt: "d",
+    scope: "s",
+    source: "list" as const,
+    carried: false,
+  })),
+});
+
 describe("verifier集約 aggregateVerdicts / checkVerifierResults", () => {
   test("全clean → clean", () => {
     expect(
@@ -1005,19 +1016,27 @@ describe("verifier集約 aggregateVerdicts / checkVerifierResults", () => {
     expect(checkVerifierResults(undefined)).toMatch(/^error/);
   });
 
-  test("未知lens・重複lensは拒否", () => {
+  test("不正 id・重複・計画外は、計画があっても理由つきで拒否する", () => {
+    const o = { plan: planOf("h", ["agreement"]), diffHash: "h" };
+    expect(checkVerifierResults([{ lens: "Bad Id", level: "clean" }], o)).toMatch(/不正な lens/);
     expect(
-      checkVerifierResults([
-        // @ts-expect-error 未知lensのテスト
-        { lens: "unknown", level: "clean" },
-      ]),
-    ).toMatch(/^error/);
+      checkVerifierResults(
+        [
+          { lens: "agreement", level: "clean" },
+          { lens: "agreement", level: "clean" },
+        ],
+        o,
+      ),
+    ).toMatch(/重複/);
     expect(
-      checkVerifierResults([
-        { lens: "requirement", level: "clean" },
-        { lens: "requirement", level: "clean" },
-      ]),
-    ).toMatch(/^error/);
+      checkVerifierResults(
+        [
+          { lens: "agreement", level: "clean" },
+          { lens: "unknown", level: "clean" },
+        ],
+        o,
+      ),
+    ).toMatch(/計画に無い/);
   });
 
   test("driftのtarget無しは拒否・cleanは通る", () => {
@@ -1025,57 +1044,48 @@ describe("verifier集約 aggregateVerdicts / checkVerifierResults", () => {
       checkVerifierResults([{ lens: "behavior", level: "drift" }]),
     ).toMatch(/^error/);
     expect(
-      checkVerifierResults([
-        { lens: "behavior", level: "drift", target: "implementing" },
-      ]),
+      checkVerifierResults(
+        [{ lens: "behavior", level: "drift", target: "implementing" }],
+        { plan: planOf("h", ["behavior"]), diffHash: "h" },
+      ),
     ).toBeNull();
     expect(
-      checkVerifierResults([{ lens: "general", level: "clean" }]),
+      checkVerifierResults([{ lens: "general", level: "clean" }], {
+        plan: planOf("h", ["general"]),
+        diffHash: "h",
+      }),
     ).toBeNull();
   });
 
-  test("planVerifier: 全組み合わせで checkVerifierResults を通る", () => {
-    const routes = [null, "advisor", "polish"] as const;
-    const entries = [null, "full", "light", "advised", "oracle", "direct"] as const;
-    for (const route of routes) {
-      for (const entryRoute of entries) {
-        for (const escalated of [false, true]) {
-          const plan = planVerifier({ route, entryRoute, escalated });
-          const results = plan.lenses.map((lens) => ({ lens, level: "clean" as const }));
-          expect(
-            checkVerifierResults(results, {
-              // 昇格後は entry_route が full に戻る（escalateEntryRoute）
-              entryRoute,
-              escalated,
-            }),
-          ).toBeNull();
-          // simplify は route=polish のときだけ
-          expect(plan.simplify).toBe(route === "polish");
-        }
-      }
-    }
+  test("計画なし・diff 指紋の不一致・未充足・計画外 id を拒否し、計画どおりなら通る", () => {
+    const plan = planOf("h1", ["agreement", "wiring"]);
+    const ok = [
+      { lens: "agreement", level: "clean" },
+      { lens: "wiring", level: "clean" },
+    ] as Parameters<typeof checkVerifierResults>[0];
+    expect(checkVerifierResults(ok, {})).toMatch(/計画がありません/);
+    expect(checkVerifierResults(ok, { plan, diffHash: "h2" })).toMatch(/今の diff と違います/);
+    expect(checkVerifierResults(ok!.slice(0, 1), { plan, diffHash: "h1" })).toMatch(/wiring/);
+    expect(
+      checkVerifierResults([...ok!, { lens: "other", level: "clean" }], { plan, diffHash: "h1" }),
+    ).toMatch(/計画に無い/);
+    expect(checkVerifierResults(ok, { plan, diffHash: "h1" })).toBeNull();
   });
 
-  test("planVerifier: 昇格済み・polishは3lens、light/advised非昇格はgeneral", () => {
-    expect(planVerifier({ route: "polish", entryRoute: "full", escalated: false }).lenses).toEqual([
-      "requirement",
-      "behavior",
-      "progress",
-    ]);
-    expect(planVerifier({ route: "advisor", entryRoute: null, escalated: true }).lenses).toEqual([
-      "requirement",
-      "behavior",
-      "progress",
-    ]);
-    expect(planVerifier({ route: "advisor", entryRoute: "light", escalated: false }).lenses).toEqual([
-      "general",
-    ]);
-    expect(planVerifier({ route: "polish", entryRoute: "light", escalated: false }).lenses).toEqual([
-      "general",
-    ]);
-    expect(planVerifier({ route: "advisor", entryRoute: "full", escalated: false }).lenses).toEqual([
-      "general",
-    ]);
+  test("計画外の siblings は受け付ける。無くても通る", () => {
+    const plan = planOf("h1", ["agreement"]);
+    expect(
+      checkVerifierResults(
+        [
+          { lens: "agreement", level: "clean" },
+          { lens: "siblings", level: "clean" },
+        ],
+        { plan, diffHash: "h1" },
+      ),
+    ).toBeNull();
+    expect(
+      checkVerifierResults([{ lens: "agreement", level: "clean" }], { plan, diffHash: "h1" }),
+    ).toBeNull();
   });
 });
 
@@ -1443,7 +1453,7 @@ describe("評価機能（state層）", () => {
     expect(done?.goal.score?.value).toBe(75);
   });
 
-  test("buildScoreboard集計", async () => {
+  test("buildScoreboard集計（旧 lens 名の履歴も読める）", async () => {
     const { buildScoreboard, setVerifierVerdict } = await import("./state");
     const root = tmpRoot();
     startGoal(root, "t", "s");
@@ -1662,7 +1672,7 @@ describe("deep検知（RISK_PATHS×自goal差分）", () => {
 });
 
 describe("混成帰属（per-lens model）", () => {
-  test("checkVerifierResultsはmodelの型のみ検証（lens規則不変）", async () => {
+  test("checkVerifierResultsはmodelの型を検証する", async () => {
     const { checkVerifierResults } = await import("./state");
     expect(
       checkVerifierResults([{ lens: "general", level: "clean", model: 123 as unknown as string }]),
@@ -1671,18 +1681,11 @@ describe("混成帰属（per-lens model）", () => {
       checkVerifierResults([{ lens: "general", level: "clean", model: "  " }]),
     ).toContain("model");
     expect(
-      checkVerifierResults([{ lens: "general", level: "clean", model: "m/a" }]),
+      checkVerifierResults([{ lens: "general", level: "clean", model: "m/a" }], {
+        plan: planOf("h", ["general"]),
+        diffHash: "h",
+      }),
     ).toBeNull();
-    // lens規則は不変（light/advisedはgeneral×1のみ）
-    expect(
-      checkVerifierResults(
-        [
-          { lens: "requirement", level: "clean", model: "m/a" },
-          { lens: "behavior", level: "clean", model: "m/b" },
-        ],
-        { entryRoute: "advised" },
-      ),
-    ).toContain("general");
   });
 
   test("setVerifierVerdictはmodelsをlens長に揃える", async () => {
@@ -2300,25 +2303,6 @@ describe("entry_route（入口トリアージ）", () => {
     expect(s.escalateEntryRoute(root2)).toBeNull();
   });
 
-  test("verifier_setのroute×lens照合", () => {
-    const g = { lens: "general", level: "clean" } as const;
-    const three = [
-      { lens: "requirement", level: "clean" },
-      { lens: "behavior", level: "clean" },
-      { lens: "progress", level: "clean" },
-    ] as Parameters<typeof checkVerifierResults>[0];
-    expect(checkVerifierResults([g], { entryRoute: "light" })).toBeNull();
-    expect(checkVerifierResults([g], { entryRoute: "advised" })).toBeNull();
-    expect(checkVerifierResults(three, { entryRoute: "light" })).not.toBeNull();
-    expect(checkVerifierResults(three, { entryRoute: "light", escalated: true })).toBeNull();
-    expect(checkVerifierResults([g], { entryRoute: "light", escalated: true })).not.toBeNull();
-    expect(checkVerifierResults([g], { entryRoute: "full" })).toBeNull();
-    expect(checkVerifierResults(three, { entryRoute: "oracle" })).toBeNull();
-    expect(checkVerifierResults([g], { entryRoute: "oracle" })).toBeNull();
-    expect(checkVerifierResults([g], {})).toBeNull();
-    expect(checkVerifierResults([g])).toBeNull();
-  });
-
   test("normalizeEntryRoute: 新名・旧名・不正", async () => {
     const s = await import("./state");
     expect(s.normalizeEntryRoute("light")).toBe("light");
@@ -2899,6 +2883,18 @@ describe("意図ログの state 連携（design g-mwebh9vl）", () => {
     expect(r?.state.usability_review?.level).toBe("clean");
     expect(r?.state.usability_review?.files).toEqual(["AGENTS.md"]);
     expect(r?.state.start_baseline_rev).toBe("abc123");
+  });
+
+  test("archiveGoalFiles は .rubric.json も archive へ移す（g-mwmqmg6b 判断6）", () => {
+    const root = tmpRoot();
+    const g = startGoal(root, "t", "s1").goal;
+    const p = join(root, ".graphhopper", "plans", `${g.id}.rubric.json`);
+    writeFileSync(p, "{}\n", "utf8");
+    archiveGoalFiles(root, g.id);
+    expect(existsSync(p)).toBe(false);
+    expect(
+      existsSync(join(root, ".graphhopper", "plans", "archive", `${g.id}.rubric.json`)),
+    ).toBe(true);
   });
 
   test("archiveGoalFiles は .intent.md も archive へ移す", () => {

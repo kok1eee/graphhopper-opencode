@@ -22,8 +22,8 @@
   特に `setPhase(done)` の直指定は不可（doneはverifier clean後のcompleteのみ）
 - **simplify で critical を自動適用して設計を変えない**: interface / signature / 公開 API の振る舞いを変える提案は high 扱いで人間に提示。勝手に直すと design レベルの変更になる
 - **simplify 適用後に eval_cmd を再実行しないで verifier に進まない**: critical 適用でコードが再変更されている。`recipe: tail` の `graphhopper_diag` が eval_cmd を回すので、`failed`/`timeout` でないことを見てから verifier に進む（`unset`＝eval_cmd 未設定でも verifier は走るが、診断の不在を clean の根拠にしない）
-- **route=advisorだからverifier呼び出し自体を省略しない**: 「小diffだから自分で見れば十分」は禁止。`graphhopper_verifier_set`はresultsが空だと機械的にエラーを返す（self-graded完了防止のゲート）ので、必ず `graphhopper_verify` を `general` lens（3観点統合）で1回呼んでから記録する。`graphhopper_invoke` で自前の results を作ると3指紋の照合をすり抜けるため、`verify` 自体が壊れている場合の例外に限る
-- **verifier fan-outへの指示を「重大な問題だけ報告」にしない**: 全件報告→機械集約が正しい順序（保守的な指示は再現率を落とす）。`results` に詰めるのは各lens の `level` そのまま（キーは `lens`/`level`/`target`。`charter`・`verdict`・`note` は存在しない）。メインの裁量でdriftを握り潰さない（集約ルールがコード側にあるため握り潰せない）
+- **route=advisorだからverifier呼び出し自体を省略しない**: 「小diffだから自分で見れば十分」は禁止。`graphhopper_verifier_set`はresultsが空だと機械的にエラーを返す（self-graded完了防止のゲート）ので、必ず `graphhopper_verify` を1回呼んでから記録する。`graphhopper_invoke` で自前の results を作ると3指紋の照合をすり抜けるため、`verify` 自体が壊れている場合の例外に限る
+- **verifier fan-outへの指示を「重大な問題だけ報告」にしない**: 全件報告→機械集約が正しい順序（保守的な指示は再現率を落とす）。`results` に詰めるのは各角度の `level` そのまま（キーは `lens`/`level`/`target`/`model`/`severity`/`prior`。持ち越した角度の `prior` は verify が付けるのでそのまま渡す。`charter`・`verdict`・`note` は存在しない）。メインの裁量でdriftを握り潰さない（集約ルールがコード側にあるため握り潰せない）
 - **`graphhopper_verify` の前提を飛ばさない**: 退避diff・診断・現在のdiffの指紋が3つ揃わないと throw する（design g-mwiocibp）。順序は `diag` → `diff_stash` → `verify` で固定。simplify を適用した後も同じ順で取り直す
 - **`graphhopper_attempt`を省略しない**: 呼ばなければfail_streakが0のまま止まり、詰まっていても oracle への相談が起動しない。実装試行のたびに毎回呼ぶ
 - **escalate: trueが出たのに自力でもう一度だけ試そうとしない**: 閾値はコード側の機械カウント。無視して回すと同じ失敗を繰り返すだけになりがちなので、必ずoracleに相談してから再試行する

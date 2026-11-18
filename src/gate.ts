@@ -154,7 +154,7 @@ export function effectivePhaseAction(
     const reviewers = entryRoute === "light" ? "advisor・critic省略、" : "critic省略、";
     const note =
       `（entry_route=${entryRoute}軽量: designingは内容規約（判断の理由・代替案・反証条件、§5 触らないもの、§2 の file:line 証拠、§4 のタスク紐付け）を満たすこと。${reviewers}` +
-      `polishのverifierはgeneral×1。${advisor}` +
+      `verifierは選ぶ役が選んだ角度（枠は少なめ）。${advisor}` +
       (entryRoute === "advised"
         ? "advisor相談の記録（graphhopper_consult_set）だけは必須（機械ゲート）。criticは呼ばない。"
         : "") +
@@ -200,7 +200,7 @@ export function phaseGuideText(active: state.ActiveLoop | null, sessionID: strin
 
 /* 昇格後の次アクション定型文（pluginの昇格系3箇所の単一源泉） */
 export const ESCALATE_NEXT =
-  "次: design.mdを肉付けし、捨てた代替案の理由に自信が無い判断があるか（difficulty=hard か）を見て必要なら graphhopper_invoke(agent: 'graphhopper-advisor') で第二意見を取り、graphhopper_invoke(agent: 'graphhopper-critic')で1回レビューしてから implementing へ。polishでは verifier fan-out×3（requirement/behavior/progress）が必須。";
+  "次: design.mdを肉付けし、捨てた代替案の理由に自信が無い判断があるか（difficulty=hard か）を見て必要なら graphhopper_invoke(agent: 'graphhopper-advisor') で第二意見を取り、graphhopper_invoke(agent: 'graphhopper-critic')で1回レビューしてから implementing へ。verify は角度を選んで並列に走る（graphhopper_verify）。";
 
 /* stuck 時に oracle へ相談させる定型文（idle eval・attempt・stuck 検知の単一源泉）。
  * 相談は同期の graphhopper_invoke で行う（task() だと同じターンで助言を受け取れない）。 */
@@ -208,9 +208,6 @@ export const ORACLE_ASK =
   "graphhopper_invoke(agent: 'graphhopper-oracle') に相談せよ。これまでの失敗試行（何を試して何が起きたか）を prompt に渡すこと。";
 
 /* （旧buildJevPromptは削除。入口判定は decision.ts のdecideRouteに移管） */
-
-/* （旧SELECTOR_PROMPT／buildSelectorPrompt／parseSelectorOutputは削除。
- * verifier編成selectorは decision.ts のselectLensesに移管＝d1の構造化応答で判定するためparse不要） */
 
 /* stuck発火時のlight/advised自動昇格（designの二本立てトリガーの片方。もう片方はrouter_check）。
  * entry light/advised＋未昇格のときのみescalateEntryRouteし結果を返す。full/昇格済み/direct/oracle/nullはnull */
@@ -935,7 +932,7 @@ export function goalResumeContext(
     s.last_verifier ? `- last_verifier: ${s.last_verifier.level} (${s.last_verifier.reason})` : null,
     `- design doc: .graphhopper/plans/${goal.id}.md（designing終了後は不変）`,
     s.intent_path
-      ? `- intent log: ${s.intent_path}（goal開始時の会話。critic/requirement/general lens 用）`
+      ? `- intent log: ${s.intent_path}（goal開始時の会話。critic/agreement 角度用）`
       : null,
     state.planLogExists(root, goal.id)
       ? `- log: .graphhopper/plans/${goal.id}.log.md（決定の経緯・棄却した代替案）`

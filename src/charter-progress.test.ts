@@ -8,7 +8,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { PROMPT_DEFS } from "./prompts";
+import { todoSection } from "./prompts";
 import {
   ensureTodos,
   planPath,
@@ -45,10 +45,8 @@ const DESIGN_WITH_TASKS = [
   "",
 ].join("\n");
 
-function render(name: string, root: string, goalId: string): string {
-  const def = PROMPT_DEFS.find((d) => d.name === name);
-  if (!def) throw new Error(`prompt not found: ${name}`);
-  return def.render({ goalId }, root);
+function render(_name: string, root: string, goalId: string): string {
+  return todoSection(root, goalId);
 }
 
 describe("progress lens charter への進捗埋め込み", () => {
@@ -61,14 +59,6 @@ describe("progress lens charter への進捗埋め込み", () => {
     expect(out).toContain("進捗タスク");
     expect(out).toContain("T1 実装する");
     expect(out).toContain("手動追加タスク");
-  });
-
-  test("goalId を省くと active goal を使い、active が無ければ throw する", () => {
-    const root = tmpRoot();
-    const def = PROMPT_DEFS.find((d) => d.name === "graphhopper-verifier-progress")!;
-    expect(() => def.render({}, root)).toThrow("no active goal");
-    const g = startGoal(root, "t", "s").goal;
-    expect(def.render({}, root)).toContain(g.id);
   });
 
   test("graphhopper-verifier-general にもタスク一覧が載る（progress と非対称にしない）", () => {

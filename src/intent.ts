@@ -1,6 +1,6 @@
 /**
  * goal 開始時の会話から「意図ログ」を作る（design g-mwebh9vl）。
- * critic / requirement / general lens だけに渡す生ログ。要約はしない。
+ * critic / agreement 角度だけに渡す生ログ。要約はしない。
  * 注意: hooks の toLike とは目的が違う（あちらは tool part を残してループ検知に使う）。
  * この変換は text だけを拾い、内部注入と tool を落とす。
  */
@@ -103,7 +103,7 @@ function fitChars(
 
 /** status / start 応答に出す1行（文言の単一源泉） */
 export function formatIntentLine(path: string): string {
-  return `intent: ${path}（critic と requirement/general lens に渡す）`;
+  return `intent: ${path}（critic と agreement 角度に渡す）`;
 }
 
 export interface RenderIntentOptions {

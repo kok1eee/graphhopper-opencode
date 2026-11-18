@@ -5,6 +5,7 @@
  * v1 src/index.ts の同名 tool execute 本体を v2 形に移植。
  * handoff の候補列挙は known-sessions sidecar を使う (H2。session.list は v2 plugin API に無い)。
  */
+import { existsSync, readFileSync } from "node:fs";
 import { $ } from "bun";
 import {
   effectivePhaseAction,
@@ -20,11 +21,33 @@ import { MAX_TIMEOUT_MS, invokeStructured, resolveModel } from "../../../src/inv
 import { rubricStatus } from "../../../src/verify";
 import { formatScoreboard } from "../../../src/scoreboard-format";
 import { catalogPolicyWarning } from "../../../src/bake";
-import { buildLensPrompt, invokeFailure, lensPaths, parseLensVerdict } from "../../../src/verify";
+import { buildAnglePrompt, extractJsonBlock, invokeFailure, parseLensVerdict } from "../../../src/verify";
+import {
+  SIBLINGS,
+  SIBLINGS_ID,
+  angleSlots,
+  applyAdds,
+  applyDefaults,
+  applyPicks,
+  buildSelectorPrompt,
+  carryOver,
+  firstRoundEntries,
+  initialPlan,
+  needsFollowup,
+  parseSelection,
+  remainingSlots,
+  type AddInput,
+  type AnglePlan,
+  type PlanEntry,
+} from "../../../src/angles";
 import * as state from "../../../src/state";
 import { knownSessions, noteSession, S, structured, text, type Gh } from "./shared";
 
 type Ctx = { sessionID: string };
+
+/* ponytail: 2 つの timeout の使い分けはテストしない（定数を渡すだけ。壁時計で確かめると flaky になる） */
+const SELECTOR_TIMEOUT_MS = 120_000;
+const FOLLOWUP_TIMEOUT_MS = 180_000;
 
 /** verify の lens 1実行分（判定が読めなければ level なし＋reason） */
 interface LensRun {
@@ -34,6 +57,7 @@ interface LensRun {
   summary?: string;
   /** 重要度の件数（未申告は undefined。design g-mwmnvx3x 判断4） */
   severity?: state.VerifierSeverityCounts;
+  prior?: { valid: number; invalid: number; unresolved: number };
   body: string;
   reason?: string;
 }
@@ -53,24 +77,21 @@ export function registerOpsTools(
   editor.add({
     name: "graphhopper_router_check",
     description:
-      "diffサイズを機械測定してrouteを決める（advisor=小diff: verifier general×1 / polish=大diff: simplify＋verifier 3lens）。implementing完了時に1回呼ぶ。返り値の lenses / simplify / escalated に従って refs/verifier.md のレシピを実行する（散文は読まなくてよい）。escalated=true ならその場でdesigningに巻き戻るので、レシピは打ち切る。self-graded完了防止のため、advisorでも第三者チェック（verifier）は省略できない",
+      "diffサイズを機械測定してrouteを決める（advisor=小diff / polish=大diff: simplify を先に実行。verifier の角度は graphhopper_verify が選ぶ）。implementing完了時に1回呼ぶ。返り値の angle_slots / simplify / escalated に従って refs/verifier.md のレシピを実行する（散文は読まなくてよい）。escalated=true ならその場でdesigningに巻き戻るので、レシピは打ち切る。self-graded完了防止のため、advisorでも第三者チェック（verifier）は省略できない",
     input: S.obj({}, []),
     output: S.obj(
       {
         route: S.enumOf(["advisor", "polish"]),
         diff_lines: S.num("実効diffの行数（初期dirty除外）"),
         threshold: S.num("route判定の閾値"),
-        lenses: S.arrOf(
-          S.enumOf(["requirement", "behavior", "progress", "general"]),
-          "verifier に渡す lens（この編成で graphhopper_verifier_set が通る）",
-        ),
+        angle_slots: S.num("選ぶ役が選ぶ角度の枠の数（agreement は別。graphhopper_verify が計画を作る）"),
         simplify: S.bool("simplify を先に実行するか（route=polish のみ true）"),
         escalated: S.bool("light/advised→full の自動昇格が起きたか（true なら designing に戻る）"),
         deep: S.bool("RISK_PATHS に触れたか（参考情報）"),
         deep_reason: S.optStr("deep=true の理由（触れたriskファイル）"),
         next: S.str("次にやること（1行）"),
       },
-      ["route", "diff_lines", "threshold", "lenses", "simplify", "escalated", "deep", "next"],
+      ["route", "diff_lines", "threshold", "angle_slots", "simplify", "escalated", "deep", "next"],
     ),
     execute: async () => {
       const active = state.getActive(root);
@@ -96,18 +117,19 @@ export function registerOpsTools(
         next = "refs/verifier.md の advisor レシピ: diag → diff_stash → verify → verifier_set → phase → goal";
       }
       const after = state.getActive(root);
-      const plan = state.planVerifier({
+      const slots = angleSlots({
         route,
         entryRoute: after?.state.entry_route ?? null,
         escalated: !!after?.state.escalated_at,
       });
+      const simplify = route === "polish";
       return structured(
         {
           route,
           diff_lines: diffLines,
           threshold: cfg.router_threshold_lines,
-          lenses: plan.lenses,
-          simplify: plan.simplify,
+          angle_slots: slots,
+          simplify,
           escalated: willEscalate,
           deep: recorded.router.deep,
           ...(recorded.router.deep_reason ? { deep_reason: recorded.router.deep_reason } : {}),
@@ -115,7 +137,7 @@ export function registerOpsTools(
         },
         [
           `route: ${route} (${diffLines} lines, threshold ${cfg.router_threshold_lines})`,
-          `lenses: ${plan.lenses.join(",")}${plan.simplify ? " / simplify: yes" : ""}${
+          `angle_slots: ${slots}${simplify ? " / simplify: yes" : ""}${
             willEscalate ? " / 自動昇格してdesigningに戻った（レシピ打ち切り）" : ""
           }`,
         ].join("\n"),
@@ -126,7 +148,7 @@ export function registerOpsTools(
   editor.add({
     name: "graphhopper_diff_stash",
     description:
-      "verifier fan-out用のdiff退避。baselineからのdiffを.graphhopper/tmpに1回だけ置きpathを返す（3 lensへのinline 3重展開防止。子権限で読めるようrepo内配置）。.graphhopper/ 配下の作業ファイルは含めない（設定2つは含む）。verify の直前に呼ぶ（simplify適用後・編集後は必ず取り直す）",
+      "verifier fan-out用のdiff退避。baselineからのdiffを.graphhopper/tmpに1回だけ置きpathを返す（角度ごとの inline 展開防止。子権限で読めるようrepo内配置）。.graphhopper/ 配下の作業ファイルは含めない（設定2つは含む）。verify の直前に呼ぶ（simplify適用後・編集後は必ず取り直す）",
     input: S.obj({}, []),
     output: S.obj(
       {
@@ -154,16 +176,20 @@ export function registerOpsTools(
   editor.add({
     name: "graphhopper_verifier_set",
     description:
-      'verifier結果を記録する（polish/advisor共通・唯一の記録入口）。resultsを渡すとlevel/targetは機械集約される（drift かつ target=implementing なら implementing に巻き戻し可能。target=design/requirementsは人間のhand-back待ち）。self-graded完了防止のため、resultsが空（=verifierを一度も呼んでいない）場合はエラーになる。graphhopper_verify の返り値 out.results をそのまま渡せる（呼び出し例: {"results":[{"lens":"general","level":"clean"}],"reason":"要約1〜3文"}）。キーは results[].lens / results[].level / results[].target / results[].model / reason / model のみ',
+      'verifier結果を記録する（polish/advisor共通・唯一の記録入口）。resultsを渡すとlevel/targetは機械集約される（drift かつ target=implementing なら implementing に巻き戻し可能。target=design/requirementsは人間のhand-back待ち）。self-graded完了防止のため、resultsが空（=verifierを一度も呼んでいない）場合はエラーになる。graphhopper_verify の返り値 out.results をそのまま渡せる（呼び出し例: {"results":[{"lens":"agreement","level":"clean"}],"reason":"要約1〜3文"}）。キーは results[].lens / results[].level / results[].target / results[].model / results[].severity / results[].prior / reason / model のみ',
     input: S.obj(
       {
         results: S.arrOf(
           S.obj(
             {
-              lens: S.enumOf(["requirement", "behavior", "progress", "general"]),
+              lens: S.str("角度の id（graphhopper_verify の results の lens）"),
               level: S.enumOf(["clean", "drift"]),
               target: S.enumOf(["implementing", "design", "requirements"], "drift時の巻き戻し先（level=drift なら必須）。clean時は不要"),
               model: S.optStr("このlensを実行したモデル（deep時の上位モデル等。省略時はトップレベルmodel→config既定）"),
+              prior: {
+                type: "object",
+                description: "前回の指摘の判定（持ち越した角度のみ）。{valid,invalid,unresolved}",
+              },
               severity: {
                 type: "object",
                 description:
@@ -172,7 +198,7 @@ export function registerOpsTools(
             },
             ["lens", "level"],
           ),
-          "実際にverifier（graphhopper_verify または graphhopper_invoke）を呼んで得た各lensの結果。route=advisorならgeneral 1件、route=polishならrequirement/behavior/progressの3件。level/targetの最終決定は機械集約（state.aggregateVerdicts）で行う",
+          "graphhopper_verify が返した各角度の結果。今の diff の計画の角度を全部含むこと（足りなければ拒否）。level/targetの最終決定は機械集約（aggregateVerdicts）で行う",
         ),
         reason: S.str("集約結果の要約（1〜3文。監査証跡のため必須）。採用基準自体は機械集約される"),
         model: S.optStr("判定を実行したモデル（例: x/provider-model。省略時はconfig既定で補完。成績表の帰属に使う）"),
@@ -196,23 +222,26 @@ export function registerOpsTools(
       };
       const results = args.results ?? [];
       const active = state.getActive(root);
-      const rejected = state.checkVerifierResults(results, {
-        entryRoute: active?.state.entry_route ?? null,
-        escalated: !!active?.state.escalated_at,
-      });
-      if (rejected) throw new Error(rejected.replace(/^error:\s*/, ""));
-      const decided = state.aggregateVerdicts(results);
       // 検証した差分の指紋（stash 時点。無ければ現在の全文 diff）
       const baseline = await state.resolveBaseline($, root, active?.state ?? null);
       const diffHash =
         state.getStashDiffHash(root) ??
         (await state.computeDiffHash($, root, baseline));
+      const savedPlan = active ? state.readSavedVerify(root, active.goal.id)?.plan ?? null : null;
+      const rejected = state.checkVerifierResults(results, { plan: savedPlan, diffHash });
+      if (rejected) throw new Error(rejected.replace(/^error:\s*/, ""));
+      const decided = state.aggregateVerdicts(results);
       const severityEntries = state.collectSeverity(results);
       const result = state.setVerifierVerdict(root, {
         level: decided.level,
         reason: args.reason,
         target: decided.target,
         lens: results.map((r) => r.lens),
+        angles: results.map((r) => ({
+          lens: r.lens,
+          level: r.level,
+          ...(r.prior ? { prior: r.prior } : {}),
+        })),
         model: args.model,
         models: results.map((r) => r.model ?? args.model ?? null),
         diff_hash: diffHash,
@@ -383,15 +412,24 @@ export function registerOpsTools(
   editor.add({
     name: "graphhopper_verify",
     description:
-      "verifier を lens ごとに同期実行し、verifier_set にそのまま渡せる results を返す（記録はしない）。prompt（lens指示・design/intent/diff/diag のpath・出力契約）と起動ずらしはツール側で固定する。前提: 同じ diff で graphhopper_diag → graphhopper_diff_stash を済ませておくこと（指紋が3つ揃わなければ throw）。判定を読めなかった lens は missing に入る（results が欠けるので進めない）。一部 lens の再実行は lens で指定（同じ diff 指紋のときだけ保存済み結果と合成する）",
+      "verifier を角度ごとに同期実行し、verifier_set にそのまま渡せる results を返す（記録はしない）。角度は、前の diff で drift だった角度の持ち越し＋選ぶ役（verifier 1 回）が選んだ角度＋常設の agreement で、計画として sidecar に保存される。add で角度を足せる（枠の外・1 つの diff につき 2 個まで）。1 巡目に drift があれば、同じ種類の問題を探す追い検証（siblings）を 1 回だけ続けて走らせる。前提: 同じ diff で graphhopper_diag → graphhopper_diff_stash を済ませておくこと（指紋が3つ揃わなければ throw）。判定を読めなかった角度は missing に入る（results が欠けるので進めない）。lens は計画のうち一部だけ走らせ直す指定、add は計画に角度を足す指定（同時に渡せる）",
     input: S.obj(
       {
-        lens: S.arrOf(
-          S.enumOf(["requirement", "behavior", "progress", "general"]),
-          "実行する lens（省略時は router_check の編成。polish=3lens / advisor=general）",
+        lens: S.arrOf(S.str("角度の id"), "実行する角度（計画の一部だけ走らせ直す。省略時は結果の無い角度すべて）"),
+        add: S.arrOf(
+          S.obj(
+            {
+              id: S.str("角度の id（小文字英数とハイフン、32 文字まで）"),
+              title: S.optStr("題（一覧に無い新しい角度は必須）"),
+              doubt: S.optStr("疑うこと（一覧に無い新しい角度は必須）"),
+              scope: S.optStr("見る範囲"),
+            },
+            ["id"],
+          ),
+          "計画に足す角度（枠の外。1 つの diff につき 2 個まで）",
         ),
         model: S.optStr("verifier のモデル上書き（provider/model）。config の model_allow/model_deny で検査される"),
-        timeoutMs: S.num("lens あたりの timeout ms（既定300000・上限300000）"),
+        timeoutMs: S.num("角度あたりの timeout ms（既定300000・上限300000）"),
         delayMs: S.num("起動ずらしの間隔 ms（既定5000。claude-oauth の単一プロキシ対策）"),
       },
       [],
@@ -401,37 +439,40 @@ export function registerOpsTools(
         results: S.arrOf(
           S.obj(
             {
-              lens: S.enumOf(["requirement", "behavior", "progress", "general"]),
+              lens: S.str("角度の id"),
               level: S.enumOf(["clean", "drift"]),
               target: S.enumOf(["implementing", "design", "requirements"]),
-              model: S.str("その lens を実行したモデル"),
+              model: S.str("その角度を実行したモデル"),
+              severity: { type: "object", description: "重要度の件数（verifier が申告したときだけ）" },
+              prior: { type: "object", description: "前回の指摘の判定（持ち越した角度のみ）。{valid,invalid,unresolved}" },
             },
             ["lens", "level"],
           ),
           "verifier_set にそのまま渡せる results",
         ),
         summaries: S.arrOf(
-          S.obj({ lens: S.str("lens名"), summary: S.str("その lens の判定要約") }, ["lens", "summary"]),
+          S.obj({ lens: S.str("角度の id"), summary: S.str("その角度の判定要約") }, ["lens", "summary"]),
         ),
         bodies: S.arrOf(
-          S.obj({ lens: S.str("lens名"), body: S.str("drift・判定不能だった lens の本文") }, ["lens", "body"]),
-          "drift と missing の lens だけ（clean の本文は含めない）",
+          S.obj({ lens: S.str("角度の id"), body: S.str("drift・判定不能だった角度の本文") }, ["lens", "body"]),
+          "drift と missing の角度だけ（clean の本文は含めない）",
         ),
         missing: S.arrOf(
           S.obj(
-            { lens: S.str("lens名"), reason: S.str("読めなかった理由") },
+            { lens: S.str("角度の id"), reason: S.str("読めなかった理由") },
             ["lens", "reason"],
           ),
-          "判定を読めなかった lens（空でなければ verifier_set に進まない）",
+          "判定を読めなかった角度（空でなければ verifier_set に進まない）",
         ),
-        lenses: S.arrOf(S.str("lens名"), "今回の編成（router_check と同じ）"),
+        lenses: S.arrOf(S.str("角度の id"), "今回の計画（agreement を含む）"),
         diff_hash: S.str("検証した diff の指紋（verifier_set が記録する値）"),
       },
       ["results", "summaries", "bodies", "missing", "lenses", "diff_hash"],
     ),
     execute: async (input: unknown, context: unknown) => {
       const args = input as {
-        lens?: state.VerifierLens[];
+        lens?: string[];
+        add?: AddInput[];
         model?: string;
         timeoutMs?: number;
         delayMs?: number;
@@ -449,6 +490,7 @@ export function registerOpsTools(
               "採点基準を戻すか、新しい goal でやり直してください（verify に force は無い）",
           );
         }
+        if (rs.legacy) state.recordEvent(root, { type: "rubric_legacy", goal: goalId });
         if (rs.changed) state.recordEvent(root, { type: "rubric_changed", goal: goalId });
         if (rs.selfModified) {
           state.recordEvent(root, {
@@ -459,12 +501,11 @@ export function registerOpsTools(
           });
         }
       }
-      const plan = state.planVerifier({
+      const slots = angleSlots({
         route: active.state.router.route,
         entryRoute: active.state.entry_route,
         escalated: !!active.state.escalated_at,
       });
-      const wanted = args.lens?.length ? args.lens : plan.lenses;
 
       // 前提: diag と diff_stash が同じ差分に対して済んでいること
       const baseline = await state.resolveBaseline($, root, active.state);
@@ -495,86 +536,220 @@ export function registerOpsTools(
       const delay = Math.max(0, args.delayMs ?? 5000);
       const timeout = args.timeoutMs ?? MAX_TIMEOUT_MS;
       const signal = (context as { signal?: AbortSignal } | undefined)?.signal;
+      const notes: string[] = [];
 
-      const runs = await Promise.all(
-        wanted.map(async (lens, i): Promise<LensRun> => {
-          const prompt = buildLensPrompt(root, goalId, lens, lensPaths(root, goalId, lens, paths));
-          const r = await invokeStructured(
+      const runAngle = async (
+        entry: PlanEntry,
+        i: number,
+        timeoutMs: number,
+        extra: { priorPath?: string | null; findingsPath?: string | null },
+      ): Promise<LensRun> => {
+        const prompt = buildAnglePrompt(root, goalId, entry, { ...paths, ...extra });
+        const r = await invokeStructured(
+          { agent: "graphhopper-verifier", model: args.model, prompt, root, timeoutMs, delayMs: delay * i },
+          undefined,
+          { signal },
+        );
+        const lens = entry.id;
+        const broken = (reason: string): LensRun => ({ lens, body: r.output, reason });
+        if (r.cancelled) return broken("invoke がキャンセルされた");
+        if (r.timedOut) return broken(`timeout (${timeoutMs}ms)`);
+        if (r.fallbackWarning) return broken("agent が既定にフォールバックした（判定を採用できない）");
+        const failed = invokeFailure(r.output);
+        if (failed) return broken(failed);
+        const parsed = parseLensVerdict(r.output);
+        if (!parsed.ok) return broken(parsed.reason);
+        if (entry.carried && !parsed.verdict.prior) {
+          return broken("出力の形の違反: 持ち越した角度なのに prior が無い（呼び直すと再実行する）");
+        }
+        return {
+          lens,
+          level: parsed.verdict.level,
+          ...(parsed.verdict.target ? { target: parsed.verdict.target } : {}),
+          summary: parsed.verdict.summary,
+          ...(parsed.verdict.severity ? { severity: parsed.verdict.severity } : {}),
+          ...(parsed.verdict.prior ? { prior: parsed.verdict.prior } : {}),
+          body: r.output,
+        };
+      };
+      const toSaved = (x: LensRun): state.SavedLensResult => ({
+        lens: x.lens,
+        level: x.level as state.VerdictLevel,
+        ...(x.target ? { target: x.target as state.DriftTarget } : {}),
+        ...(modelName ? { model: modelName } : {}),
+        ...(x.severity ? { severity: x.severity } : {}),
+        ...(x.prior ? { prior: x.prior } : {}),
+        ...(x.level === "drift" ? { body: x.body.slice(0, 6000) } : {}),
+        summary: x.summary ?? "",
+      });
+
+      /* 1. 計画（同じ diff の保存済みがあればそれを使う。無ければ持ち越し→選ぶ役） */
+      const saved = state.readSavedVerify(root, goalId);
+      let plan: AnglePlan;
+      let results: state.SavedLensResult[];
+      if (saved && saved.diff_hash === current && saved.plan) {
+        plan = saved.plan;
+        results = saved.results;
+      } else {
+        const carried = carryOver(saved?.plan ?? null, saved?.results ?? []);
+        const drifts = (saved?.results ?? []).filter((r) => r.level === "drift" && r.body);
+        /* 判定が出ないまま持ち越す角度があれば、その指摘は前の prior.md にしか無いので残す */
+        const pending = carried.some((e) => !(saved?.results ?? []).some((r) => r.lens === e.id));
+        const oldPrior = state.priorFindingsPath(root, goalId);
+        const kept = pending && existsSync(oldPrior) ? [readFileSync(oldPrior, "utf8")] : [];
+        state.writePriorFindings(
+          root,
+          goalId,
+          carried.length > 0
+            ? [...kept, ...drifts.map((r) => `## ${r.lens}\n${r.body}`)].join("\n\n")
+            : null,
+        );
+        plan = initialPlan(current, carried);
+        results = [];
+        if (remainingSlots(plan, slots) > 0) {
+          const sel = await invokeStructured(
             {
               agent: "graphhopper-verifier",
               model: args.model,
-              prompt,
+              prompt: buildSelectorPrompt({
+                designPath: paths.designPath,
+                diffPath: paths.diffPath,
+                slots: remainingSlots(plan, slots),
+                taken: plan.entries.map((e) => e.id),
+              }),
               root,
-              timeoutMs: timeout,
-              delayMs: delay * i,
+              timeoutMs: SELECTOR_TIMEOUT_MS,
             },
             undefined,
             { signal },
           );
-          const broken = (reason: string): LensRun => ({ lens, body: r.output, reason });
-          if (r.cancelled) return broken("invoke がキャンセルされた");
-          if (r.timedOut) return broken(`timeout (${timeout}ms)`);
-          if (r.fallbackWarning) return broken("agent が既定にフォールバックした（判定を採用できない）");
-          const failed = invokeFailure(r.output);
-          if (failed) return broken(failed);
-          const parsed = parseLensVerdict(r.output);
-          if (!parsed.ok) return broken(parsed.reason);
-          return {
-            lens,
-            level: parsed.verdict.level,
-            ...(parsed.verdict.target ? { target: parsed.verdict.target } : {}),
-            summary: parsed.verdict.summary,
-            ...(parsed.verdict.severity ? { severity: parsed.verdict.severity } : {}),
-            body: r.output,
-          };
-        }),
+          let reason = "";
+          if (sel.cancelled) reason = "invoke がキャンセルされた";
+          else if (sel.timedOut) reason = `timeout (${SELECTOR_TIMEOUT_MS}ms)`;
+          else if (sel.fallbackWarning) reason = "agent が既定にフォールバックした";
+          else reason = invokeFailure(sel.output) ?? "";
+          let picked = false;
+          if (!reason) {
+            const parsed = parseSelection(extractJsonBlock(sel.output), remainingSlots(plan, slots));
+            if (parsed.ok) {
+              plan = applyPicks(plan, parsed.picks, slots);
+              picked = true;
+            } else reason = parsed.reason;
+          }
+          if (!picked) {
+            plan = applyDefaults(plan, slots);
+            state.recordEvent(root, { type: "angle_select_failed", goal: goalId, reason });
+            notes.push(`選ぶ役が失敗し（${reason}）、既定の角度で検証した`);
+          }
+        }
+        state.recordEvent(root, {
+          type: "angles_selected",
+          goal: goalId,
+          angles: plan.entries.map((e) => ({ id: e.id, source: e.source, carried: e.carried })),
+        });
+        state.writeSavedVerify(root, goalId, { v: 2, diff_hash: current, plan, results });
+      }
+
+      /* 2. メインの add（枠の外。エラーなら何も足さない） */
+      if (args.add?.length) {
+        const added = applyAdds(plan, args.add);
+        if (!added.ok) throw new Error(added.error);
+        plan = added.plan;
+        state.writeSavedVerify(root, goalId, { v: 2, diff_hash: current, plan, results });
+      }
+
+      /* 3. 1 巡目（結果の無い角度。lens 指定なら計画のうちその角度だけ） */
+      const have = (id: string) => results.some((r) => r.lens === id);
+      const requested = args.lens?.length ? args.lens : null;
+      if (requested) {
+        const unknown = requested.filter((id) => !plan.entries.some((e) => e.id === id));
+        if (unknown.length) throw new Error(`lens に計画に無い角度があります: ${unknown.join(", ")}`);
+      }
+      const firstRound = firstRoundEntries(plan).filter((e) =>
+        requested ? requested.includes(e.id) : !have(e.id),
+      );
+      const priorFile = state.priorFindingsPath(root, goalId);
+      const priorPath = existsSync(priorFile) ? priorFile : null;
+      const missing: { lens: string; reason: string }[] = [];
+      const bodiesOf: { lens: string; body: string }[] = [];
+      const merge = (runs: LensRun[]) => {
+        for (const x of runs) {
+          if (x.level === undefined) {
+            missing.push({ lens: x.lens, reason: x.reason ?? "判定不能" });
+            bodiesOf.push({ lens: x.lens, body: x.body.slice(0, 6000) });
+          } else if (x.level === "drift") {
+            bodiesOf.push({ lens: x.lens, body: x.body.slice(0, 6000) });
+          }
+        }
+        const ok = runs.filter((x) => x.level !== undefined).map(toSaved);
+        results = [...results.filter((r) => !ok.some((o) => o.lens === r.lens)), ...ok];
+        state.writeSavedVerify(root, goalId, { v: 2, diff_hash: current, plan, results });
+      };
+      merge(
+        await Promise.all(
+          firstRound.map((e, i) => runAngle(e, i, timeout, { priorPath: e.carried ? priorPath : null })),
+        ),
       );
 
-      const missing = runs
-        .filter((x) => x.level === undefined)
-        .map((x) => ({ lens: x.lens, reason: x.reason ?? "判定不能" }));
-      const next: state.SavedLensResult[] = runs
-        .filter((x) => x.level !== undefined)
-        .map((x) => ({
-          lens: x.lens,
-          level: x.level as state.VerdictLevel,
-          ...(x.target ? { target: x.target as state.DriftTarget } : {}),
-          ...(modelName ? { model: modelName } : {}),
-          ...(x.severity ? { severity: x.severity } : {}),
-          summary: x.summary ?? "",
-        }));
-      const merged = state.mergeSavedVerify(state.readSavedVerify(root, goalId), current, next).filter(
-        (r) => plan.lenses.includes(r.lens),
-      );
-      state.writeSavedVerify(root, goalId, { diff_hash: current, results: merged });
-      const covered = new Set(merged.map((r) => r.lens));
-      for (const lens of plan.lenses) {
-        if (!covered.has(lens) && !missing.some((m) => m.lens === lens)) {
-          missing.push({ lens, reason: "この diff ではまだ判定が無い（再実行せよ）" });
+      /* 4. 追い検証（siblings。1 回の呼び出しで 1 回だけ。結果が保存されたら走らない） */
+      const planned = plan.entries.find((e) => e.id === SIBLINGS_ID);
+      /* lens に siblings を指定したら（持ち越して計画にあるときだけ通る）走らせ直す */
+      if (requested ? requested.includes(SIBLINGS_ID) : !have(SIBLINGS_ID)) {
+        const seen = results.filter((r) => r.lens !== SIBLINGS_ID).map((r) => ({ lens: r.lens, level: r.level }));
+        if (needsFollowup(plan, seen)) {
+          const drifts = results.filter((r) => r.level === "drift" && r.body && r.lens !== SIBLINGS_ID);
+          const findings = drifts.length
+            ? state.writeFindings(root, goalId, drifts.map((r) => `## ${r.lens}\n${r.body}`).join("\n\n"))
+            : null;
+          const entry: PlanEntry = planned ?? { ...SIBLINGS, source: "followup", carried: false };
+          const run = await runAngle(entry, 0, FOLLOWUP_TIMEOUT_MS, {
+            findingsPath: findings,
+            priorPath: entry.carried ? priorPath : null,
+          });
+          state.recordEvent(root, {
+            type: "angle_followup",
+            goal: goalId,
+            carried: !!planned,
+            level: run?.level ?? "unknown",
+          });
+          if (run) {
+            if (planned) merge([run]);
+            else if (run.level === undefined) notes.push(`追い検証は判定不能（${run.reason ?? ""}）。呼び直すともう一度走る`);
+            else merge([run]);
+          }
         }
       }
 
-      const bodies = runs
-        .filter((x) => x.level === undefined || x.level === "drift")
-        .map((x) => ({ lens: x.lens, body: x.body.slice(0, 6000) }));
+      /* 5. 計画に対して結果が無い角度は missing（追い検証だけの siblings は必須ではない） */
+      for (const e of plan.entries) {
+        if (!have(e.id) && !missing.some((m) => m.lens === e.id)) {
+          missing.push({ lens: e.id, reason: "この diff ではまだ判定が無い（再実行せよ）" });
+        }
+      }
 
+      const shown = results.filter((r) => plan.entries.some((e) => e.id === r.lens) || r.lens === SIBLINGS_ID);
       return structured(
         {
-          results: merged.map((r) => ({
+          results: shown.map((r) => ({
             lens: r.lens,
             level: r.level,
             ...(r.target ? { target: r.target } : {}),
             ...(r.model ? { model: r.model } : {}),
+            ...(r.severity ? { severity: r.severity } : {}),
+            ...(r.prior ? { prior: r.prior } : {}),
           })),
-          summaries: merged.map((r) => ({ lens: r.lens, summary: r.summary })),
-          bodies,
-          missing: missing.map(({ lens, reason }) => ({ lens, reason })),
-          lenses: plan.lenses,
+          summaries: shown.map((r) => ({ lens: r.lens, summary: r.summary })),
+          bodies: bodiesOf,
+          missing,
+          lenses: plan.entries.map((e) => e.id),
           diff_hash: current,
         },
-        missing.length
-          ? `verify: 判定不能 ${missing.map((m) => `${m.lens}(${m.reason})`).join(", ")} — 記録せずに止まる`
-          : `verify: ${merged.map((r) => `${r.lens}=${r.level}`).join(", ")}（次: verifier_set に results を渡す）`,
+        [
+          ...notes,
+          missing.length
+            ? `verify: 判定不能 ${missing.map((m) => `${m.lens}(${m.reason})`).join(", ")} — 記録せずに止まる`
+            : `verify: ${shown.map((r) => `${r.lens}=${r.level}`).join(", ")}（次: verifier_set に results を渡す）`,
+        ].join("\n"),
       );
     },
   });

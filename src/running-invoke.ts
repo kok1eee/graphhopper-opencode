@@ -3,7 +3,7 @@
  *
  * TUI のチップは `.graphhopper/*.json` を読む方式なので、`gh-invoke` の実行数も
  * ファイル経由で共有する（プロセス境界に依存しない）。書き込みは plugin プロセス
- * だけが行い、同一プロセス内の並行 invoke（verifier の 3 lens fan-out）は
+ * だけが行い、同一プロセス内の並行 invoke（verifier の角度の並列実行）は
  * 直列キューで read-modify-write を直列化する。
  *
  * 純粋ロジック（add / remove / count）は IO を持たない。読み書きは下の 2 関数。

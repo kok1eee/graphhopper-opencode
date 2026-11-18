@@ -1,13 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
-  assembleLenses,
   callDecision,
   callDecisionWithRetry,
   logDecision,
   DECISION_CONFIDENCE_FLOOR,
   decideRoute,
   decisionAvailable,
-  formatSelectorResult,
   JEV_API_URL,
   JEV_DEFAULT_MODEL,
   JEV_PAID_MODEL,
@@ -17,10 +15,7 @@ import {
   shadowProviderName,
   mapDecisionAnswer,
   mapDifficultyAnswer,
-  SELECTOR_NOUL_THRESHOLD,
-  SELECTOR_RETRIES,
-  SELECTOR_TIMEOUT_MS,
-  selectLenses,
+  DECISION_RETRIES,
 } from "./decision";
 
 /* LIQUID_API_KEY の差し替え／復元（テスト全体で共有。実環境のkeyに依存させない） */
@@ -145,56 +140,7 @@ describe("decideRoute（fail-safe）", () => {
   });
 });
 
-/* Noul確率 → d1のanswers形式 */
-const ans = (p: Partial<Record<"requirement" | "behavior" | "progress", number>>) =>
-  Object.fromEntries(Object.entries(p).map(([k, v]) => [k, { noul: v }]));
-
-describe("assembleLenses（Noul確率→lens集合）", () => {
-  const T = SELECTOR_NOUL_THRESHOLD;
-  test("閾値以上のlensだけ採用（generalは含めない）", () => {
-    const r = assembleLenses(ans({ requirement: 0.9, behavior: 0.8, progress: 0.1 }), "設計");
-    expect(r.lenses).toEqual(["requirement", "behavior"]);
-    expect(r.fallback).toBe(false);
-  });
-  test("境界（==閾値）は採用、直下は不採用", () => {
-    expect(assembleLenses(ans({ requirement: T, behavior: T - 0.01, progress: 0 }), "x").lenses).toEqual(["requirement"]);
-  });
-  test("全て閾値未満＝該当なし→general（fallbackではない）", () => {
-    const r = assembleLenses(ans({ requirement: 0.1, behavior: 0.2, progress: 0.3 }), "x");
-    expect(r.lenses).toEqual(["general"]);
-    expect(r.fallback).toBe(false);
-    expect(r.reason).toContain("該当なし");
-  });
-  test("全て高い→3件（cap内・generalなし）", () => {
-    const r = assembleLenses(ans({ requirement: 0.9, behavior: 0.9, progress: 0.9 }), "x");
-    expect(r.lenses).toEqual(["requirement", "behavior", "progress"]);
-  });
-  test("契約変更系キーワードでrequirement強制（Noulが低くても）", () => {
-    for (const kw of ["契約を変更", "migration", "後方互換", "breaking change", "schema変更", "スキーマ"]) {
-      const r = assembleLenses(ans({ requirement: 0.1, behavior: 0.1, progress: 0.1 }), kw);
-      expect(r.lenses).toContain("requirement");
-      expect(r.lenses).not.toContain("general");
-      expect(r.reason).toContain("強制");
-    }
-  });
-  test("既にrequirementが採用済みなら強制表記しない", () => {
-    const r = assembleLenses(ans({ requirement: 0.9, behavior: 0.1, progress: 0.1 }), "契約");
-    expect(r.lenses).toEqual(["requirement"]);
-    expect(r.reason).not.toContain("強制");
-  });
-  test("Noul欠測（有効な確率が0件）＝判定不能→fallback（general倒しなし）", () => {
-    for (const a of [{}, { requirement: { noul: "x" } }, { requirement: {} }]) {
-      const r = assembleLenses(a as never, "契約");
-      expect(r).toMatchObject({ lenses: [], fallback: true });
-    }
-  });
-  test("キーワードはdiff統計ではなくdesign抜粋のみ対象（呼び出し側で保証）", () => {
-    const r = assembleLenses(ans({ requirement: 0.1, behavior: 0.1, progress: 0.1 }), "ふつうの修正");
-    expect(r.lenses).toEqual(["general"]);
-  });
-});
-
-describe("callDecision／selectLenses（fail-safe）", () => {
+describe("callDecision（fail-safe）", () => {
   const okFetch = (answers: unknown) =>
     (async () => ({ ok: true, json: async () => ({ answers }) })) as unknown as typeof fetch;
 
@@ -279,7 +225,7 @@ describe("callDecision／selectLenses（fail-safe）", () => {
     setKey("liquid_test");
     try {
       const f = seq("timeout", "timeout", "ok");
-      const r = await callDecisionWithRetry("s", Q, f.fn, 50, SELECTOR_RETRIES);
+      const r = await callDecisionWithRetry("s", Q, f.fn, 50, DECISION_RETRIES);
       expect(r.ok).toBe(true);
       expect(f.calls()).toBe(3);
     } finally {
@@ -291,7 +237,7 @@ describe("callDecision／selectLenses（fail-safe）", () => {
     setKey("liquid_test");
     try {
       const f = seq("timeout");
-      const r = await callDecisionWithRetry("s", Q, f.fn, 50, SELECTOR_RETRIES);
+      const r = await callDecisionWithRetry("s", Q, f.fn, 50, DECISION_RETRIES);
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.reason).toContain("3回試行");
       expect(f.calls()).toBe(3);
@@ -340,61 +286,7 @@ describe("callDecision／selectLenses（fail-safe）", () => {
     }
   });
 
-  test("selectLenses: 初回timeout→リトライで拾ってlens組立", async () => {
-    setKey("liquid_test");
-    let n = 0;
-    const flaky = (async () => {
-      if (n++ === 0) throw new Error("aborted");
-      return {
-        ok: true,
-        json: async () => ({
-          answers: { requirement: { noul: 0.9 }, behavior: { noul: 0.1 }, progress: { noul: 0.1 } },
-        }),
-      };
-    }) as unknown as typeof fetch;
-    try {
-      const r = await selectLenses("ふつう", "1 file", flaky);
-      expect(r).toMatchObject({ lenses: ["requirement"], fallback: false });
-      expect(n).toBe(2);
-    } finally {
-      restore();
-    }
-  });
 
-  test("selector既定timeoutは入口route(15s)より短い", () => {
-    expect(SELECTOR_TIMEOUT_MS).toBeLessThan(15_000);
-  });
-
-  test("selectLenses: 正常応答→lens組立", async () => {
-    setKey("liquid_test");
-    try {
-      const r = await selectLenses(
-        "ふつうの修正",
-        "1 file +3 -1",
-        okFetch({
-          requirement: { noul: 0.05 },
-          behavior: { noul: 0.9 },
-          progress: { noul: 0.1 },
-        }),
-      );
-      expect(r).toMatchObject({ lenses: ["behavior"], fallback: false });
-    } finally {
-      restore();
-    }
-  });
-
-  test("selectLenses: key無し/HTTP失敗/Noul欠測→fallback=true（general倒しなし）", async () => {
-    setKey(undefined);
-    try {
-      expect(await selectLenses("x", "y")).toMatchObject({ lenses: [], fallback: true });
-      setKey("liquid_test");
-      const http = (async () => ({ ok: false, status: 503 })) as unknown as typeof fetch;
-      expect(await selectLenses("x", "y", http)).toMatchObject({ lenses: [], fallback: true });
-      expect(await selectLenses("x", "y", okFetch({}))).toMatchObject({ lenses: [], fallback: true });
-    } finally {
-      restore();
-    }
-  });
 });
 
 const mkRoot = async () => {
@@ -430,36 +322,6 @@ describe("logDecision（較正ログ）", () => {
       expect(line).toMatchObject({ kind: "decide", result: "direct" });
       expect(typeof line.latencyMs).toBe("number");
       expect(typeof line.ts).toBe("string");
-    } finally {
-      if (saved === undefined) delete process.env.LIQUID_API_KEY;
-      else process.env.LIQUID_API_KEY = saved;
-    }
-  });
-
-  test("selectLensesはlenses＋probsを記録する", async () => {
-    const root = await mkRoot();
-    const saved = process.env.LIQUID_API_KEY;
-    process.env.LIQUID_API_KEY = "liquid_test";
-    try {
-      const fake = (async () => ({
-        ok: true,
-        json: async () => ({
-          answers: {
-            requirement: { noul: 0.9 },
-            behavior: { noul: 0.1 },
-            progress: { noul: 0.1 },
-          },
-        }),
-      })) as unknown as typeof fetch;
-      const r = await selectLenses("設計", "1 file", fake, { root });
-      expect(r.lenses).toEqual(["requirement"]);
-      const [line] = await readLines(root);
-      expect(line).toMatchObject({
-        kind: "select",
-        fallback: false,
-      });
-      expect(line.result).toEqual(["requirement"]);
-      expect(line.probs.requirement).toBe(0.9);
     } finally {
       if (saved === undefined) delete process.env.LIQUID_API_KEY;
       else process.env.LIQUID_API_KEY = saved;
@@ -510,24 +372,6 @@ describe("logDecision（較正ログ）", () => {
       if (saved === undefined) delete process.env.LIQUID_API_KEY;
       else process.env.LIQUID_API_KEY = saved;
     }
-  });
-});
-
-describe("formatSelectorResult", () => {
-  test("fallback は従来 router 継続、成功は lens 一覧を出す", () => {
-    expect(
-      formatSelectorResult({ lenses: ["general"], reason: "key未設定", fallback: true, probs: {} }),
-    ).toContain("selector: 判定不能");
-    expect(
-      formatSelectorResult({
-        lenses: ["requirement", "behavior"],
-        reason: "d1選択",
-        fallback: false,
-        probs: {},
-      }),
-    ).toBe(
-      "selector: lenses=requirement,behavior（d1選択）。verifier編成の参考にする（advisory-only。採否はmainが決める）。",
-    );
   });
 });
 

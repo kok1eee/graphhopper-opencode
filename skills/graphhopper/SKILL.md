@@ -16,9 +16,9 @@ graphhopper本体（Claude Code版）の3相グラフをopencodeに移植した�
 | Need | 手段 | 使い分け |
 |---|---|---|
 | 計画の敵対検証 | critic（designingで1回） | 要件漏れ・設計の穴・スコープ逸脱。質はここ |
-| 実装後のdrift検出 | verifier（polishでfan-out） | requirement/behavior/progressの3lens |
+| 実装後のdrift検出 | verifier（角度を選んで並列） | 合意との照合＋変更ごとに選ぶ角度 |
 | 手詰まり打開 | oracle（escalate時、および oracle 入口の開始時） | 失敗文脈を渡して助言のみ受け取る |
-| 気軽な相談 | `graphhopper-advisor` | セカンドオピニオン・advised入口の相談・full の designing で判断の第二意見。stuck時はoracle（advisorで代替しない）。出力は非拘束。selector判定はd1 tool（`graphhopper_selector`）に移管 |
+| 気軽な相談 | `graphhopper-advisor` | セカンドオピニオン・advised入口の相談・full の designing で判断の第二意見。stuck時はoracle（advisorで代替しない）。出力は非拘束。selector 判定は廃止（角度は verify が選ぶ） |
 | repo内事実収集 | researcher（read-only） | graft-first。判断を含めない |
 | repo外公式doc | librarian（read-only） | URL・引用付き。判断を含めない |
 | 大diff整理 | simplify（route=polishのみ） | 提案のみ。適用はメイン |
@@ -79,7 +79,7 @@ phase 案内（次のアクションの全文）は system ではなく**会話�
 
 **opencode 2本立て**: `task()`/`subagent` は TUI からは呼べるが **`execute` のカタログには無い**。
 2.3.0 以降 `task()` はバックグラウンド（結果は後で届く）なので、判定を待って記録する経路
-（verifier）は `graphhopper_verify`（lens ごとに `opencode run` を待つ）か
+（verifier）は `graphhopper_verify`（角度ごとに `opencode run` を待つ）か
 `graphhopper_invoke`（1件ずつ）を使う。**polish/verify の手順は Code Mode のレシピに固定済み**
 （refs/verifier.md）。設計レビュー（critic）・調査（researcher/librarian）・簡易な相談は
 `graphhopper_invoke` で同期実行できる（`task()` でもよいが、結果が届く前に `critic_set` /
@@ -136,15 +136,15 @@ cascade の切替先（baseline/escalate/quality 等）も deny で拒否され�
 - 通常昇格（difficulty/fail_streak）とは独立。strong は target のモデルだけを変え、
   `cascade.escalate` の設定は変えない
 goal 開始時の会話は `.graphhopper/plans/<goal>.intent.md` に `me:`/`assistant:` 付きで保存される。
-advisor・critic と requirement/general lens はこれを読む（behavior/progress と実装 subagent には渡さない）。
+advisor・critic と agreement 角度はこれを読む（他の角度と実装 subagent には渡さない）。
 verifier clean の後に差分を変えると `complete` は止まる（検証時点の diff の sha1 と照合）。
 再検証するか、人間の判断で `force: true`（`goal_complete` に `diff_gate: forced`）。
 
 ## フェーズ
 
 ```
-designing → implementing → router_check → polish ─┬─ route=polish:  simplify → verifier ×3
-                                                   └─ route=advisor: (simplify skip) → verifier ×1
+designing → implementing → router_check → polish ─┬─ route=polish:  simplify → verifier（角度 1+4）
+                                                   └─ route=advisor: (simplify skip) → verifier（角度 1+2）
                  ↑______________________________________|
                      drift target=implementing の巻き戻し
 ```
@@ -174,14 +174,14 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
   （題から判定させるほうが安く、記録も残る）
 - 手動で判定し直したいときだけ `graphhopper_route(request)` → `graphhopper_decide(request)` →
   `graphhopper_route_set(route, reason)`。手動の decide も同じログに記録される
-- **full=フル**（現行通り）/**light=軽量**（design の内容規約は full と同じ。判断は少なくてよいが1件以上、critic省略、verifier general×1）/
+- **full=フル**（現行通り）/**light=軽量**（design の内容規約は full と同じ。判断は少なくてよいが1件以上、critic省略、verifier は枠が少ない）/
   **direct=直行**（loopなし・goalを作らない。historyに1行のみ残る）/
   **advised=軽量＋第二意見**（light相当＋implementing前にadvisor相談1回。lightはadvisor・critic省略）/
   **oracle=多角**（full相当＋開始時にoracle相談1回。stuck時は同session継続）
 - parse失敗・範囲外・未記録は**fullに倒す**（fail-safe。state null＝full）。
   旧A/B/Cも受理しfull/light/directに写像する
 - **昇格のみ可**（full→light禁止のラチェット）。stuck発火時は `graphhopper_escalate`、
-  `router_check` でlight/advised＋大diffなら**自動昇格**（designing巻き戻し＋肉付け＋critic1回＋fan-out×3）。
+  `router_check` でlight/advised＋大diffなら**自動昇格**（designing巻き戻し＋肉付け＋critic1回＋角度の並列検証）。
   stuck発火時もlight/advisedは自動昇格する（fullのstuckは従来通りoracle相談）。
   昇格後はcritic記録なしにimplementingへ進めない（機械ゲート）
 - light適用条件（decide criteria）：単一関心・設計判断が少ない（1件以上。判断ゼロの作業は direct）・既存踏襲・テスト容易。
@@ -248,7 +248,7 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
   agent は提案のみ、適用はメインが Read と edit で行う（interface・signature・新規依存は high 扱いで人間確認）
 - **第三者チェック（verifier）は省略できない**。`verifier_set` は results が空だと機械的に拒否する
 - `light`/`advised` で route=polish になると `router_check` が自動昇格し `escalated: true` を返す。
-  その場合レシピは打ち切られ、designing に戻る（design 肉付け＋critic 1回＋3lens）
+  その場合レシピは打ち切られ、designing に戻る（design 肉付け＋critic 1回＋選ぶ角度 4 つ＋agreement）
 - ルール文書（`AGENTS.md` / `skills/**.md` / `src/agents.ts`）を変えた goal は、`tail` の前に
   usability を済ませる（指摘で文書を直すと差分が変わり、diff ゲートの再検証が要るため）
 
@@ -302,7 +302,7 @@ compaction時はd1 keep-listが自動注入される（要約落ち防止の制�
 
 ## 検証のゲートと採点基準の凍結
 
-- **採点基準は goal 開始時に凍結される**。verifier の lens 指示（固定部分）と出力契約は
+- **採点基準は goal 開始時に凍結される**。verifier の共通ルールと出力の形は
   `.graphhopper/plans/<goal>.rubric.json` の文面で走る。goal 中に `src/prompts.ts` や
   `src/verify.ts` を直しても、その goal の検証には効かない（次の goal から効く）
 - 凍結ファイルを消す・書き換えると `verify` は止まる（`rubric_tampered`）。**verify に force は無い**。
@@ -314,11 +314,11 @@ compaction時はd1 keep-listが自動注入される（要約落ち防止の制�
   各ゲートは `enforce`（拒否）か `observe`（理由を history に記録して通す）。既定は usability /
   verifier / diff_hash が enforce、`verifier_self_modified` が observe（verifier 自体を直す goal を
   止めないため）。goal 中に config を変えても効かない
-- `verifier_self_modified` は「採点コード（`src/verify.ts` / `src/prompts.ts` / `src/state.ts`）か
+- `verifier_self_modified` は「採点コード（`src/verify.ts` / `src/prompts.ts` / `src/angles.ts` / `src/verdict.ts`）か
   verifier の system prompt（agent md）が goal 中に変わった」ことを検知するゲート。
   凍結ファイルの欠落・不一致（改ざん）も同じゲートで扱う
 - verifier の出力 json には任意で `severity`（`{must_fix,should_fix,nit,pre_existing}`）を付ける
-  （`graphhopper_verifier_set` では lens ごとの `severity` 引数）。**重要度の目安**で
+  （`graphhopper_verifier_set` では 角度ごとの `severity` 引数）。**重要度の目安**で
   drift/clean の判定は変えない。数えられないときは省略し、`0` と書かない（未申告と 0 件は別物。
   status の `verifier_severity` 行で `（behavior: 未申告）` のように出る）
 
@@ -335,7 +335,7 @@ compaction時はd1 keep-listが自動注入される（要約落ち防止の制�
 - implementing 以降に、承認済みの design の内容を変える必要が出たとき（designing 中の加筆・critic/verifier 指摘の反映は含まない）
 - `AGENTS.md`・`skills/**.md` の一括置換（同じ置換を複数箇所へ一度に適用すること。1 行ずつの修正なら不要）
 - 既定を超える fan-out の本数、または既定にないモデルへの格上げ
-  （phase 連動の cascade 切替、verifier の既定 3 lens など定常の呼び出しは対象外）
+  （phase 連動の cascade 切替、verifier の角度の並列実行など定常の呼び出しは対象外）
 
 判断に迷ったら「戻せるか」「外に出るか（push・本番・外部 API）」「お金が動くか」の 3 つで見る。
 

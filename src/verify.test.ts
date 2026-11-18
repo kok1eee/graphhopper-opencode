@@ -1,15 +1,16 @@
 /**
  * verify の採点基準の凍結と severity の読み取り（design g-mwmnvx3x 判断1・4）。
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
-  buildLensPrompt,
+  buildAnglePrompt,
   loadRubric,
   parseLensVerdict,
   parseSeverity,
+  RUBRIC_CODE_FILES,
   rubricPath,
   rubricStatus,
   snapshotRubric,
@@ -25,6 +26,7 @@ function tmpRoot(): string {
   roots.push(root);
   return root;
 }
+const ent = (id: string) => ({ id, title: id, doubt: "d", scope: "s", source: "list" as const, carried: false });
 function goal(root: string): string {
   return startGoal(root, "rubric test", "s1").goal.id;
 }
@@ -47,10 +49,10 @@ describe("採点基準の凍結（design g-mwmnvx3x 判断1）", () => {
       static: Record<string, string[]>;
       hash: string;
     };
-    raw.static["graphhopper-verifier-requirement"] = ["凍結された指示文"];
+    raw.static["common"] = ["凍結された指示文"];
     writeFileSync(file, JSON.stringify(raw), "utf8");
 
-    const prompt = buildLensPrompt(root, id, "requirement", paths(root, id));
+    const prompt = buildAnglePrompt(root, id, ent("wiring"), paths(root, id));
     /* 固定部分は凍結側。ただし内容を書き換えたので hash 不一致＝tampered */
     expect(prompt).toContain("凍結された指示文");
     expect(rubricStatus(root, id).tampered).toBe(true);
@@ -63,8 +65,8 @@ describe("採点基準の凍結（design g-mwmnvx3x 判断1）", () => {
     const st = rubricStatus(root, id);
     expect(st.frozen).toBe(true);
     expect(st.tampered).toBe(false);
-    const prompt = buildLensPrompt(root, id, "behavior", paths(root, id));
-    expect(prompt).toContain("behavior lens");
+    const prompt = buildAnglePrompt(root, id, ent("wiring"), paths(root, id));
+    expect(prompt).toContain("疑うこと");
   });
 
   test("動的部分（進捗タスク）は凍結されず、verify 時の現行が入る", () => {
@@ -80,7 +82,7 @@ describe("採点基準の凍結（design g-mwmnvx3x 判断1）", () => {
       ],
     });
     expect(readTodos(root, id).items).toHaveLength(1);
-    const prompt = buildLensPrompt(root, id, "progress", paths(root, id));
+    const prompt = buildAnglePrompt(root, id, ent("agreement"), paths(root, id));
     expect(prompt).toContain("凍結後に足したタスク");
   });
 
@@ -91,7 +93,7 @@ describe("採点基準の凍結（design g-mwmnvx3x 判断1）", () => {
     const st = rubricStatus(root, id);
     expect(st.frozen).toBe(false);
     expect(st.tampered).toBe(false);
-    expect(buildLensPrompt(root, id, "general", paths(root, id))).toContain("general lens");
+    expect(buildAnglePrompt(root, id, ent("wiring"), paths(root, id))).toContain("疑うこと");
   });
 
   test("snapshot を消すと frozen=false になり、呼び出し側が改ざんとして扱える", () => {
@@ -100,6 +102,29 @@ describe("採点基準の凍結（design g-mwmnvx3x 判断1）", () => {
     snapshotRubric(root, id);
     rmSync(rubricPath(root, id));
     expect(rubricStatus(root, id)).toMatchObject({ frozen: false, tampered: false });
+  });
+
+  test("repo 側の agent 定義の変化も検知する（g-mwmqmg6b 判断5）", () => {
+    const repoAgent = join(import.meta.dir, "..", ".opencode", "agents", "graphhopper-verifier.md");
+    const before = existsSync(repoAgent) ? readFileSync(repoAgent, "utf8") : null;
+    if (before === null) return;
+    const root = tmpRoot();
+    const id = goal(root);
+    snapshotRubric(root, id);
+    try {
+      writeFileSync(repoAgent, `${before}\n<!-- changed -->\n`, "utf8");
+      expect(rubricStatus(root, id).agentChanged).toBe(true);
+    } finally {
+      writeFileSync(repoAgent, before, "utf8");
+    }
+    expect(rubricStatus(root, id).agentChanged).toBe(false);
+  });
+
+  test("採点コードの監視対象に state.ts は無く verdict.ts がある（g-mwmqmg6b 判断5）", () => {
+    expect(RUBRIC_CODE_FILES).toContain("verdict.ts");
+    expect(RUBRIC_CODE_FILES).toContain("angles.ts");
+    expect(RUBRIC_CODE_FILES).not.toContain("state.ts");
+    for (const f of RUBRIC_CODE_FILES) expect(existsSync(join(import.meta.dir, f))).toBe(true);
   });
 
   test("goal が違う snapshot は読まない", () => {
@@ -164,5 +189,86 @@ describe("severity の読み取り（design g-mwmnvx3x 判断4）", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.verdict.severity?.must_fix).toBe(1);
+  });
+});
+
+describe("角度の prompt と prior（design g-mwmqmg6b 判断1・4）", () => {
+  const entry = (id: string, carried = false) => ({
+    id,
+    title: `題-${id}`,
+    doubt: `疑う-${id}`,
+    scope: `範囲-${id}`,
+    source: "list" as const,
+    carried,
+  });
+  const p = { designPath: "/d.md", diffPath: "/diff", diagPath: "/diag", intentPath: "/intent.md", priorPath: "/prior.md", findingsPath: "/find.md" };
+
+  test("題・疑うこと・範囲が入る。意図ログは agreement だけ", () => {
+    const root = tmpRoot();
+    const id = goal(root);
+    const a = buildAnglePrompt(root, id, entry("wiring"), p);
+    expect(a).toContain("題-wiring");
+    expect(a).toContain("疑う-wiring");
+    expect(a).toContain("範囲-wiring");
+    expect(a).not.toContain("/intent.md");
+    expect(buildAnglePrompt(root, id, entry("agreement"), p)).toContain("/intent.md");
+  });
+
+  test("siblings と持ち越しには指摘ファイルが入る。通常は入らない", () => {
+    const root = tmpRoot();
+    const id = goal(root);
+    expect(buildAnglePrompt(root, id, entry("siblings"), p)).toContain("/find.md");
+    expect(buildAnglePrompt(root, id, entry("siblings"), p)).not.toContain("/prior.md");
+    expect(buildAnglePrompt(root, id, entry("siblings", true), p)).toContain("/prior.md");
+    expect(buildAnglePrompt(root, id, entry("wiring", true), p)).toContain("/prior.md");
+    expect(buildAnglePrompt(root, id, entry("wiring"), p)).not.toContain("/prior.md");
+  });
+
+  const fence = (o: object) => "x\n```json\n" + JSON.stringify(o) + "\n```";
+  test("prior を読める。unresolved があれば clean は drift になる", () => {
+    const ok = parseLensVerdict(fence({ level: "clean", summary: "s", prior: { valid: 1, invalid: 0, unresolved: 0 } }));
+    expect(ok.ok && ok.verdict.prior).toEqual({ valid: 1, invalid: 0, unresolved: 0 });
+    expect(ok.ok && ok.verdict.level).toBe("clean");
+    const bad = parseLensVerdict(fence({ level: "clean", summary: "s", prior: { valid: 0, invalid: 0, unresolved: 2 } }));
+    expect(bad.ok && bad.verdict.level).toBe("drift");
+  });
+});
+
+describe("凍結の新しい形（design g-mwmqmg6b 判断6）", () => {
+  const rewrite = (root: string, id: string, f: (r: Record<string, unknown>) => void) => {
+    const file = rubricPath(root, id);
+    const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    f(raw);
+    writeFileSync(file, JSON.stringify(raw), "utf8");
+  };
+
+  test("v2 は共通ルールだけを凍結する。共通ルールを書き換えると改ざん", () => {
+    const root = tmpRoot();
+    const id = goal(root);
+    const snap = snapshotRubric(root, id);
+    expect(snap?.v).toBe(2);
+    expect(Object.keys(snap?.static ?? {})).toEqual(["common"]);
+    rewrite(root, id, (r) => ((r["static"] as Record<string, string[]>)["common"] = ["改ざん"]));
+    expect(rubricStatus(root, id).tampered).toBe(true);
+  });
+
+  test("前の形（v 無し）は hash が合えば改ざんにならず legacy", () => {
+    const root = tmpRoot();
+    const id = goal(root);
+    snapshotRubric(root, id);
+    rewrite(root, id, (r) => delete r["v"]);
+    const st = rubricStatus(root, id);
+    expect(st.legacy).toBe(true);
+    expect(st.tampered).toBe(false);
+  });
+
+  test("角度の文面は凍結に入らず、prompt には現行の文面が出る", () => {
+    const root = tmpRoot();
+    const id = goal(root);
+    snapshotRubric(root, id);
+    const e = { id: "x", title: "新しい題", doubt: "新しい疑い", scope: "s", source: "created" as const, carried: false };
+    const p = buildAnglePrompt(root, id, e, { designPath: "/d", diffPath: "/f", diagPath: "/g", intentPath: null });
+    expect(p).toContain("新しい疑い");
+    expect(rubricStatus(root, id).tampered).toBe(false);
   });
 });

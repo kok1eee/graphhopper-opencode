@@ -80,6 +80,6 @@ another account is funded — unset the env key so the stored one applies.
 - Agent `temperature` has no v2 field (carried as `request.body`, not yet sent
   by the runner). `ctx.permission.rules` doubling was skipped (replace
   semantics could wipe user rules; throw-gate is primary and proven).
-- d1 judgments (`graphhopper_decide`/`graphhopper_selector`) call the Liquid
+- d1 judgments (`graphhopper_decide`) call the Liquid
   decisions API over HTTPS directly — they never created sessions, so no
   session-API migration applies (P2-2 closed as misconceived).

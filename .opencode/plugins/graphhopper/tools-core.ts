@@ -1,6 +1,6 @@
 /**
  * graphhopper v2 plugin: core loop tools (goal/status/phase/route/decide/
- * route_set/selector/escalate/set_eval/attempt)。
+ * route_set/escalate/set_eval/attempt)。
  * v1 src/index.ts の同名 tool execute 本体を v2 形 (JSON Schema＋{content}) に移植。
  */
 import { $ } from "bun";
@@ -26,9 +26,6 @@ import {
   decideRoute,
   formatDecisionNextStep,
   formatDecisionSummary,
-  formatSelectorResult,
-  SELECTOR_TOOL_DESCRIPTION,
-  selectLenses,
 } from "../../../src/decision";
 import { finishCascade, maybeRequestCheckpoint, syncCascade } from "./cascade";
 import { judgeGoalDifficulty } from "../../../src/entry-decide";
@@ -674,24 +671,6 @@ export function registerCoreTools(
             ? `active goal（${bound.goal.id}）にもbindした（pendingは消去）。`
             : "次: graphhopper_goal(start) で消費される。",
         ].join("\n"),
-      );
-    },
-  });
-
-  editor.add({
-    name: "graphhopper_selector",
-    description: SELECTOR_TOOL_DESCRIPTION,
-    input: S.obj(
-      {
-        design_excerpt: S.str("design.mdの抜粋（goal理解＋受け入れ条件）"),
-        diff_stat: S.str("diff統計（ファイル数・行数・対象領域）"),
-      },
-      ["design_excerpt", "diff_stat"],
-    ),
-    execute: async (input: unknown) => {
-      const args = input as { design_excerpt: string; diff_stat: string };
-      return text(
-        formatSelectorResult(await selectLenses(args.design_excerpt, args.diff_stat, fetch, { root })),
       );
     },
   });

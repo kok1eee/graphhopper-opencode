@@ -125,8 +125,8 @@ export interface GoalScore {
 export type VerdictLevel = "clean" | "drift";
 /** drift 巻き戻し先。implementing 以外は人間の hand-back 待ち（flywheelのmonitor相当） */
 export type DriftTarget = "implementing" | "design" | "requirements";
-/** general: route=advisor の単発呼び出し（3レンズを1つにまとめた統合lens） */
-export type VerifierLens = "requirement" | "behavior" | "progress" | "general";
+/** 角度の id（旧 lens の 4 値を含む。実行時の検証は angles.ts の isValidAngleId） */
+export type VerifierLens = string;
 
 /* 入口トリアージのroute。null＝full（未呼び出し・legacyの機械定義）。
  * light/advised→full昇格のみ可（full→light禁止のラチェット）。directはgoalを作らない */
@@ -158,6 +158,8 @@ export interface VerifierVerdict {
   reason: string;
   target: DriftTarget | null;
   lens: VerifierLens[];
+  /** 角度ごとの level と prior（履歴用） */
+  angles?: { lens: string; level: VerdictLevel; prior?: { valid: number; invalid: number; unresolved: number } }[];
   /** 判定を実行したモデル（未指定時はconfig既定で補完）。評価機能の成績表素材 */
   model?: string | null;
   /** lens並列の実行モデル（混成run用。欠測・旧eventは [model] fallback）。
@@ -842,7 +844,7 @@ export function designTemplate(goalId: string, title: string): string {
     `# design: ${title} (${goalId})`,
     ``,
     `> 意図ログ: .graphhopper/plans/${goalId}.intent.md（goal 開始時の会話。無ければ capture 失敗）`,
-    `> critic と requirement/general lens はこれを読み、design の前提がユーザーの意図からズレていないかを見る。`,
+    `> critic と agreement 角度はこれを読み、design の前提がユーザーの意図からズレていないかを見る。`,
     ``,
     `## 1. goal理解`,
     ``,
@@ -970,6 +972,8 @@ export type HistoryEvent =
       level: VerdictLevel;
       target: DriftTarget | null;
       lens: VerifierLens[];
+      /** 角度ごとの level と前回の指摘の判定（design g-mwmqmg6b 判断8） */
+      angles?: { lens: string; level: VerdictLevel; prior?: { valid: number; invalid: number; unresolved: number } }[];
       model?: string | null;
       /** lens並列の実行モデル（混成run用。旧eventは欠測→[model] fallback） */
       models?: (string | null)[];
@@ -989,6 +993,14 @@ export type HistoryEvent =
     }
   | { type: "rubric_snapshot_failed"; goal: string }
   | { type: "rubric_changed"; goal: string }
+  | { type: "rubric_legacy"; goal: string }
+  | {
+      type: "angles_selected";
+      goal: string;
+      angles: { id: string; source: string; carried: boolean }[];
+    }
+  | { type: "angle_select_failed"; goal: string; reason: string }
+  | { type: "angle_followup"; goal: string; carried: boolean; level: VerdictLevel | "unknown" }
   | { type: "verifier_self_modified"; goal: string; code: boolean; agent: boolean }
   | { type: "config_invalid_gate"; goal: string; gate: string }
   | { type: "severity_inconsistent"; goal: string; must_fix: number }
@@ -1633,7 +1645,7 @@ export function archiveGoalFiles(root: string, goalId: string): void {
   const pairs: [string, string][] = [
     [todosPath(root, goalId), join(dirname(todosPath(root, goalId)), "archive", `${goalId}.json`)],
   ];
-  for (const ext of [".md", ".log.md", ".intent.md"]) {
+  for (const ext of [".md", ".log.md", ".intent.md", ".rubric.json"]) {
     const src = join(dirname(planPath(root, goalId)), `${goalId}${ext}`);
     pairs.push([src, join(dirname(src), "archive", `${goalId}${ext}`)]);
   }
@@ -2567,7 +2579,7 @@ export async function diffOneFile(
 }
 
 /* verifier fan-out用のdiff退避: 実効diff（初期脏れ除外）を1回だけ取得し、
- * repo内（.graphhopper/tmp）に置いてpathで渡す（3 lensへのinline 3重展開を防ぐ。
+ * repo内（.graphhopper/tmp）に置いてpathで渡す（角度ごとの inline 展開を防ぐ。
  * /tmpは子権限で読めないため使わない。ファイル名にgoalを含め並列goalの衝突を避ける）。
  * 初期集合null（legacy）・測定不能時は全文退避に倒す（fail-safe＝読み過ぎ側）。
  * 失敗時は null */
@@ -2898,7 +2910,7 @@ export async function evalToPolish(
     }
     const recorded = await recordRouterCheckWithRisk(shell, root, baseline, diffLines, route);
     const deep = recorded.router.deep
-      ? `\ndeep: ${recorded.router.deep_reason} — behavior lens（polish時）／general lens（advisor時）は休止中（verifier既定モデルの上書きは不要）`
+      ? `\ndeep: ${recorded.router.deep_reason} — verifier の角度は選ぶ役が選ぶ（verifier既定モデルの上書きは不要）`
       : "";
     return {
       transitioned: true,
@@ -2913,162 +2925,24 @@ export async function evalToPolish(
   };
 }
 
-/** verifier fan-out の1レンズ分の結果（verifier_set の results 要素）。
- * model は per-lens上書き（deep時の上位モデル等）。省略時はトップレベルmodel→config既定。
- * 申告値であり実在は検証しない（critic_set／consult_set同型の既知トレードオフ） */
-export interface VerifierResult {
-  lens: VerifierLens;
-  level: VerdictLevel;
-  target?: DriftTarget | null;
-  model?: string | null;
-  /** 重要度の件数（design g-mwmnvx3x 判断4）。undefined＝未申告 */
-  severity?: VerifierSeverityCounts;
-}
-
-export type VerifierSeverityCounts = {
-  must_fix: number;
-  should_fix: number;
-  nit: number;
-  pre_existing: number;
+import {
+  aggregateVerdicts,
+  checkVerifierResults,
+  collectSeverity,
+  formatSeverity,
+  sumSeverity,
+  type VerifierResult,
+  type VerifierSeverityCounts,
+} from "./verdict";
+export {
+  aggregateVerdicts,
+  checkVerifierResults,
+  collectSeverity,
+  formatSeverity,
+  sumSeverity,
+  type VerifierResult,
+  type VerifierSeverityCounts,
 };
-
-/** lens ごとの severity 内訳（未申告は counts: null） */
-export function collectSeverity(results: VerifierResult[]): VerifierSeverityEntry[] {
-  return results.map((r) => ({ lens: r.lens, counts: r.severity ?? null }));
-}
-
-/** 延べ件数（lens をまたいで同じ指摘を重複計上しうる） */
-export function sumSeverity(entries: VerifierSeverityEntry[]): VerifierSeverityCounts {
-  const sum: VerifierSeverityCounts = { must_fix: 0, should_fix: 0, nit: 0, pre_existing: 0 };
-  /* ゼロの数値は parseSeverity と揃える（片方だけ増やさない） */
-  for (const e of entries) {
-    if (!e.counts) continue;
-    sum.must_fix += e.counts.must_fix;
-    sum.should_fix += e.counts.should_fix;
-    sum.nit += e.counts.nit;
-    sum.pre_existing += e.counts.pre_existing;
-  }
-  return sum;
-}
-
-/** status 1 行。未申告の lens を「0 件」と混ぜない（design g-mwmnvx3x 判断4） */
-export function formatSeverity(entries: VerifierSeverityEntry[] | undefined): string {
-  if (!entries || entries.length === 0) return "";
-  const sum = sumSeverity(entries);
-  const missing = entries.filter((e) => !e.counts).map((e) => e.lens);
-  const head = `must-fix ${sum.must_fix} / should-fix ${sum.should_fix} / nit ${sum.nit}`;
-  return missing.length > 0 ? `${head}（${missing.join(",")}: 未申告）` : head;
-}
-
-/* verifier の lens 編成（単一源泉。design g-mwiocibp 判断5）。
- * route=polish（大diff）は3lens、route=advisor（小diff）はgeneral×1。
- * 入口route が light/advised で非昇格なら general×1 のみ、
- * 昇格済み（escalated_at あり）は3lens 必須 —— いずれも checkVerifierResults の
- * 規則と同じ順で判定するので、この関数の出力は必ず検査を通る（テストで全組み合わせ固定）。
- * simplify は route=polish のときだけ必要（条件分岐node。SKILL.md polish節）。 */
-export function planVerifier(opts: {
-  route: RouterRoute | null;
-  entryRoute: EntryRoute | null;
-  escalated: boolean;
-}): { lenses: VerifierLens[]; simplify: boolean } {
-  const three: VerifierLens[] = ["requirement", "behavior", "progress"];
-  const simplify = opts.route === "polish";
-  if (opts.escalated) return { lenses: three, simplify };
-  if (opts.entryRoute === "light" || opts.entryRoute === "advised") {
-    return { lenses: ["general"], simplify };
-  }
-  return { lenses: simplify ? three : ["general"], simplify };
-}
-
-/** verifier_set 入力の検証。通れば null、ダメならエラー文（tool がそのまま返す）。
- * self-graded 完了防止の機械ゲート（旧 lens 空拒否の後継）。
- * opts.entryRoute: light/advised非昇格はgeneral×1のみ可、昇格後は3lens必須。
- * null/full/oracleは現行通り（legacy互換・fullはprose＋router運用）。 */
-export function checkVerifierResults(
-  results: VerifierResult[] | null | undefined,
-  opts?: { entryRoute?: EntryRoute | null; escalated?: boolean },
-): string | null {
-  if (!Array.isArray(results) || results.length === 0) {
-    return "error: results が空です。graphhopper_verifier_set は verifier（graphhopper_verify または graphhopper_invoke）を実際に呼んだ後にしか記録できません（self-graded完了を防ぐための機械的ゲート）。route=advisorでも最低1回、'general' lens で呼んでください。";
-  }
-  const known: VerifierLens[] = [
-    "requirement",
-    "behavior",
-    "progress",
-    "general",
-  ];
-  const seen = new Set<string>();
-  for (const r of results) {
-    if (!r || typeof r !== "object") return "error: results の要素が不正です";
-    if (!known.includes(r.lens)) {
-      return `error: 未知の lens です: ${String((r as { lens?: unknown }).lens)}`;
-    }
-    if (seen.has(r.lens)) {
-      return `error: lens が重複しています: ${r.lens}`;
-    }
-    seen.add(r.lens);
-    if (r.level !== "clean" && r.level !== "drift") {
-      return `error: 不正な level です: ${String((r as { level?: unknown }).level)}`;
-    }
-    if (
-      r.target !== undefined &&
-      r.target !== null &&
-      r.target !== "implementing" &&
-      r.target !== "design" &&
-      r.target !== "requirements"
-    ) {
-      return `error: 不正な target です: ${String(r.target)}`;
-    }
-    if (r.level === "drift" && !r.target) {
-      return `error: drift には target が必要です (lens: ${r.lens})`;
-    }
-    if (
-      r.model !== undefined &&
-      r.model !== null &&
-      (typeof r.model !== "string" || r.model.trim().length === 0)
-    ) {
-      return `error: 不正な model です (lens: ${r.lens})`;
-    }
-  }
-  // entry route×lens照合（light/advised非昇格はgeneral×1のみ、昇格後は3lens必須。
-  // 昇格後はentry_route自体がfullに戻るためescalated旗で判定する。
-  // null/full/oracle非昇格は現行通り＝legacy互換・fullはprose＋router運用）
-  if (opts?.escalated) {
-    if (
-      !seen.has("requirement") ||
-      !seen.has("behavior") ||
-      !seen.has("progress")
-    ) {
-      return "error: 昇格後（light/advised→full）の verifier は requirement/behavior/progress の3lens必須";
-    }
-  } else if (opts?.entryRoute === "light" || opts?.entryRoute === "advised") {
-    const lenses = [...seen];
-    if (lenses.length !== 1 || lenses[0] !== "general") {
-      return "error: entry_route=light/advised（非昇格）の verifier は general×1 のみ可。fan-outが必要なら graphhopper_escalate でfullへ昇格してから3lensで記録せよ";
-    }
-  }
-  return null;
-}
-
-/** verifier fan-out 結果の集約ルール（純粋関数）。
- * 前提: checkVerifierResults で検証済み（非空・既知lens・重複なし・
- * drift に target 必須）。「confidence高 & severity high/critical のみ採用」
- * というメインの裁量だった基準をコード化したもの:
- * - 1つでも drift → 全体 drift。target は `implementing` を優先
- *   （即時巻き戻し可能な唯一の行き先）、無ければ先頭の drift target。
- * - 全 clean → clean (target null)。 */
-export function aggregateVerdicts(results: VerifierResult[]): {
-  level: VerdictLevel;
-  target: DriftTarget | null;
-} {
-  const drifts = results.filter((r) => r.level === "drift");
-  if (drifts.length === 0) return { level: "clean", target: null };
-  const impl = drifts.find((r) => r.target === "implementing");
-  return {
-    level: "drift",
-    target: (impl ?? drifts[0])?.target ?? null,
-  };
-}
 
 export function setVerifierVerdict(
   root: string,
@@ -3093,6 +2967,7 @@ export function setVerifierVerdict(
       level: verdict.level,
       target: verdict.target,
       lens: verdict.lens,
+      ...(verdict.angles ? { angles: verdict.angles } : {}),
       model,
       models,
     });
@@ -3726,12 +3601,28 @@ export interface SavedLensResult {
   level: VerdictLevel;
   target?: DriftTarget;
   model?: string;
+  severity?: VerifierSeverityCounts;
+  /** 前回の指摘の判定（持ち越した角度・siblings のみ） */
+  prior?: { valid: number; invalid: number; unresolved: number };
+  /** drift の本文（次の diff の指摘ファイルの元。clean は持たない） */
+  body?: string;
   summary: string;
 }
 
 export interface SavedVerify {
+  /** 2＝角度の計画つき（無い旧形式は読まずに捨てる。design g-mwmqmg6b 判断2） */
+  v?: 2;
   diff_hash: string;
+  plan?: import("./angles").AnglePlan;
   results: SavedLensResult[];
+}
+
+export function findingsPath(root: string, goalId: string): string {
+  return join(dir(root), "tmp", `verify-${goalId}-findings.md`);
+}
+
+export function priorFindingsPath(root: string, goalId: string): string {
+  return join(dir(root), "tmp", `verify-${goalId}-prior.md`);
 }
 
 export function verifyResultsPath(root: string, goalId: string): string {
@@ -3740,11 +3631,40 @@ export function verifyResultsPath(root: string, goalId: string): string {
 
 export function removeVerifyResults(root: string, goalId: string): void {
   if (!/^g-[0-9a-z]+$/.test(goalId)) return;
-  try {
-    unlinkSync(verifyResultsPath(root, goalId));
-  } catch {
-    // 存在しない・権限なし等は無視
+  for (const p of [
+    verifyResultsPath(root, goalId),
+    findingsPath(root, goalId),
+    priorFindingsPath(root, goalId),
+  ]) {
+    try {
+      unlinkSync(p);
+    } catch {
+      // 存在しない・権限なし等は無視
+    }
   }
+}
+
+/** 今回の 1 巡目の指摘の本文を書く（追い検証の siblings に渡す） */
+export function writeFindings(root: string, goalId: string, text: string): string {
+  const p = findingsPath(root, goalId);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, text, "utf8");
+  return p;
+}
+
+/** 前回の diff の指摘の本文を書く（null なら消す） */
+export function writePriorFindings(root: string, goalId: string, text: string | null): void {
+  const p = priorFindingsPath(root, goalId);
+  if (text === null) {
+    try {
+      unlinkSync(p);
+    } catch {
+      // 無ければ何もしない
+    }
+    return;
+  }
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, text, "utf8");
 }
 
 export function readSavedVerify(root: string, goalId: string): SavedVerify | null {
@@ -3752,7 +3672,9 @@ export function readSavedVerify(root: string, goalId: string): SavedVerify | nul
     const raw = JSON.parse(readFileSync(verifyResultsPath(root, goalId), "utf8")) as unknown;
     const v = raw as { diff_hash?: unknown; results?: unknown };
     if (typeof v.diff_hash !== "string" || !Array.isArray(v.results)) return null;
-    return v as unknown as SavedVerify;
+    const sv = v as unknown as SavedVerify;
+    if (sv.v !== 2 || !sv.plan || !Array.isArray(sv.plan.entries)) return null;
+    return sv;
   } catch {
     return null;
   }
@@ -3762,19 +3684,6 @@ export function writeSavedVerify(root: string, goalId: string, data: SavedVerify
   const path = verifyResultsPath(root, goalId);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(data, null, 2), "utf8");
-}
-
-/** 同じ diff 指紋の保存結果だけを合成する（違えば今回の結果だけを残す） */
-export function mergeSavedVerify(
-  prev: SavedVerify | null,
-  diffHash: string,
-  next: SavedLensResult[],
-): SavedLensResult[] {
-  if (!prev || prev.diff_hash !== diffHash) return next;
-  const byLens = new Map<VerifierLens, SavedLensResult>();
-  for (const r of prev.results) byLens.set(r.lens, r);
-  for (const r of next) byLens.set(r.lens, r);
-  return [...byLens.values()];
 }
 
 /** eval_cmd をシェルで実際に実行し、exit codeで機械的に合否判定する（自己申告に依存しない） */

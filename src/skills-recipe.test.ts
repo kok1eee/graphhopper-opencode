@@ -256,7 +256,7 @@ describe("refs/verifier.md のレシピ（Code Mode）", () => {
     expect(calls.some((c) => c.name === "graphhopper_phase")).toBe(false);
   });
 
-  test("polish 2バッチ目: 3lens の結果で完了まで進む", async () => {
+  test("polish 2バッチ目: 複数角度の結果で完了まで進む", async () => {
     const three = {
       results: [
         { lens: "requirement", level: "clean", model: "p/m" },

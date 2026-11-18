@@ -1,13 +1,15 @@
-#### selector（任意・advisory-only）
+#### 角度の選び方（verify が自動で行う）
 
-polish前にlens編成の助言が欲しい場合のみ使う（現行routerは維持。省略可）。
-判定は d1 decision-model（`LIQUID_API_KEY` 必須。約0.7秒・$0・決定的）:
+verify は固定の lens を持たない。変更ごとに角度（疑うこと＋見る範囲）を選んで並列に走らせる。
 
-1. `graphhopper_selector(design_excerpt, diff_stat)` を呼ぶ（design抜粋＋diff統計のみ。blast radiusは渡さない）
-2. 返却の `lenses`（1-3件）を参考にする。3観点のNoulを各0.5閾値で判定し、全て未満なら「該当なし→general」。
-   design抜粋が契約変更系キーワード（契約/migration/互換/breaking/schema）に当たるとrequirementを強制追加する
-3. `fallback=true`（key未設定・API失敗等＝判定不能）の場合は従来router（advisor/polish）を継続せよ（general倒しはしない）。
-   採否の決定はmain。toolは判定を返すだけ（advisory-only）
+- 常設は `agreement`（合意・意図との照合）1 つ。ほかは verifier の専任の 1 回（選ぶ役）が、
+  角度の一覧（`src/angles.ts`）から選ぶ。選ぶ数（枠）は route と入口で決まる（昇格済み 4／light・advised 非昇格 1／polish 4／advisor・未判定 2。`agreement` は別で、この数に入らない）。
+  選ぶ役が失敗したら既定の角度（wiring・test-efficacy・cleanup・behavior）で進め、本文に出る
+- メインは `add` で角度を足せる（枠の外。1 つの diff につき 2 個まで）。一覧に無い角度は `title`/`doubt` が必須
+- 前の diff で drift だった角度は次の diff へ持ち越され、`prior`（valid/invalid/unresolved）で前回の指摘の扱いを判定する。
+  `unresolved` があれば drift 扱い
+- 1 巡目に drift があれば、同じ種類の問題を探す追い検証 `siblings` が 1 回だけ続く（最大 2 巡）
+- `router_check` の `angle_slots` は上の枠の数（持ち越した角度は（`add` 由来を除き）枠に数えるので、選ぶ役が選ぶのは残りだけ）。固定の lens 名は返らない
 
 #### verify（Code Mode レシピ）
 
@@ -66,10 +68,11 @@ return { stop: "clean", summaries: v.summaries, completed };
 2. 提案を適用する（下の「simplify の適用」。ここで編集するのでバッチが切れる）
 3. `recipe: tail` を実行する（`diag` → `diff_stash` → `verify` → 記録 → 完了）
 
-`verify` は編成（polish=3lens / advisor=general×1）を `router_check` と同じ関数で決める。
-`lens` を渡せば一部だけ再実行できる（同じ diff 指紋のときだけ保存済みの結果と合成するので、
-1 lens だけ判定不能だったときにその lens だけ投げ直せる）。例:
-`tools.graphhopper_verify({ lens: ["behavior"] })`（配列。値は `requirement`/`behavior`/`progress`/`general`）。
+`verify` は計画（今の diff の角度の組）を保存し、同じ diff 指紋のあいだは保存済みの結果と合成する。
+`lens` を渡せば計画のうち一部だけ再実行できる（判定不能だった角度だけ投げ直せる）。例:
+`tools.graphhopper_verify({ lens: ["wiring"] })`（配列。値は `v.lenses` の id。計画に無い id はエラー）。
+`add` で角度を足す: `tools.graphhopper_verify({ add: [{ id: "security", title: "認可の抜け", doubt: "認可チェックを飛ばす経路がないか" }] })`。
+`verifier_set` は計画の角度を全部含む results だけ受け付ける（足りない・計画外は拒否。`siblings` だけ計画外でも可）。追い検証が走ると `v.results` に `siblings` が入るので、そのまま渡す（`v.lenses` は計画の id 一覧。`siblings` は持ち越したときだけ入る）。
 
 **順序（ルール文書を変えた goal と drift の扱い）**
 
@@ -92,7 +95,7 @@ return { stop: "clean", summaries: v.summaries, completed };
 
 #### 採点基準の凍結（design g-mwmnvx3x 判断1）
 
-- `verify` は goal 開始時に凍結した lens 指示（固定部分）と出力契約で prompt を作る。
+- `verify` は goal 開始時に凍結した共通ルールと出力の形で prompt を作る（角度の文面は凍結しない）。
   goal 中に `src/prompts.ts` / `src/verify.ts` を直しても、その goal の判定には効かない
   （次の goal から効く）。進捗タスク・phase などの動的部分は毎回現行から作る
 - 凍結ファイル（`.graphhopper/plans/<goal>.rubric.json`）が無い・内容が合わないと
@@ -101,10 +104,10 @@ return { stop: "clean", summaries: v.summaries, completed };
   取っていなければ `verifier` ゲートで complete も止まる。回避は「採点基準を戻して再検証」か
   「新しい goal」。`graphhopper_goal(action: "complete", force: true)` は全ゲートを飛ばし、
   observe の記録も残らない
-- `verifier_self_modified` の対象は、採点コード（`src/verify.ts` / `src/prompts.ts` / `src/state.ts`）と
+- `verifier_self_modified` の対象は、採点コード（`src/verify.ts` / `src/prompts.ts` / `src/angles.ts` / `src/verdict.ts`）と
   verifier の system prompt（agent md）、および凍結ファイルの欠落・不一致（改ざん）。
   `verify` では記録のみ（改ざんは除く。改ざんは verify を止める）、`complete` でゲート設定に従う
-- 凍結されていない旧 goal は従来どおり現行の基準で走る（fail-open）
+- 凍結されていない旧 goal は従来どおり現行の基準で走る（fail-open）。前の形（v1）の凍結ファイルは hash だけ確かめ、`rubric_legacy` を記録する
 
 #### 何が自動で守られるか（散文で守らなくてよい）
 
@@ -146,7 +149,7 @@ return { stop: "clean", summaries: v.summaries, completed };
 - 割当は config（`~/.config/opencode/graphhopper.json` の `agents["graphhopper-verifier"]`）で決まる。
   この文書にモデル名を書かない（実設定と食い違うため）。変えたら `bun scripts/gen-agents.ts` と
   セッション再起動
-- **3 lens は 5 秒ずつずらして起動する**（`verify` の既定 `delayMs: 5000`）。verifier が
+- **角度は 5 秒ずつずらして起動する**（`verify` の既定 `delayMs: 5000`）。verifier が
   単一プロキシの provider（claude-oauth 等）に載っていると、同時投入で
   `Timed out waiting for response headers` になりうる。ずらしは最大 10 秒で、待ち時間の損は小さい
 - `verify` の `model` は config の `model_allow` / `model_deny` で機械的に検査される。
@@ -176,9 +179,9 @@ return { stop: "clean", summaries: v.summaries, completed };
 #### 意図ログ（design g-mwebh9vl）
 
 goal 開始時の会話が `.graphhopper/plans/<goal>.intent.md` に `me:` / `assistant:` ラベル付きで
-保存される（plugin 経路のみ）。critic と requirement/general lens はこれを読み、design や実装が
-ユーザーの意図からズレていないかを見る（`verify` が requirement/general にだけ path を渡す）。
-behavior/progress lens と実装 subagent には渡さない（決定を再審議して止まるため）。
+保存される（plugin 経路のみ）。critic と agreement 角度はこれを読み、design や実装が
+ユーザーの意図からズレていないかを見る（`verify` が agreement にだけ path を渡す）。
+他の角度と実装 subagent には渡さない（決定を再審議して止まるため）。
 既知のキーはマスクするが best-effort で、会話は verifier/critic のモデル提供元に送られる。
 コンパクション境界より前の履歴は取れないことがある。
 
@@ -200,11 +203,11 @@ goal 中に書くファイル（`state.json`・`history.jsonl`・退避 diff・`
 退避 diff にも入る）。止まった原因が分からないときは
 `graphhopper_diff_stash` の `path` を読んで、何が差分に入っているか確かめる。
 
-- **diff 肥大は検証コスト3倍**: polish routeは3lensが差分（作業ファイル除く）を読む。748行級は1回で3×748行の
-  コンテキスト消費。goalを小さく切ってadvisor（verifier×1）に収めるのが最大の節約。
+- **diff 肥大は検証コスト3倍**: polish routeは複数の角度が差分（作業ファイル除く）を読む。748行級は1回で角度数×748行の
+  コンテキスト消費。goalを小さく切って枠の少ない route に収めるのが最大の節約。
   巻き戻しはさらに3倍するので、criticで初回品質を上げることも節約になる
 - **drift は全件報告させる**（閾値カットしない。「重大なものだけ報告」のような保守的指示は
-  過少報告を招く——`verify` の prompt は既存の lens 指示文を使うので、この原則は自動で入る）
+  過少報告を招く——`verify` の prompt は共通ルールを使うので、この原則は自動で入る）
 - CI は `bun scripts/gen-agents.ts --check-policy` で、commit 済みの
   `.graphhopper/config.example.json` をポリシー源に catalog と cascade 設定を検査する。
   ローカルでは project catalog に加えて `~/.config/opencode/agents` が存在すれば

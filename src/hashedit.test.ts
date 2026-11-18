@@ -644,7 +644,7 @@ describe("continuationText 3段階文面", () => {
     expect(light).toContain("critic省略");
     /* light は base 側にも advisor 節を置かない（注記だけで明示する） */
     expect(light).not.toContain("graphhopper-advisor");
-    expect(g.effectivePhaseAction("polish", "light")).toContain("general×1");
+    expect(g.effectivePhaseAction("polish", "light")).toContain("選んだ角度");
 
     const advised = g.effectivePhaseAction("designing", "advised");
     expect(advised).toContain("内容規約");

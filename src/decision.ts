@@ -1,5 +1,5 @@
 /**
- * decision — decision-model 共通基盤（入口route・selector等の利用元が共有）。
+ * decision — decision-model 共通基盤（入口route・compact等の利用元が共有）。
  *
  * chat LLMではなくテキストを生成しないため opencode modelとしては配線できず、
  * plugin tool から直接HTTPSで叩く。プロバイダは2つ（同じ System One 形式）:
@@ -8,15 +8,15 @@
  *         （既定 jev-1.13-free。APIキー無しでも叩ける。有料 jev-1.13 は OPENCODE_API_KEY がある時だけ）
  *
  * 構成: callDecision（HTTP・認証・timeout・例外握りの唯一の窓口）の上に
- * 用途別の関数（decideRoute／selectLenses）を載せる。新しい利用場所を足す時は
+ * 用途別の関数（decideRoute）を載せる。新しい利用場所を足す時は
  * callDecisionを再利用し、HTTP部分をコピーしないこと。
  *
- * プロバイダ切替は入口判定（decideRoute）だけに適用する。selector/compact は d1 固定
+ * プロバイダ切替は入口判定（decideRoute）だけに適用する。compact は d1 固定
  * （既定が無言で変わるのを避ける）。
  * 入口判定は primary とは別プロバイダへ shadow 呼び出しを投げ、較正ログに並べて残す
  * （shadow は route 判定・state に一切影響しない）。
  *
- * 失敗は呼び出し側が極性を決める（routeはfull、selectorはfallback=true）。
+ * 失敗は呼び出し側が極性を決める（routeはfull）。
  * 本モジュールはstateを書かない。
  */
 import { randomUUID } from "node:crypto";
@@ -40,17 +40,8 @@ const FALLBACK_STATUSES = new Set([402, 403, 404, 429]);
 /** routeのconfidenceがこれ未満ならfullに倒す（初期値。scoreboardで調整） */
 export const DECISION_CONFIDENCE_FLOOR = 0.6;
 export const DECISION_TIMEOUT_MS = 15_000;
-/** selectorはadvisory-onlyで取りこぼしの害が小さい。decision APIはレイテンシがぶれる
- * （無料枠 d1:free の実測で3〜15s超）ため、遅い時は短く切ってfallbackに倒す（待たせない）。
- * 現在は d1（有料・入力トークン課金のみ）を使うが、timeoutは無料枠時代の保守的な値を維持する */
-export const SELECTOR_TIMEOUT_MS = 5_000;
-/** selectorのみ、一過性の失敗（timeout/429/5xx/ネットワーク）を最大2回リトライする。
- * 無料枠 d1:free はコールドスタートで初回が15s級に遅れ、温まると0.3s台になるため、
- * 打ち切った初回がサーバーを起こし、2回目以降で拾える。最悪 5s×3=15s
- * （現在の d1 でも同じリトライ方針を維持する） */
-export const SELECTOR_RETRIES = 2;
-/** selectorのNoul採用閾値（0.5＝公式docの「最大不確実」中点。初期値） */
-export const SELECTOR_NOUL_THRESHOLD = 0.5;
+/** 一過性の失敗（timeout/429/5xx/ネットワーク）のリトライ回数（テストが参照する） */
+export const DECISION_RETRIES = 2;
 
 export type FetchFn = typeof fetch;
 
@@ -731,133 +722,4 @@ export async function decideRoute(
     false,
     r.model,
   );
-}
-
-/* ───────── verifier編成selector ───────── */
-
-/* 契約変更系キーワード（日英混在）。design抜粋にマッチしたらrequirementを強制追加する。
- * 誤検出（「互換性テストの追加」等）は許容: requirementは取りこぼし防止側で、
- * 追加しても検証が1 lens増えるだけ。偽陽性より偽陰性の方が害が大きい */
-export const SELECTOR_FORCE_REQUIREMENT =
-  /契約|migration|互換|breaking|schema|スキーマ/i;
-
-/* selectorがNoulで判定するlensのキー（generalは含めない）。質問定義・組立・欠測判定の単一源泉 */
-export const SELECTOR_LENS_KEYS = ["requirement", "behavior", "progress"] as const;
-export type SelectorLensKey = (typeof SELECTOR_LENS_KEYS)[number];
-
-/* 3観点のNoul質問。generalは質問にしない（「3観点を統合した単発」で他lensと排他。
- * どれも閾値に届かなければ「該当なし→general」とする） */
-export const SELECTOR_QUESTIONS: Record<SelectorLensKey, DecisionQuestion> = {
-  requirement: {
-    type: "noul",
-    instructions:
-      "この変更は、設計意図・done定義との一致を重点的に検証する必要があるか。契約・互換性・仕様の変更が絡むなら必要",
-  },
-  behavior: {
-    type: "noul",
-    instructions:
-      "この変更は、振る舞い・テスト・副作用を重点的に検証する必要があるか。実行時の挙動や状態遷移に影響するなら必要",
-  },
-  progress: {
-    type: "noul",
-    instructions:
-      "この変更は、進捗・残件・タスク列との対応を重点的に検証する必要があるか。複数タスクにまたがり取りこぼしが起きうるなら必要",
-  },
-};
-
-export type SelectResult = {
-  lenses: state.VerifierLens[];
-  reason: string;
-  /** true＝判定不能（API失敗等）。呼び出し側は従来routerを継続せよ（generalへ倒さない） */
-  fallback: boolean;
-  /** 各Noulの確率（較正用。欠測時は空） */
-  probs: Partial<Record<SelectorLensKey, number>>;
-};
-
-/* Noul確率→lens集合の組立（純粋関数。単体テスト対象）。
- * - 閾値以上のlensを採用（最大3件）
- * - 全て閾値未満＝「該当なし」→ general（fallbackではない）
- * - design抜粋が契約変更系キーワードにマッチ → requirementを強制追加
- * - 有効なNoulが1件も無い（欠測）＝判定不能 → fallback=true（general倒しはしない） */
-export function assembleLenses(
-  answers: DecisionAnswers,
-  designExcerpt: string,
-): SelectResult {
-  const probs = extractNoulProbs(answers, SELECTOR_LENS_KEYS);
-  if (Object.keys(probs).length === 0) {
-    return {
-      lenses: [],
-      reason: "d1応答に有効なNoulなし→従来router",
-      fallback: true,
-      probs,
-    };
-  }
-  const hit = SELECTOR_LENS_KEYS.filter(
-    (k) => (probs[k] ?? 0) >= SELECTOR_NOUL_THRESHOLD,
-  );
-  const forced =
-    SELECTOR_FORCE_REQUIREMENT.test(designExcerpt) && !hit.includes("requirement");
-  const picked: SelectorLensKey[] = forced ? ["requirement", ...hit] : hit;
-  const lenses: state.VerifierLens[] = picked.length > 0 ? picked : ["general"];
-  const fmt = (k: SelectorLensKey) => `${k}=${probs[k]?.toFixed(2) ?? "n/a"}`;
-  const reason =
-    `d1選択(${SELECTOR_LENS_KEYS.map(fmt).join(",")})` +
-    (forced ? " requirement強制(契約変更系キーワード)" : "") +
-    (picked.length === 0 ? " 該当なし→general" : "");
-  return { lenses, reason, fallback: false, probs };
-}
-
-/* selector toolの人用テキスト（応答文の単一源泉。文面ズレ防止） */
-export const SELECTOR_TOOL_DESCRIPTION =
-  "verifier編成selectorをd1 decision-modelで判定する（advisory-only。現行routerは維持）。design抜粋とdiff統計を渡すとlens（1-3件）を返す。判定不能時はfallback=true（従来routerを継続。general倒しはしない）";
-
-export function formatSelectorResult(r: SelectResult): string {
-  return r.fallback
-    ? `selector: 判定不能（${r.reason}）。従来router（advisor/polish）を継続せよ（general倒しはしない）。`
-    : `selector: lenses=${r.lenses.join(",")}（${r.reason}）。verifier編成の参考にする（advisory-only。採否はmainが決める）。`;
-}
-
-/* verifier編成をd1で選ぶ。API失敗・key未設定・全Noul欠測は fallback=true。
- * opts.root があれば較正ログに追記する（無ければ記録しない。テストは無指定） */
-export async function selectLenses(
-  designExcerpt: string,
-  diffStat: string,
-  fetchFn: FetchFn = fetch,
-  opts?: { root?: string },
-): Promise<SelectResult> {
-  const t0 = performance.now();
-  const stateText = ["design抜粋:", designExcerpt, "", "diff統計:", diffStat].join(
-    "\n",
-  );
-  const finish = async (s: SelectResult): Promise<SelectResult> => {
-    if (opts?.root) {
-      await logDecision(opts.root, {
-        kind: "select",
-        request: stateText.slice(0, 200),
-        result: s.lenses,
-        confidence: null,
-        probs: s.probs as Record<string, number>,
-        latencyMs: Math.round(performance.now() - t0),
-        fallback: s.fallback,
-        reason: s.reason,
-      });
-    }
-    return s;
-  };
-  const r = await callDecisionWithRetry(
-    ["design抜粋:", designExcerpt, "", "diff統計:", diffStat].join("\n"),
-    SELECTOR_QUESTIONS,
-    fetchFn,
-    SELECTOR_TIMEOUT_MS,
-    SELECTOR_RETRIES,
-  );
-  if (!r.ok) {
-    return finish({
-      lenses: [],
-      reason: `${r.reason}→従来router`,
-      fallback: true,
-      probs: {},
-    });
-  }
-  return finish(assembleLenses(r.answers, designExcerpt));
 }

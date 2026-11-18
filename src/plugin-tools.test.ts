@@ -66,6 +66,25 @@ function tools(root: string, ctx: unknown = {}): Map<string, ToolDef> {
   return map;
 }
 
+/** verifier_set の前提（今の diff の計画）を直接置く。stash 指紋と計画の指紋を合わせる */
+async function seedPlan(root: string, ids: string[] = ["agreement"]): Promise<void> {
+  const st = await import("./state");
+  const { $ } = await import("bun");
+  const gid = st.getActive(root)!.goal.id;
+  const base = await st.resolveBaseline($, root, st.getActive(root)!.state);
+  const H = (await st.computeDiffHash($, root, base)) ?? "H";
+  st.setStashDiffHash(root, H);
+  st.writeSavedVerify(root, gid, {
+    v: 2,
+    diff_hash: H,
+    plan: {
+      diff_hash: H,
+      entries: ids.map((id) => ({ id, title: id, doubt: "d", scope: "s", source: "list" as const, carried: false })),
+    },
+    results: [],
+  });
+}
+
 /** ops 系（verifier_set / usability_set / invoke など）を fake editor で登録する */
 function opsTools(root: string, ctx: unknown = {}): Map<string, ToolDef> {
   const map = new Map<string, ToolDef>();
@@ -105,10 +124,11 @@ describe("plugin tool: strong モード（design g-mwfnlpr9）", () => {
     await tools(root)
       .get("graphhopper_goal")!
       .execute({ action: "start", title: "t", strong: true }, { sessionID: "s1" });
+    await seedPlan(root);
     await opsTools(root)
       .get("graphhopper_verifier_set")!
       .execute(
-        { results: [{ lens: "general", level: "clean" }], reason: "ok" },
+        { results: [{ lens: "agreement", level: "clean" }], reason: "ok" },
         { sessionID: "s1" },
       );
     const out = await tools(root)
@@ -155,10 +175,11 @@ describe("plugin tool: usability ゲート（design g-mwfltxyt）", () => {
     await Bun.write(`${root}/skills/x/SKILL.md`, "# rule\n");
     // git の diff は untracked を拾わないため index に載せる（実運用は jj なので不要）
     await $`git -C ${root} add -A`.quiet();
+    await seedPlan(root);
     await opsTools(root)
       .get("graphhopper_verifier_set")!
       .execute(
-        { results: [{ lens: "general", level: "clean" }], reason: "ok" },
+        { results: [{ lens: "agreement", level: "clean" }], reason: "ok" },
         { sessionID: "s1" },
       );
 
@@ -192,10 +213,11 @@ describe("plugin tool: usability ゲートの force 迂回（design g-mwfltxyt�
     mkdirSync(`${root}/skills/x`, { recursive: true });
     await Bun.write(`${root}/skills/x/SKILL.md`, "# rule\n");
     await $`git -C ${root} add -A`.quiet();
+    await seedPlan(root);
     await opsTools(root)
       .get("graphhopper_verifier_set")!
       .execute(
-        { results: [{ lens: "general", level: "clean" }], reason: "ok" },
+        { results: [{ lens: "agreement", level: "clean" }], reason: "ok" },
         { sessionID: "s1" },
       );
 
@@ -346,8 +368,18 @@ describe("diff ゲート: .graphhopper/ を追跡した repo でも complete で
     writeFileSync(join(root, "src", "a.ts"), "x\ny\n");
     const m = opsTools(root);
     await m.get("graphhopper_diff_stash")!.execute({}, { sessionID: "s1" });
+    {
+      const st = await import("./state");
+      const h = st.getStashDiffHash(root)!;
+      st.writeSavedVerify(root, st.getActive(root)!.goal.id, {
+        v: 2,
+        diff_hash: h,
+        plan: { diff_hash: h, entries: [{ id: "agreement", title: "t", doubt: "d", scope: "s", source: "list", carried: false }] },
+        results: [],
+      });
+    }
     await m.get("graphhopper_verifier_set")!.execute(
-      { results: [{ lens: "general", level: "clean" }], reason: "ok" },
+      { results: [{ lens: "agreement", level: "clean" }], reason: "ok" },
       { sessionID: "s1" },
     );
     const out = await tools(root)
@@ -550,22 +582,6 @@ describe("plugin: invoke / scoreboard", () => {
         hints: [],
       }),
     ).toContain('- g-1 "t" [done] rewinds=1 eval=2/1 score=7');
-  });
-
-  test("selector は key 無しで fallback 文面を返す（formatSelectorResult）", async () => {
-    const saved = process.env["LIQUID_API_KEY"];
-    delete process.env["LIQUID_API_KEY"];
-    try {
-      const out = textOf(
-        await tools(tmpRoot())
-          .get("graphhopper_selector")!
-          .execute({ design_excerpt: "d", diff_stat: "1 file" }),
-      );
-      expect(out).toContain("selector: 判定不能");
-      expect(out).toContain("従来router");
-    } finally {
-      if (saved !== undefined) process.env["LIQUID_API_KEY"] = saved;
-    }
   });
 });
 
@@ -783,38 +799,39 @@ describe("plugin: 構造化 return（design g-mwiocibp 判断1・5）", () => {
     startGoal(root, "vs", "s1");
     const m = opsTools(root);
     const t = m.get("graphhopper_verifier_set")!;
+    await seedPlan(root);
     await expect(t.execute({ results: [], reason: "x" }, { sessionID: "s1" })).rejects.toThrow(
       /results が空です/,
     );
     const r = outOf(
-      await t.execute({ results: [{ lens: "general", level: "clean" }], reason: "ok" }, { sessionID: "s1" }),
+      await t.execute({ results: [{ lens: "agreement", level: "clean" }], reason: "ok" }, { sessionID: "s1" }),
     );
     expect(r.output["level"]).toBe("clean");
     expect(r.output["target"]).toBeUndefined();
-    expect(r.output["lens"]).toEqual(["general"]);
+    expect(r.output["lens"]).toEqual(["agreement"]);
     expect(r.content).toContain("clean");
   });
 
-  test("router_check は route/lenses/simplify を output で返す（polish）", async () => {
+  test("router_check は route/angle_slots/simplify を output で返す（polish）", async () => {
     const root = await gitRootWithDiff(450);
     const r = outOf(
       await opsTools(root).get("graphhopper_router_check")!.execute({}, { sessionID: "s1" }),
     );
     expect(r.output["route"]).toBe("polish");
     expect(r.output["escalated"]).toBe(false);
-    expect(r.output["lenses"]).toEqual(["requirement", "behavior", "progress"]);
+    expect(r.output["angle_slots"]).toBe(4);
     expect(r.output["simplify"]).toBe(true);
     expect(typeof r.output["diff_lines"]).toBe("number");
     expect(r.content).toContain("route: polish");
   });
 
-  test("router_check は small diff で advisor/general×1", async () => {
+  test("router_check は small diff で advisor（枠 2）", async () => {
     const root = await gitRootWithDiff(3);
     const r = outOf(
       await opsTools(root).get("graphhopper_router_check")!.execute({}, { sessionID: "s1" }),
     );
     expect(r.output["route"]).toBe("advisor");
-    expect(r.output["lenses"]).toEqual(["general"]);
+    expect(r.output["angle_slots"]).toBe(2);
     expect(r.output["simplify"]).toBe(false);
   });
 
@@ -836,7 +853,7 @@ describe("plugin: 構造化 return（design g-mwiocibp 判断1・5）", () => {
       await opsTools(root).get("graphhopper_router_check")!.execute({}, { sessionID: "s1" }),
     );
     expect(r.output["escalated"]).toBe(true);
-    expect(r.output["lenses"]).toEqual(["requirement", "behavior", "progress"]);
+    expect(r.output["angle_slots"]).toBe(4);
     expect(r.content).toContain("自動昇格");
     const active = getActive(root)!;
     expect(active.state.phase).toBe("designing");
@@ -946,35 +963,6 @@ describe("plugin: graphhopper_diag（design g-mwiocibp 判断2）", () => {
   });
 });
 
-describe("plugin: verify の sidecar 合成（design g-mwiocibp 判断3）", () => {
-  test("同じ diff 指紋のときだけ前回結果を合成する", async () => {
-    const st = await import("./state");
-    const prev = {
-      diff_hash: "h1",
-      results: [
-        { lens: "requirement" as const, level: "clean" as const, summary: "a" },
-        { lens: "behavior" as const, level: "clean" as const, summary: "b" },
-      ],
-    };
-    const next = [
-      { lens: "behavior" as const, level: "drift" as const, target: "implementing" as const, summary: "b2" },
-      { lens: "progress" as const, level: "clean" as const, summary: "c" },
-    ];
-    const merged = st.mergeSavedVerify(prev, "h1", next);
-    expect(merged.map((r) => r.lens).sort()).toEqual(["behavior", "progress", "requirement"]);
-    expect(merged.find((r) => r.lens === "behavior")!.level).toBe("drift");
-    // 指紋が違えば合成しない（古い判定を新しい diff の証拠にしない）
-    expect(st.mergeSavedVerify(prev, "h2", next).map((r) => r.lens)).toEqual([
-      "behavior",
-      "progress",
-    ]);
-    expect(st.mergeSavedVerify(null, "h1", next).map((r) => r.lens)).toEqual([
-      "behavior",
-      "progress",
-    ]);
-  });
-});
-
 describe("plugin: graphhopper_verify（design g-mwiocibp 判断3・4）", () => {
   type Out = { output: Record<string, unknown>; content: string };
   const outOf = (r: unknown): Out => r as Out;
@@ -1017,11 +1005,13 @@ describe("plugin: graphhopper_verify（design g-mwiocibp 判断3・4）", () => 
       const { root } = await readyGoal();
       const r = outOf(await opsTools(root).get("graphhopper_verify")!.execute({ delayMs: 0 }, { sessionID: "s1" }));
       const results = r.output["results"] as { lens: string; level: string }[];
-      expect(results).toHaveLength(1);
-      expect(results[0]).toMatchObject({ lens: "general", level: "clean" });
+      /* 選ぶ役は json を返さないので既定の角度（advisor 枠 2）に切り替わる */
+      expect(results.map((x) => x.lens)).toEqual(["agreement", "wiring", "test-efficacy"]);
+      expect(results[0]).toMatchObject({ lens: "agreement", level: "clean" });
       expect(r.output["missing"]).toEqual([]);
+      expect(r.content).toContain("既定の角度");
       expect(String(r.output["diff_hash"])).toMatch(/^[0-9a-f]{40}$/);
-      expect(r.content).toContain("general=clean");
+      expect(r.content).toContain("agreement=clean");
       // 返した results は verifier_set にそのまま通る
       const vs = outOf(
         await opsTools(root).get("graphhopper_verifier_set")!.execute(
@@ -1030,6 +1020,32 @@ describe("plugin: graphhopper_verify（design g-mwiocibp 判断3・4）", () => 
         ),
       );
       expect(vs.output["level"]).toBe("clean");
+    } finally {
+      if (prev === undefined) delete process.env["GH_OPENCODE_BIN"];
+      else process.env["GH_OPENCODE_BIN"] = prev;
+    }
+  });
+
+  test("severity が verify の results → verifier_set → history まで届く（g-mwmqmg6b 判断5）", async () => {
+    const dir = tmpRoot();
+    const bin = fakeVerifier(
+      dir,
+      `echo '\`\`\`json'; echo '{"level":"clean","summary":"ok","severity":{"must_fix":0,"should_fix":2,"nit":1,"pre_existing":0}}'; echo '\`\`\`'`,
+    );
+    const prev = process.env["GH_OPENCODE_BIN"];
+    process.env["GH_OPENCODE_BIN"] = bin;
+    try {
+      const { root } = await readyGoal();
+      const r = outOf(await opsTools(root).get("graphhopper_verify")!.execute({ delayMs: 0 }, { sessionID: "s1" }));
+      const results = r.output["results"] as { severity?: { should_fix: number } }[];
+      expect(results[0]?.severity?.should_fix).toBe(2);
+      await opsTools(root).get("graphhopper_verifier_set")!.execute(
+        { results, reason: "ok" },
+        { sessionID: "s1" },
+      );
+      const st = await import("./state");
+      const sev = st.getActive(root)?.state.last_verifier?.severity;
+      expect(sev?.[0]?.counts?.should_fix).toBe(2);
     } finally {
       if (prev === undefined) delete process.env["GH_OPENCODE_BIN"];
       else process.env["GH_OPENCODE_BIN"] = prev;
@@ -1046,7 +1062,7 @@ describe("plugin: graphhopper_verify（design g-mwiocibp 判断3・4）", () => 
       const r = outOf(await opsTools(root).get("graphhopper_verify")!.execute({ delayMs: 0 }, { sessionID: "s1" }));
       expect((r.output["results"] as { target?: string }[])[0]?.target).toBe("implementing");
       const bodies = r.output["bodies"] as { lens: string; body: string }[];
-      expect(bodies[0]?.lens).toBe("general");
+      expect(bodies[0]?.lens).toBe("agreement");
       expect(bodies[0]?.body).toContain("ズレ");
     } finally {
       if (prev === undefined) delete process.env["GH_OPENCODE_BIN"];
@@ -1064,13 +1080,322 @@ describe("plugin: graphhopper_verify（design g-mwiocibp 判断3・4）", () => 
       const r = outOf(await opsTools(root).get("graphhopper_verify")!.execute({ delayMs: 0 }, { sessionID: "s1" }));
       expect(r.output["results"]).toEqual([]);
       const missing = r.output["missing"] as { lens: string; reason: string }[];
-      expect(missing[0]?.lens).toBe("general");
+      expect(missing[0]?.lens).toBe("agreement");
       expect(missing[0]?.reason).toContain("json");
       expect(r.content).toContain("判定不能");
     } finally {
       if (prev === undefined) delete process.env["GH_OPENCODE_BIN"];
       else process.env["GH_OPENCODE_BIN"] = prev;
     }
+  });
+
+  /** 選ぶ役には角度の json、検証役には body の判定を返す偽 verifier。呼ばれた角度を calls に残す */
+  function angleBin(dir: string, opts: { pick?: string; drift?: string[]; badPick?: boolean; broken?: string[] }): { bin: string; calls: string } {
+    const calls = join(dir, "calls.log");
+    const pick = opts.pick ?? "wiring,cleanup";
+    const angles = pick.split(",").map((id) => `{"id":"${id}"}`).join(",");
+    const drifts = (opts.drift ?? []).map((id) => `*"角度: "*"（${id}）"*`);
+    const driftCase = drifts.length
+      ? `case "$*" in ${drifts.join("|")}) LEVEL='{"level":"drift","target":"implementing","summary":"指摘"}';; *) LEVEL='{"level":"clean","summary":"ok"}';; esac`
+      : `LEVEL='{"level":"clean","summary":"ok"}'`;
+    const bin = fakeVerifier(
+      dir,
+      [
+        `ARGS="$*"`,
+        `case "$ARGS" in *"角度を選ぶ役"*) echo "SELECT" >> "${calls}"; echo "$ARGS" > "${calls}.select"; ${
+          opts.badPick ? `echo "no json"` : `echo '\`\`\`json'; echo '{"angles":[${angles}]}'; echo '\`\`\`'`
+        }; exit 0;; esac`,
+        `ID=$(echo "$ARGS" | sed -n 's/.*角度: [^（]*（\\([a-z0-9-]*\\)）.*/\\1/p' | head -1)`,
+        `echo "$ID" >> "${calls}"`,
+        `case "$ARGS" in *"今回の指摘ファイル"*) echo "$ID:findings" >> "${calls}";; esac`,
+        ...(opts.broken?.length ? [`case "$ID" in ${opts.broken.join("|")}) echo "壊れた"; exit 0;; esac`] : []),
+        `case "$ARGS" in *"指摘ファイル"*) PRIOR=',"prior":{"valid":1,"invalid":0,"unresolved":0}';; *) PRIOR='';; esac`,
+        driftCase,
+        `echo "本文 $ID"; echo '\`\`\`json'; echo "\${LEVEL%\\}}$PRIOR}"; echo '\`\`\`'`,
+      ].join("\n"),
+    );
+    return { bin, calls };
+  }
+  const withBin = async (bin: string, f: () => Promise<void>) => {
+    const prev = process.env["GH_OPENCODE_BIN"];
+    process.env["GH_OPENCODE_BIN"] = bin;
+    try {
+      await f();
+    } finally {
+      if (prev === undefined) delete process.env["GH_OPENCODE_BIN"];
+      else process.env["GH_OPENCODE_BIN"] = prev;
+    }
+  };
+  const callsOf = (file: string): string[] =>
+    existsSync(file) ? readFileSync(file, "utf8").split("\n").filter(Boolean) : [];
+  const verify = async (root: string, args: Record<string, unknown> = {}) =>
+    outOf(await opsTools(root).get("graphhopper_verify")!.execute({ delayMs: 0, ...args }, { sessionID: "s1" }));
+
+  test("選ばれた角度で走る（agreement＋選ぶ役の角度）。2 回目は再実行しない", async () => {
+    const dir = tmpRoot();
+    const { bin, calls } = angleBin(dir, { pick: "wiring,cleanup" });
+    await withBin(bin, async () => {
+      const { root } = await readyGoal();
+      const r = await verify(root);
+      expect(r.output["lenses"]).toEqual(["agreement", "wiring", "cleanup"]);
+      expect(r.output["missing"]).toEqual([]);
+      const first = callsOf(calls);
+      expect(first.filter((c) => c === "SELECT")).toHaveLength(1);
+      await verify(root);
+      expect(callsOf(calls)).toEqual(first);
+    });
+  });
+
+  test("選ぶ役の失敗で既定の角度に切り替わり、本文に出る", async () => {
+    const dir = tmpRoot();
+    const { bin } = angleBin(dir, { badPick: true });
+    await withBin(bin, async () => {
+      const { root } = await readyGoal();
+      const r = await verify(root);
+      expect(r.output["lenses"]).toEqual(["agreement", "wiring", "test-efficacy"]);
+      expect(r.content).toContain("既定の角度");
+      const h = readFileSync(join(root, ".graphhopper", "history.jsonl"), "utf8");
+      expect(h).toContain("angle_select_failed");
+      expect(h).toContain("angles_selected");
+    });
+  });
+
+  test("add の角度が走り、あとからの add は足した角度だけ走る。3 個目はエラー", async () => {
+    const dir = tmpRoot();
+    const { bin, calls } = angleBin(dir, { pick: "wiring" });
+    await withBin(bin, async () => {
+      const { root } = await readyGoal();
+      const r = await verify(root, { add: [{ id: "a1", title: "t", doubt: "d" }] });
+      expect(r.output["lenses"]).toContain("a1");
+      const before = callsOf(calls).length;
+      await verify(root, { add: [{ id: "a2", title: "t", doubt: "d" }] });
+      expect(callsOf(calls).slice(before)).toEqual(["a2"]);
+      await expect(verify(root, { add: [{ id: "a3", title: "t", doubt: "d" }] })).rejects.toThrow(/2 個まで/);
+    });
+  });
+
+  test("lens に計画に無い id はエラー", async () => {
+    const dir = tmpRoot();
+    const { bin } = angleBin(dir, {});
+    await withBin(bin, async () => {
+      const { root } = await readyGoal();
+      await verify(root);
+      await expect(verify(root, { lens: ["nope"] })).rejects.toThrow(/計画に無い/);
+    });
+  });
+
+  test("drift があれば siblings が 1 回だけ走り、clean なら走らない", async () => {
+    const dir = tmpRoot();
+    const { bin, calls } = angleBin(dir, { pick: "wiring", drift: ["wiring"] });
+    await withBin(bin, async () => {
+      const { root } = await readyGoal();
+      const r = await verify(root);
+      expect(callsOf(calls).filter((c) => c === "siblings")).toHaveLength(1);
+      expect((r.output["results"] as { lens: string }[]).map((x) => x.lens)).toContain("siblings");
+      await verify(root);
+      expect(callsOf(calls).filter((c) => c === "siblings")).toHaveLength(1);
+      expect(existsSync(join(root, ".graphhopper", "tmp", `verify-${(await import("./state")).getActive(root)!.goal.id}-findings.md`))).toBe(true);
+    });
+    const dir2 = tmpRoot();
+    const clean = angleBin(dir2, { pick: "wiring" });
+    await withBin(clean.bin, async () => {
+      const { root } = await readyGoal();
+      await verify(root);
+      expect(callsOf(clean.calls)).not.toContain("siblings");
+    });
+  });
+
+  test("計画した角度が判定不能なら止まり、呼び直すとその角度だけ走る", async () => {
+    const dir = tmpRoot();
+    const calls = join(dir, "calls.log");
+    const flag = join(dir, "flag");
+    const bin = fakeVerifier(
+      dir,
+      [
+        `ARGS="$*"`,
+        `case "$ARGS" in *"角度を選ぶ役"*) echo '\`\`\`json'; echo '{"angles":[{"id":"wiring"}]}'; echo '\`\`\`'; exit 0;; esac`,
+        `ID=$(echo "$ARGS" | sed -n 's/.*角度: [^（]*（\\([a-z0-9-]*\\)）.*/\\1/p' | head -1)`,
+        `echo "$ID" >> "${calls}"`,
+        `if [ "$ID" = "wiring" ] && [ ! -f "${flag}" ]; then touch "${flag}"; echo "壊れた"; exit 0; fi`,
+        `echo '\`\`\`json'; echo '{"level":"clean","summary":"ok"}'; echo '\`\`\`'`,
+      ].join("\n"),
+    );
+    await withBin(bin, async () => {
+      const { root } = await readyGoal();
+      const r = await verify(root);
+      expect((r.output["missing"] as { lens: string }[]).map((m) => m.lens)).toEqual(["wiring"]);
+      const before = callsOf(calls).length;
+      const r2 = await verify(root);
+      expect(r2.output["missing"]).toEqual([]);
+      expect(callsOf(calls).slice(before)).toEqual(["wiring"]);
+    });
+  });
+
+  test("diff が変わると drift の角度が持ち越され、prior が記録される。持ち越した siblings は 1 巡目が clean でも走る", async () => {
+    const dir = tmpRoot();
+    const { bin, calls } = angleBin(dir, { pick: "wiring", drift: ["wiring", "siblings"] });
+    await withBin(bin, async () => {
+      const { root, gid } = await readyGoal();
+      await verify(root);
+      expect(callsOf(calls)).toContain("siblings");
+      // 直した（diff が変わる）。今度は drift しない偽 verifier に切り替える
+      const clean = angleBin(tmpRoot(), { pick: "cleanup" });
+      await withBin(clean.bin, async () => {
+        writeFileSync(join(root, "a.txt"), "x\nchanged\n");
+        const m = opsTools(root);
+        await m.get("graphhopper_diag")!.execute({}, { sessionID: "s1" });
+        await m.get("graphhopper_diff_stash")!.execute({}, { sessionID: "s1" });
+        const r = await verify(root);
+        const ids = r.output["lenses"] as string[];
+        expect(ids).toContain("wiring");
+        expect(ids).toContain("siblings");
+        expect(r.output["missing"]).toEqual([]);
+        const results = r.output["results"] as { lens: string; prior?: { valid: number } }[];
+        expect(results.find((x) => x.lens === "wiring")?.prior?.valid).toBe(1);
+        // 返す results のキーは output スキーマが宣言している（additionalProperties:false で落とされない）
+        const tool = opsTools(root).get("graphhopper_verify") as unknown as {
+          output: { properties: { results: { items: { properties: Record<string, unknown> } } } };
+        };
+        const declared = Object.keys(tool.output.properties.results.items.properties);
+        for (const x of results) for (const k of Object.keys(x)) expect(declared).toContain(k);
+        expect(callsOf(clean.calls).filter((c) => c === "siblings")).toHaveLength(1);
+        // lens に持ち越した siblings を指定すると、その角度だけ走らせ直す
+        await verify(root, { lens: ["siblings"] });
+        expect(callsOf(clean.calls).filter((c) => c === "siblings")).toHaveLength(2);
+        expect(callsOf(clean.calls).filter((c) => c === "wiring")).toHaveLength(1);
+        const st = await import("./state");
+        const prior = readFileSync(st.priorFindingsPath(root, gid), "utf8");
+        expect(prior).toContain("## wiring");
+        expect(prior).toContain("本文 wiring");
+        expect(prior).toContain("## siblings");
+        await m.get("graphhopper_verifier_set")!.execute({ results, reason: "ok" }, { sessionID: "s1" });
+      });
+    });
+  });
+
+  test("選ぶ役には残りの枠（remainingSlots）と取られた id（taken）が渡る。判定不能のまま diff が変わっても前回の指摘（kept）を prior.md に残す", async () => {
+    const first = angleBin(tmpRoot(), { pick: "wiring", drift: ["wiring"] });
+    await withBin(first.bin, async () => {
+      const { root, gid } = await readyGoal();
+      const st = await import("./state");
+      const rediff = async (text: string) => {
+        writeFileSync(join(root, "a.txt"), text);
+        const m = opsTools(root);
+        await m.get("graphhopper_diag")!.execute({}, { sessionID: "s1" });
+        await m.get("graphhopper_diff_stash")!.execute({}, { sessionID: "s1" });
+      };
+      await verify(root);
+      const second = angleBin(tmpRoot(), { pick: "cleanup,behavior", broken: ["wiring"] });
+      await withBin(second.bin, async () => {
+        await rediff("x\nchanged\n");
+        const r = await verify(root);
+        // advisor の枠 2 のうち 1 つは持ち越した wiring が使う。選ぶ役には残り 1 と、取られた id が渡る
+        expect(r.output["lenses"]).toEqual(["agreement", "wiring", "cleanup"]);
+        const sel = readFileSync(`${second.calls}.select`, "utf8");
+        expect(sel).toContain("1 個まで選ぶ");
+        expect(sel).toMatch(/次の id は選ばない[^\n]*wiring/);
+        expect((r.output["missing"] as { lens: string }[]).map((x) => x.lens)).toEqual(["wiring"]);
+      });
+      const third = angleBin(tmpRoot(), { pick: "cleanup" });
+      await withBin(third.bin, async () => {
+        await rediff("x\nchanged again\n");
+        const r = await verify(root);
+        expect(r.output["lenses"]).toContain("wiring");
+        expect(readFileSync(st.priorFindingsPath(root, gid), "utf8")).toContain("本文 wiring");
+      });
+    });
+  });
+
+  test("add した角度を lens で外すと、verifier_set は計画の未充足として拒否する", async () => {
+    const dir = tmpRoot();
+    const { bin } = angleBin(dir, { pick: "wiring" });
+    await withBin(bin, async () => {
+      const { root } = await readyGoal();
+      const r = await verify(root);
+      const results = (r.output["results"] as { lens: string }[]).filter((x) => x.lens !== "wiring");
+      await expect(
+        opsTools(root).get("graphhopper_verifier_set")!.execute({ results, reason: "x" }, { sessionID: "s1" }),
+      ).rejects.toThrow(/計画した角度の結果がありません/);
+    });
+  });
+
+  test("旧形式（計画なし）の sidecar は捨てて計画し直す", async () => {
+    const dir = tmpRoot();
+    const { bin } = angleBin(dir, { pick: "wiring" });
+    await withBin(bin, async () => {
+      const { root, gid } = await readyGoal();
+      const st = await import("./state");
+      writeFileSync(st.verifyResultsPath(root, gid), JSON.stringify({ diff_hash: "old", results: [{ lens: "general", level: "clean", summary: "s" }] }));
+      const r = await verify(root);
+      expect(r.output["lenses"]).toEqual(["agreement", "wiring"]);
+      expect((r.output["results"] as { lens: string }[]).map((x) => x.lens)).not.toContain("general");
+    });
+  });
+
+  test("2 巡目の siblings が判定不能でも止まらず、呼び直すと再実行する", async () => {
+    const dir = tmpRoot();
+    const { bin, calls } = angleBin(dir, { pick: "wiring", drift: ["wiring"], broken: ["siblings"] });
+    await withBin(bin, async () => {
+      const { root } = await readyGoal();
+      const r = await verify(root);
+      expect(r.output["missing"]).toEqual([]);
+      expect((r.output["results"] as { lens: string }[]).map((x) => x.lens)).not.toContain("siblings");
+      await verify(root);
+      expect(callsOf(calls).filter((c) => c === "siblings")).toHaveLength(2);
+    });
+  });
+
+  test("持ち越した siblings が判定不能なら missing に残る。今回の drift の指摘ファイルも受け取る", async () => {
+    const dir = tmpRoot();
+    const first = angleBin(dir, { pick: "wiring", drift: ["wiring", "siblings"] });
+    await withBin(first.bin, async () => {
+      const { root } = await readyGoal();
+      await verify(root);
+      // 持ち越した wiring がまた drift する → 持ち越した siblings にも今回の指摘ファイルが渡る
+      const next = angleBin(tmpRoot(), { drift: ["wiring"], broken: ["siblings"] });
+      await withBin(next.bin, async () => {
+        writeFileSync(join(root, "a.txt"), "x\nchanged\n");
+        const m = opsTools(root);
+        await m.get("graphhopper_diag")!.execute({}, { sessionID: "s1" });
+        await m.get("graphhopper_diff_stash")!.execute({}, { sessionID: "s1" });
+        const r = await verify(root);
+        expect((r.output["missing"] as { lens: string }[]).map((x) => x.lens)).toEqual(["siblings"]);
+        expect(callsOf(next.calls)).toContain("siblings:findings");
+      });
+    });
+  });
+
+  test("add を 2 個同時に渡しても、選ぶ役の枠（advisor は 2）は減らない", async () => {
+    const dir = tmpRoot();
+    const { bin } = angleBin(dir, { pick: "wiring,cleanup" });
+    await withBin(bin, async () => {
+      const { root } = await readyGoal();
+      const r = await verify(root, {
+        add: [
+          { id: "a1", title: "t", doubt: "d" },
+          { id: "a2", title: "t", doubt: "d" },
+        ],
+      });
+      expect(r.output["lenses"]).toEqual(["agreement", "wiring", "cleanup", "a1", "a2"]);
+    });
+  });
+
+  test("goal の終了で sidecar と指摘ファイルが消える", async () => {
+    const dir = tmpRoot();
+    const { bin } = angleBin(dir, { pick: "wiring", drift: ["wiring"] });
+    await withBin(bin, async () => {
+      const { root, gid } = await readyGoal();
+      await verify(root);
+      const st = await import("./state");
+      expect(existsSync(st.verifyResultsPath(root, gid))).toBe(true);
+      st.removeVerifyResults(root, gid);
+      expect(existsSync(st.verifyResultsPath(root, gid))).toBe(false);
+      expect(existsSync(st.findingsPath(root, gid))).toBe(false);
+      st.writePriorFindings(root, gid, "x");
+      expect(existsSync(st.priorFindingsPath(root, gid))).toBe(true);
+      st.removeVerifyResults(root, gid);
+      expect(existsSync(st.priorFindingsPath(root, gid))).toBe(false);
+    });
   });
 
   test("前提: diag か diff_stash が無ければ throw、退避後に編集しても throw", async () => {
@@ -1115,50 +1440,18 @@ describe("plugin: graphhopper_verify（design g-mwiocibp 判断3・4）", () => 
 });
 
 describe("verify: prompt 組み立てと判定の読み取り（純粋層）", () => {
-  test("lens 指示文＋path＋出力契約が入り、intent は requirement/general だけ", async () => {
-    const v = await import("./verify");
-    const root = tmpRoot();
-    const paths = {
-      designPath: "/r/design.md",
-      diffPath: "/r/diff.txt",
-      diagPath: "/r/diag.txt",
-      intentPath: "/r/intent.md",
-    };
-    const req = v.buildLensPrompt(root, "g-1", "requirement", v.lensPaths(root, "g-1", "requirement", paths));
-    expect(req).toContain("/r/design.md");
-    expect(req).toContain("/r/diff.txt");
-    expect(req).toContain("/r/diag.txt");
-    expect(req).toContain("出力形式（必須）");
-    // intent.md が実在しないので path は載らない（存在する場合だけ渡す）
-    expect(req).not.toContain("intent（意図ログ）");
-    const prog = v.buildLensPrompt(root, "g-1", "progress", v.lensPaths(root, "g-1", "progress", paths));
-    expect(prog).not.toContain("intent（意図ログ）");
-    expect(v.lensTakesIntent("general")).toBe(true);
-    expect(v.lensTakesIntent("behavior")).toBe(false);
-  });
-
-  test("4 lens の共通ブロックが揃い、verifier に fan-out を指示しない（design g-mwiwxc5a 判断4）", async () => {
+  test("角度の prompt に path・出力契約・共通ルールが入り、fan-out を指示しない", async () => {
     const v = await import("./verify");
     const p = await import("./prompts");
     const root = tmpRoot();
-    const paths = {
-      designPath: "/r/design.md",
-      diffPath: "/r/diff.txt",
-      diagPath: "/r/diag.txt",
-      intentPath: "/r/intent.md",
-    };
-    const prompt = (lens: "requirement" | "behavior" | "progress" | "general") =>
-      v.buildLensPrompt(root, "g-1", lens, v.lensPaths(root, "g-1", lens, paths));
-    for (const lens of ["requirement", "behavior", "progress", "general"] as const) {
-      const text = prompt(lens);
-      expect(text).toContain(p.VERIFIER_EFFICIENCY_RULE);
-      expect(text).toContain(p.VERIFIER_EVIDENCE_RULE);
-      expect(text).not.toContain("投げてよい");
+    const paths = { designPath: "/r/design.md", diffPath: "/r/diff.txt", diagPath: "/r/diag.txt", intentPath: null };
+    const e = { id: "wiring", title: "t", doubt: "d", scope: "s", source: "list" as const, carried: false };
+    const text = v.buildAnglePrompt(root, "g-1", e, paths);
+    for (const x of ["/r/design.md", "/r/diff.txt", "/r/diag.txt", "出力形式（必須）", p.VERIFIER_EFFICIENCY_RULE, p.VERIFIER_EVIDENCE_RULE, p.PARALLEL_NOTE]) {
+      expect(text).toContain(x);
     }
-    for (const lens of ["requirement", "behavior", "progress"] as const) {
-      expect(prompt(lens)).toContain(p.PARALLEL_NOTE);
-    }
-    expect(prompt("general")).not.toContain(p.PARALLEL_NOTE);
+    expect(text).not.toContain("投げてよい");
+    expect(text).not.toContain("intent（意図ログ）");
   });
 
   test("parseLensVerdict: clean/drift/不正を切り分ける", async () => {
