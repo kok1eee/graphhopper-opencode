@@ -6,8 +6,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import {
+  ANGLE_TIMEOUT_MS,
+  DEFAULT_TIMEOUT_MS,
   DEPTH_ENV,
   MAX_DEPTH,
+  MAX_TIMEOUT_MS,
   PROMPT_MAX_CHARS,
   STDOUT_MAX_CHARS,
   buildArgs,
@@ -15,6 +18,7 @@ import {
   invoke,
   resolveModel,
   runChild,
+  withTimeBudget,
   type SpawnFn,
 } from "./invoke";
 
@@ -44,6 +48,22 @@ const okSpawn: SpawnFn = fakeSpawn((p) => {
 
 afterEach(() => {
   delete process.env[DEPTH_ENV];
+});
+
+describe("時間の上限と持ち時間の明示", () => {
+  test("invoke の上限は 600 秒・角度は 300 秒・既定は変えない", () => {
+    expect(MAX_TIMEOUT_MS).toBe(600000);
+    expect(ANGLE_TIMEOUT_MS).toBe(300000);
+    expect(DEFAULT_TIMEOUT_MS).toBe(120000);
+    expect(defaultTimeoutMs("graphhopper-advisor")).toBe(240000);
+    expect(defaultTimeoutMs("graphhopper-verifier")).toBe(DEFAULT_TIMEOUT_MS);
+  });
+  test("withTimeBudget は先頭に持ち時間を足し、本文は変えない", () => {
+    const got = withTimeBudget("本文です", 90_000);
+    expect(got.startsWith("[invoke] 持ち時間: 最大 90 秒")).toBe(true);
+    expect(got.endsWith("\n\n本文です")).toBe(true);
+    expect(withTimeBudget("x", 300)).toContain("最大 1 秒");
+  });
 });
 
 describe("invoke 引数検証", () => {
@@ -248,6 +268,32 @@ describe("runChild", () => {
     expect(r.output).toMatch("timeout");
     expect(killed).toBe("SIGKILL");
   }, 15000);
+  test("SIGTERM で子が先に exit しても timeout として報告する（非0終了と取り違えない）", async () => {
+    const termExit: SpawnFn = ((_cmd: string, _args: string[], _opts: unknown) => {
+      const p = new EventEmitter() as FakeProc;
+      p.pid = 999995;
+      p.stdout = new EventEmitter();
+      p.stderr = new EventEmitter();
+      (p as unknown as { kill: (s: string) => boolean }).kill = (s: string) => {
+        // 実プロセスは SIGTERM で exit 143 を返す。SIGKILL までは待たない
+        if (s === "SIGTERM") setTimeout(() => p.emit("exit", 143), 5);
+        return true;
+      };
+      return p as unknown as ChildProcess;
+    }) as SpawnFn;
+    const r = await runChild(
+      "opencode",
+      ["run"],
+      { timeoutMs: 1000, cwd: "/tmp", childEnv: {}, killGraceMs: 5000 },
+      termExit,
+    );
+    expect(r.timedOut).toBe(true);
+    expect(r.output).toContain("timeout after");
+    expect(r.output).toContain("limit 1s");
+    expect(r.output).not.toContain("exited with code");
+    // 経過秒数も返す（上限の見直しと較正のため）
+    expect(r.elapsedMs).toBeGreaterThanOrEqual(900);
+  }, 15000);
   test("timeout時もstderr末尾が付く・空なら省略", async () => {
     const hangWithErr: SpawnFn = ((_cmd: string, _args: string[], _opts: unknown) => {
       const p = new EventEmitter() as FakeProc;
@@ -318,6 +364,33 @@ describe("invoke 並列安全（中断・heartbeat・ずらし）", () => {
     expect(r.output).toMatch("cancelled");
     expect(kills).toContain("SIGTERM");
   });
+
+  test("abort 後に子が SIGTERM で exit しても cancelled として報告する（非0終了と取り違えない）", async () => {
+    const ac = new AbortController();
+    const termExit: SpawnFn = ((_cmd: string, _args: string[], _opts: unknown) => {
+      const p = new EventEmitter() as FakeProc;
+      p.pid = 999994;
+      p.stdout = new EventEmitter();
+      p.stderr = new EventEmitter();
+      (p as unknown as { kill: (s: string) => boolean }).kill = (s: string) => {
+        if (s === "SIGTERM") setTimeout(() => p.emit("exit", 143), 5);
+        return true;
+      };
+      return p as unknown as ChildProcess;
+    }) as SpawnFn;
+    const running = runChild(
+      "opencode",
+      ["run"],
+      { timeoutMs: 5000, cwd: "/tmp", childEnv: {}, signal: ac.signal, killGraceMs: 5000 },
+      termExit,
+    );
+    setTimeout(() => ac.abort(), 20);
+    const r = await running;
+    expect(r.cancelled).toBe(true);
+    expect(r.timedOut).toBe(false);
+    expect(r.output).toContain("cancelled");
+    expect(r.output).not.toContain("exited with code");
+  }, 15000);
 
   test("heartbeat tickが呼ばれる", async () => {
     const ticks: number[] = [];

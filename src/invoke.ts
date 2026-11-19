@@ -16,7 +16,7 @@ import { readConfig } from "./state";
 export const PROMPT_MAX_CHARS = 12000;
 export const STDOUT_MAX_CHARS = 30000;
 import { DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, MIN_TIMEOUT_MS } from "./invoke-limits";
-export { DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, MIN_TIMEOUT_MS } from "./invoke-limits";
+export { ANGLE_TIMEOUT_MS, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, MIN_TIMEOUT_MS } from "./invoke-limits";
 /** 判断ノードのうち effort を上げる agent（advisor / oracle）の既定 timeout。
  * xhigh は既定 effort の約 2 倍の時間を使う（design g-mwjsd3om 判断2） */
 export const JUDGEMENT_AGENT_TIMEOUT_MS = 240000;
@@ -138,6 +138,8 @@ function truncate(s: string, max: number): string {
 export interface InvokeResult {
   output: string;
   timedOut: boolean;
+  /** 起動から終了までの実測ミリ秒（timeout の報告と較正に使う） */
+  elapsedMs: number;
   fallbackWarning: boolean;
   /** clientキャンセルでkillしたか（並列fan-outの取り消し漏れ防止） */
   cancelled: boolean;
@@ -174,19 +176,28 @@ export function runChild(
     let stdout = "";
     let stderr = "";
     let done = false;
-    const finish = (timedOut: boolean, cancelled = false): void => {
+    /* timer が発火したか。SIGTERM で子が先に exit しても、timeout を「非0終了」と
+     * 取り違えないよう finish 側でこのフラグを優先する。abort も同じ理由でフラグにする
+     * （abort → SIGTERM → 子が exit 143 を返す経路があり、引数渡しでは取りこぼす） */
+    let timedOut = false;
+    let cancelled = false;
+    let graceTimer: ReturnType<typeof setTimeout> | null = null;
+    const finish = (): void => {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      if (graceTimer) clearTimeout(graceTimer);
       if (beat) clearInterval(beat);
       opts.signal?.removeEventListener("abort", onAbort);
+      const elapsedMs = Date.now() - started;
+      const elapsedS = (elapsedMs / 1000).toFixed(1);
       const fallbackWarning = /Falling back to default agent/.test(stderr);
       let output = truncate(stdout, STDOUT_MAX_CHARS);
       const errTail = stderr.split("\n").slice(-20).join("\n").trim();
       if (cancelled) {
-        output += `\nerror: invoke cancelled by client (killed)`;
+        output += `\nerror: invoke cancelled by client (killed after ${elapsedS}s)`;
       } else if (timedOut) {
-        output += `\nerror: invoke timeout after ${opts.timeoutMs}ms (killed; orphaned child may continue billing)`;
+        output += `\nerror: invoke timeout after ${elapsedS}s (limit ${(opts.timeoutMs / 1000).toFixed(0)}s; killed)`;
         // timeout時も子のstderr末尾を添付する（何に時間を食ったかの切り分け用。空なら省略）
         if (errTail) output += `\nstderr tail:\n${errTail}`;
       } else if (code !== 0) {
@@ -195,7 +206,7 @@ export function runChild(
       if (fallbackWarning) {
         output += `\nwarning: agent fell back to default (read-only not enforced by agent def)`;
       }
-      resolvePromise({ output, timedOut, fallbackWarning, cancelled });
+      resolvePromise({ output, timedOut, elapsedMs, fallbackWarning, cancelled });
     };
     let code: number | null = 0;
     child.stdout?.on("data", (c: Buffer) => {
@@ -204,10 +215,10 @@ export function runChild(
     child.stderr?.on("data", (c: Buffer) => {
       stderr += c.toString("utf8");
     });
-    child.on("error", () => finish(false));
+    child.on("error", () => finish());
     child.on("exit", (c) => {
       code = c;
-      finish(false);
+      finish();
     });
     const killGroup = (sig: NodeJS.Signals): void => {
       try {
@@ -220,21 +231,22 @@ export function runChild(
         }
       }
     };
-    let graceTimer: ReturnType<typeof setTimeout> | null = null;
     const graceMs = opts.killGraceMs ?? KILL_GRACE_MS;
     const timer = setTimeout(() => {
+      timedOut = true;
       killGroup("SIGTERM");
       graceTimer = setTimeout(() => {
         killGroup("SIGKILL");
-        finish(true);
+        finish();
       }, graceMs);
     }, opts.timeoutMs);
     // 中断伝播: clientキャンセルで即kill（取り消し後も裏で回り続ける事故を防ぐ）
     const onAbort = (): void => {
+      cancelled = true;
       killGroup("SIGTERM");
       setTimeout(() => {
         if (!done) killGroup("SIGKILL");
-        finish(false, true);
+        finish();
       }, graceMs);
     };
     if (opts.signal?.aborted) {
@@ -261,12 +273,23 @@ export async function invoke(
   return (await invokeStructured(args, spawnFn)).output;
 }
 
-export interface InvokeStructuredResult {
-  output: string;
-  timedOut: boolean;
-  fallbackWarning: boolean;
-  cancelled: boolean;
+/**
+ * 依頼文の先頭に持ち時間を足す（design g-mwmykjt4 のあとの goal 判断B）。
+ * 子は自分の残り時間を知らないため、上限と「渡された範囲だけ読む」を毎回明示する。
+ * 呼び出し側が書いた本文は変えずに後ろへ置く。
+ */
+export function withTimeBudget(prompt: string, timeoutMs: number): string {
+  const sec = Math.max(1, Math.round(timeoutMs / 1000));
+  return [
+    `[invoke] 持ち時間: 最大 ${sec} 秒。超過すると打ち切られる。`,
+    "時間内に必ず答える。呼び出し側が範囲を示していればまずそこを読み、足りなければ自分で必要な範囲に絞って読む（無関係な横断探索・全ファイルの読み通しはしない）。",
+    "判断に迷ったら、残りを読み続けず、今持っている証拠で答える（不足は明記する）。",
+    "",
+    prompt,
+  ].join("\n");
 }
+
+export type InvokeStructuredResult = InvokeResult;
 
 export interface InvokeOpts {
   spawnFn?: SpawnFn;
@@ -288,6 +311,7 @@ export async function invokeStructured(
   const fail = (output: string): InvokeStructuredResult => ({
     output,
     timedOut: false,
+    elapsedMs: 0,
     fallbackWarning: false,
     cancelled: false,
   });
@@ -349,7 +373,13 @@ export async function invokeStructured(
     MAX_TIMEOUT_MS,
     Math.max(MIN_TIMEOUT_MS, args.timeoutMs ?? defaultTimeoutMs(args.agent)),
   );
-  const argv = buildArgs({ agent: args.agent, model, dir: root, title: "gh-invoke", prompt: args.prompt });
+  const argv = buildArgs({
+    agent: args.agent,
+    model,
+    dir: root,
+    title: "gh-invoke",
+    prompt: withTimeBudget(args.prompt, timeoutMs),
+  });
   const childEnv: NodeJS.ProcessEnv = { ...process.env, [DEPTH_ENV]: String(depth + 1) };
   // 壊れたbearerの混入防止: AWS_BEARER_TOKEN_BEDROCK は全認証手段より優先されるため、
   // 陳腐な値がsession envにあるとSSOプロファイルがshadowされてBedrock系が全滅する
@@ -360,6 +390,7 @@ export async function invokeStructured(
     return {
       output: "error: invoke cancelled by client (before spawn)",
       timedOut: false,
+      elapsedMs: 0,
       fallbackWarning: false,
       cancelled: true,
     };
@@ -370,6 +401,7 @@ export async function invokeStructured(
     return {
       output: "error: invoke cancelled by client (during delay)",
       timedOut: false,
+      elapsedMs: 0,
       fallbackWarning: false,
       cancelled: true,
     };
@@ -391,7 +423,13 @@ export async function invokeStructured(
       },
       spawnFn,
     );
-    return { output: r.output, timedOut: r.timedOut, fallbackWarning: r.fallbackWarning, cancelled: r.cancelled };
+    return {
+      output: r.output,
+      timedOut: r.timedOut,
+      elapsedMs: r.elapsedMs,
+      fallbackWarning: r.fallbackWarning,
+      cancelled: r.cancelled,
+    };
   } finally {
     await recordInvokeEnd(root, runID);
   }

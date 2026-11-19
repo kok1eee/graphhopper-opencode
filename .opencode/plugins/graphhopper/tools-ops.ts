@@ -17,7 +17,7 @@ import {
 import { INTERNAL_PROMPT_METADATA_KEY } from "../../../src/entry-decide";
 import { latestSummary } from "../../../src/compaction-store";
 import * as handoff from "../../../src/handoff";
-import { MAX_TIMEOUT_MS, invokeStructured, resolveModel } from "../../../src/invoke";
+import { ANGLE_TIMEOUT_MS, invokeStructured, resolveModel } from "../../../src/invoke";
 import { rubricStatus } from "../../../src/verify";
 import { formatScoreboard } from "../../../src/scoreboard-format";
 import { catalogPolicyWarning } from "../../../src/bake";
@@ -372,7 +372,7 @@ export function registerOpsTools(
           "計画に足す角度（枠の外。1 つの diff につき 2 個まで）",
         ),
         model: S.optStr("verifier のモデル上書き（provider/model）。config の model_allow/model_deny で検査される"),
-        timeoutMs: S.num("角度あたりの timeout ms（既定300000・上限300000）"),
+        timeoutMs: S.num("角度あたりの timeout ms（既定300000・上限600000）"),
         delayMs: S.num("起動ずらしの間隔 ms（既定5000。claude-oauth の単一プロキシ対策）"),
       },
       [],
@@ -475,7 +475,7 @@ export function registerOpsTools(
       };
       const modelName = resolveModel(root, "graphhopper-verifier", args.model) ?? null;
       const delay = Math.max(0, args.delayMs ?? 5000);
-      const timeout = args.timeoutMs ?? MAX_TIMEOUT_MS;
+      const timeout = args.timeoutMs ?? ANGLE_TIMEOUT_MS;
       const signal = (context as { signal?: AbortSignal } | undefined)?.signal;
       const notes: string[] = [];
 
@@ -494,7 +494,7 @@ export function registerOpsTools(
         const lens = entry.id;
         const broken = (reason: string): LensRun => ({ lens, body: r.output, reason });
         if (r.cancelled) return broken("invoke がキャンセルされた");
-        if (r.timedOut) return broken(`timeout (${timeoutMs}ms)`);
+        if (r.timedOut) return broken(`timeout（${(r.elapsedMs / 1000).toFixed(1)}s / 上限 ${(timeoutMs / 1000).toFixed(0)}s）`);
         if (r.fallbackWarning) return broken("agent が既定にフォールバックした（判定を採用できない）");
         const failed = invokeFailure(r.output);
         if (failed) return broken(failed);
@@ -1139,13 +1139,13 @@ export function registerOpsTools(
   editor.add({
     name: "graphhopper_invoke",
     description:
-      "別モデルでsubagent相当を実行する。opencode run をspawnし stdout を返す。入れ子禁止・prompt上限12000文字・timeout既定120s（advisor/oracleは240s）・上限300s。並列fan-out可。delayMsで起動ずらし可（429 herd回避）",
+      "別モデルでsubagent相当を実行する。opencode run をspawnし stdout を返す。入れ子禁止・prompt上限12000文字・timeout既定120s（advisor/oracleは240s）・上限600s。依頼文の先頭に持ち時間と「渡された範囲だけ読み時間内に答える」を自動で足す。並列fan-out可。delayMsで起動ずらし可（429 herd回避）",
     input: S.obj(
       {
         agent: S.str("graphhopper-* agent名（例: graphhopper-advisor）"),
         model: S.optStr("provider/model形式。省略時はconfig既定。configのmodel_allow/model_denyで拒否される場合がある"),
         prompt: S.str("lens指示＋渡し物全文（12000文字まで）"),
-        timeoutMs: S.num("タイムアウトms（既定120000。advisor/oracle は 240000・上限300000）"),
+        timeoutMs: S.num("タイムアウトms（既定120000。advisor/oracle は 240000・上限600000）"),
         delayMs: S.num("起動前の待機ms（並列herd回避用。既定0・上限60000）"),
       },
       ["agent", "prompt"],
@@ -1181,14 +1181,17 @@ export function registerOpsTools(
             model: a.model ?? null,
             timed_out: !!r.timedOut,
             cancelled: !!r.cancelled,
+            elapsed_ms: r.elapsedMs,
           });
         } catch {
           // 履歴の失敗で相談結果を失わない
         }
       }
+      const elapsedS = (r.elapsedMs / 1000).toFixed(1);
       const flags = [
-        r.timedOut ? "timedOut" : null,
-        r.cancelled ? "cancelled" : null,
+        /* 時間切れは経過秒数も返す（上限の見直しと較正のため） */
+        r.timedOut ? `timedOut ${elapsedS}s` : null,
+        r.cancelled ? `cancelled ${elapsedS}s` : null,
         r.fallbackWarning ? "fallbackWarning" : null,
       ].filter(Boolean);
       return text(flags.length ? `${r.output}\n[invoke: ${flags.join(", ")}]` : r.output);

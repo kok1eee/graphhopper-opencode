@@ -811,7 +811,16 @@ export type HistoryEvent =
       angles: { id: string; source: string; carried: boolean }[];
     }
   | { type: "angle_select_failed"; goal: string; reason: string }
-  | { type: "invoke"; goal: string; agent: string; model: string | null; timed_out: boolean; cancelled: boolean }
+  | {
+      type: "invoke";
+      goal: string;
+      agent: string;
+      model: string | null;
+      timed_out: boolean;
+      cancelled: boolean;
+      /** 実測の所要ミリ秒（較正用） */
+      elapsed_ms?: number;
+    }
   | { type: "angle_followup"; goal: string; carried: boolean; level: VerdictLevel | "unknown" }
   | { type: "verifier_self_modified"; goal: string; code: boolean; agent: boolean }
   | { type: "config_invalid_gate"; goal: string; gate: string }

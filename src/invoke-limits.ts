@@ -5,5 +5,8 @@
  */
 
 export const DEFAULT_TIMEOUT_MS = 120000;
-export const MAX_TIMEOUT_MS = 300000;
+export const MAX_TIMEOUT_MS = 600000;
 export const MIN_TIMEOUT_MS = 10000;
+/** verify の角度 1 つあたりの既定 timeout。invoke 全体の上限（MAX_TIMEOUT_MS）とは別に固定する
+ * （角度は 4 本まで並列に走るので、1 本に 10 分は待たない） */
+export const ANGLE_TIMEOUT_MS = 300000;

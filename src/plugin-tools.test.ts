@@ -608,6 +608,25 @@ describe("plugin: invoke / scoreboard", () => {
     }
   });
 
+  test("invoke は依頼文の先頭に持ち時間を足して起動する", async () => {
+    const dir = tmpRoot();
+    const bin = join(dir, "fake-opencode");
+    writeFileSync(bin, "#!/bin/sh\nprintf '%s' \"$*\"\n", { mode: 0o755 });
+    const prev = process.env["GH_OPENCODE_BIN"];
+    process.env["GH_OPENCODE_BIN"] = bin;
+    try {
+      const r = (await opsTools(dir).get("graphhopper_invoke")!.execute(
+        { agent: "graphhopper-librarian", prompt: "本文です", timeoutMs: 60_000 },
+        {},
+      )) as { content: string };
+      expect(r.content).toContain("持ち時間: 最大 60 秒");
+      expect(r.content).toContain("本文です");
+    } finally {
+      if (prev === undefined) delete process.env["GH_OPENCODE_BIN"];
+      else process.env["GH_OPENCODE_BIN"] = prev;
+    }
+  });
+
   test("invoke は active goal があれば履歴に invoke を残す", async () => {
     const dir = tmpRoot();
     startGoal(dir, "t", "s1");
@@ -622,10 +641,11 @@ describe("plugin: invoke / scoreboard", () => {
       );
       const { readHistory } = await import("./state");
       const ev = readHistory(dir).find((h) => (h as { type: string }).type === "invoke") as
-        | { agent: string; timed_out: boolean }
+        | { agent: string; timed_out: boolean; elapsed_ms?: number }
         | undefined;
       expect(ev?.agent).toBe("graphhopper-advisor");
       expect(ev?.timed_out).toBe(false);
+      expect(typeof ev?.elapsed_ms).toBe("number");
     } finally {
       if (prev === undefined) delete process.env["GH_OPENCODE_BIN"];
       else process.env["GH_OPENCODE_BIN"] = prev;

@@ -50,7 +50,18 @@ phase 案内（次のアクションの全文）は system ではなく**会話�
 **opencode 2本立て**: `task()`/`subagent` は TUI からは呼べるが **`execute` のカタログには無い**。
 2.3.0 以降 `task()` はバックグラウンド（結果は後で届く）なので、判定を待って記録する経路
 （verifier）は `graphhopper_verify`（角度ごとに `opencode run` を待つ）か
-`graphhopper_invoke`（1件ずつ）を使う。**polish/verify の手順は Code Mode のレシピに固定済み**
+`graphhopper_invoke`（1件ずつ）を使う。invoke は依頼文の先頭に次の 3 行を自動で足す。
+- 持ち時間と、超過すると打ち切られること
+- 時間内に必ず答えること。範囲が示されていればまずそこを読み、足りなければ自分で必要な範囲に絞る
+- 判断に迷ったら、残りを読み続けず、今持っている証拠で答えること
+
+`timeoutMs` で指定できるのは最大 600 秒で、既定は 120 秒（advisor / oracle は 240 秒、
+verify の角度は 1 本 300 秒）。時間切れは `[invoke: timedOut 123.4s]` の形で経過秒数つきで返り、
+出力は回答として使えない。打ち切られたときは、範囲を絞るか `timeoutMs` を上げて呼び直す。
+verify の角度も `timeoutMs` で延ばせる。時間切れの角度は「判定不能」として返り記録されないので、
+もう一度 `graphhopper_verify` を呼ぶと、その角度だけ走り直す。
+
+**polish/verify の手順は Code Mode のレシピに固定済み**
 （refs/verifier.md）。調査（researcher/librarian）・簡易な相談（advisor）は
 `graphhopper_invoke` で同期実行できる（`task()` でもよいが、結果が届く前に
 `usability_set` を呼ばないこと）。
