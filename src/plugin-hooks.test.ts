@@ -335,14 +335,11 @@ describe("plugin hook: 入口d1判定の prompt hook", () => {
   });
 });
 
-describe("plugin hook: 入口判定は synthetic・system は固定・phase案内は entry（design g-mwj6481n）", () => {
-  /* 判定の通知ヘッダ。SYSTEM_GUIDE にも「graphhopper 入口判定」という語が出るので
-   * ヘッダ全文で判定する */
-  const INJECT_HEADER = "## graphhopper 入口判定（d1・自動判定済み）";
+describe("plugin hook: 入口判定は裏で記録するだけ・system は固定・phase案内は entry（g-mwn9al7r）", () => {
 
-  test("判定結果は synthetic で積み、system は固定文 1 つだけ", async () => {
+  test("判定結果は synthetic で積まず、decisions.jsonl に delivered:false で残る", async () => {
     const root = tmpRoot();
-    const restore = patchFetch("light");
+    const restore = patchFetch();
     try {
       await withKey(async () => {
         const { ctx, hooks, synthetic } = fakeCtx();
@@ -356,35 +353,41 @@ describe("plugin hook: 入口判定は synthetic・system は固定・phase案�
           prompt: { text: "複数ファイルを変更する重い依頼" },
         });
 
-        /* 判定は synthetic（履歴に残り、同じ呼び出しに入る）で 1 回だけ */
-        expect(synthetic).toHaveLength(1);
-        expect(synthetic[0].text).toContain(INJECT_HEADER);
-        expect(synthetic[0].text).toContain("route=goal");
-        expect(synthetic[0].resume).toBe(false);
-        /* patchFetch は difficulty=normal/0.9 も返すが、hook は難易度を渡さない
-         * （goal start で題から判定する。design g-mwjsd3om 判断4 / g-mwkfisl7 T5） */
-        expect(synthetic[0].text).not.toContain("difficulty");
+        /* 案内はやめたので、会話には何も積まない */
+        expect(synthetic).toHaveLength(0);
 
-        /* system には判定を入れない。固定文も 1 つだけ */
+        /* 裏の判定が終わるのを待って、記録だけ確認する */
+        const waitRows = async (): Promise<Array<Record<string, unknown>>> => {
+          /* 遅い CI でも取りこぼさないよう 2 秒まで待つ（条件が満たされれば即抜ける） */
+          for (let i = 0; i < 200; i += 1) {
+            try {
+              const rows = readRows(root);
+              if (rows.some((r) => r.kind === "decide")) return rows;
+            } catch {
+              /* まだ書かれていない */
+            }
+            await Bun.sleep(10);
+          }
+          return [];
+        };
+        const row = (await waitRows()).find((r) => r.kind === "decide");
+        expect(row?.delivered).toBe(false);
+
+        /* system は固定文 1 つだけで、入口判定の語も入らない */
         const system: Array<{ type: string; text?: string }> = [];
         await contextHook({ sessionID: "s-main", system });
         expect(system).toHaveLength(1);
-        const injected = system.map((s) => s.text ?? "").join("\n");
-        expect(injected).not.toContain(INJECT_HEADER);
+        const injected = system.map((x) => x.text ?? "").join("\n");
+        expect(injected).not.toContain("## graphhopper 入口判定");
         expect(injected).toContain("graphhopper（常駐）");
         expect(injected).toContain("<context key=\"graphhopper-phase\">");
-
-        /* 2回目の context も同じ固定文（goal の有無・phase で変わらない） */
-        const system2: Array<{ type: string; text?: string }> = [];
-        await contextHook({ sessionID: "s-main", system: system2 });
-        expect(system2.map((s) => s.text ?? "").join("\n")).toBe(injected);
       });
     } finally {
       restore();
     }
   });
 
-  test("raw=direct なら積まない（履歴に通知を増やさない）", async () => {
+  test("direct でも synthetic を積まない", async () => {
     const root = tmpRoot();
     const restore = patchFetch("direct");
     try {

@@ -29,7 +29,6 @@ import { resolveCompactDb, runCompactGate } from "../../../src/compact";
 import { goalResumeContext } from "../../../src/gate";
 import {
   decideEntry,
-  formatEntryVerdict,
   INTERNAL_PROMPT_METADATA_KEY,
   isInternalPrompt,
   recordEntrySkip,
@@ -52,13 +51,13 @@ const SYSTEM_GUIDE = `## graphhopper（常駐）
 
 この環境には graphhopper プラグインが常駐している。複数ファイルにまたがる変更・設計判断を含む実装を依頼されたら、手を付ける前に graphhopper_goal(action: "start", title: ...) でループを開始する。単一ファイルの小修正・質問への回答・一回きりのコマンド実行程度なら、ループを作らず直接対応してよい。
 
-入口の route 判定（d1）はプラグインが自動実行し、結果は会話の中に「## graphhopper 入口判定」で始まるメッセージとして届くことがある（direct・判定不能・内部/子セッション/goal進行中は届かない）。届いたらその判定に従って graphhopper_goal(start) へ進む。判定は参考値で、明らかに単一ファイルの小修正なら直接対応してよい。
+入口の route 判定（d1）はプラグインが裏で自動実行し、記録だけ残す（会話には出ない）。goal を立てるかは、変更が複数ファイル・設計判断にまたがるかで自分で決める。d1 は direct・判定不能・内部/子セッション/goal進行中には走らない。
 
 designing フェーズでは source ファイルの edit/write は物理的にブロックされる（書けるのは .graphhopper/plans/ 配下の design ドキュメントだけ）。まずユーザーに質問して合意を取り（答えが出るまで自動継続は止まる）、決定記録（決めたこと／やらないこと／完了の確かめ方）を書いてから implementing に遷移して実装する。
 
 案内はこの文ではなく会話の中に届く:
 - \`<context key="graphhopper-phase">\`: 進行中 goal の phase と次のアクション。新しい値が前の値を置き換える（古い値は無効）。
-- 「## graphhopper 入口判定」「## graphhopper handoff メモ」で始まるメッセージ: プラグインからの通知。
+- 「## graphhopper handoff メモ」で始まるメッセージ: プラグインからの通知。
 
 active な goal があるときは、その案内に従う。goal の外の小用件は直接対応してよい。`;
 
@@ -75,7 +74,7 @@ const handoffChecked = new Set<string>();
 const HANDOFF_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 
 /* prompt hook（メッセージ受付）で使う時間の上限。提出した入力が受け付けられるまでの
- * 遅れの上限はこの 1 つだけ（子セッション判定・d1 待ち・phase案内の同期を直列に積まない。
+ * 遅れの上限はこの 1 つだけ（子セッション判定・phase案内の同期を直列に積まない。
  * design g-mwj6481n 判断5・8）。 */
 const PROMPT_HOOK_BUDGET_MS = 1500;
 
@@ -413,7 +412,7 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
 
   /* メッセージ受付: phase案内の同期・入口判定・handoff 案内をここでまとめる
    * （design g-mwj6481n 判断3・5）。受付の遅れの上限は PROMPT_HOOK_BUDGET_MS の 1 つだけで、
-   * 子セッション判定・d1 待ち・phase案内の同期を直列に積まない。
+   * 子セッション判定・phase案内の同期を直列に積まない。
    * system は変えず、案内は synthetic（履歴に残り、同じ呼び出しに入る）で積む。 */
   await ctx.session.hook("prompt", async (event: unknown) => {
     try {
@@ -439,21 +438,18 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
         hasActiveGoal: !!active && active.goal.status !== "done",
         hasApiKey: decisionAvailable(),
       });
-      /* d1 は先に起動だけして、handoff 案内の後で結果を待つ（待ち時間を重ねない） */
-      const startedAt = Date.now();
-      let errored = false;
-      const verdictPromise = decision.run
-        ? decideEntry(text, fetch, {
-            root,
-            sessionID,
-            messageID: e.messageID ?? null,
-          }).catch((err) => {
-            errored = true;
-            console.warn(`graphhopper: 入口判定に失敗: ${String(err)}`);
-            return null;
-          })
-        : null;
-      if (!decision.run) {
+      /* 入口判定は待たない。裏で 1 回走らせて decisions.jsonl に残すだけで、会話には出さない
+       * （判定と実際の行動を後から突き合わせるための記録。g-mwn9al7r） */
+      if (decision.run) {
+        void decideEntry(text, fetch, {
+          root,
+          sessionID,
+          messageID: e.messageID ?? null,
+          delivered: false,
+        }).catch((err) => {
+          console.warn(`graphhopper: 入口判定に失敗: ${String(err)}`);
+        });
+      } else {
         void recordEntrySkip(root, decision.reason, text, sessionID).catch(() => {});
       }
 
@@ -502,32 +498,6 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
         } catch {
           // 案内の失敗でユーザー入力を止めない
         }
-      }
-
-      /* d1 の結果を待って synthetic で積む。間に合わなければ積まない
-       * （d1 は裏で走り続け、decisions.jsonl には残る） */
-      if (verdictPromise) {
-        const verdict = await withinBudget(verdictPromise, deadline);
-        const waitedMs = Date.now() - startedAt;
-        const inject = verdict ? formatEntryVerdict(verdict) : null;
-        if (inject) {
-          await withinBudget(
-            ctx.session.synthetic({
-              sessionID,
-              text: inject,
-              description: "graphhopper 入口判定",
-              resume: false,
-            } as never),
-            deadline,
-          );
-        }
-        state.recordEvent(root, {
-          type: "entry_verdict_delivery",
-          sessionID,
-          outcome: inject ? "injected" : errored ? "error" : verdict ? "skipped" : "late",
-          waited_ms: waitedMs,
-          route: verdict?.rawRoute ?? null,
-        });
       }
 
       await withinBudget(guideSync, deadline);

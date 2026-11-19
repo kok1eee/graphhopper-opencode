@@ -8,7 +8,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   decideEntry,
-  formatEntryVerdict,
   INTERNAL_PROMPT_METADATA_KEY,
   judgeGoalDifficulty,
   isInternalPrompt,
@@ -129,51 +128,6 @@ describe("isInternalPrompt（plugin 内部 prompt の識別）", () => {
 
   test("handoff の本文マーカー（## graphhopper）も内部と判定する", () => {
     expect(isInternalPrompt(undefined, "## graphhopper handoff")).toBe(true);
-  });
-});
-
-describe("formatEntryVerdict（モデルへ渡す注入文）", () => {
-  const verdict = (over: Partial<ReturnType<typeof mapDecisionAnswer>>) => ({
-    route: "goal" as const,
-    rawChoice: "goal",
-    rawRoute: "goal" as const,
-    confidence: 0.55,
-    reason: "d1判定(light)",
-    fallback: false,
-    difficulty: "easy" as const,
-    difficultyConfidence: 0.9,
-    ...over,
-  });
-
-  test("raw=direct は注入しない（ループを作らない）", () => {
-    expect(formatEntryVerdict(verdict({ rawRoute: "direct", rawChoice: "direct" }))).toBeNull();
-  });
-
-  test("fallback（d1失敗）は注入しない", () => {
-    expect(formatEntryVerdict(verdict({ fallback: true, rawRoute: null, rawChoice: null }))).toBeNull();
-  });
-
-  test("不正choice（rawRoute=null）は注入しない", () => {
-    expect(formatEntryVerdict(verdict({ rawRoute: null, rawChoice: "bogus" }))).toBeNull();
-  });
-
-  test("goal start の指示を含む", () => {
-    const text = formatEntryVerdict(verdict({})) ?? "";
-    expect(text).toContain("route=goal");
-    expect(text).toContain("graphhopper_goal(action: 'start'");
-    expect(text).toContain("graphhopper 入口判定");
-  });
-
-  test("difficulty は渡さない（goal start で題から判定する。design g-mwjsd3om 判断4）", () => {
-    for (const v of [verdict({ difficulty: "easy" }), verdict({ difficulty: null })]) {
-      const text = formatEntryVerdict(v) ?? "";
-      expect(text).not.toContain("difficulty");
-    }
-  });
-
-  test("confidence を表示する", () => {
-    const text = formatEntryVerdict(verdict({ confidence: 0.42 })) ?? "";
-    expect(text).toContain("confidence 0.42");
   });
 });
 

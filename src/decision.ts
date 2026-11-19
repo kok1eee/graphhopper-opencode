@@ -143,6 +143,8 @@ export type DecisionLog = {
   reason: string;
   /** decide時のd1難易度（較正用） */
   difficulty?: string | null;
+  /** 判定結果を会話に出したか（false＝裏で記録しただけ。既定 true） */
+  delivered?: boolean;
   difficultyConfidence?: number | null;
   /** decide行: d1が選んだ生のchoice（fail-safe適用前。較正用）。
    * route は confidence 下限で goal に寄せられうるので、判定の意図は raw を見る */
@@ -627,6 +629,8 @@ export async function decideRoute(
     sessionID?: string | null;
     messageID?: string | null;
     timeoutMs?: number;
+    /** false のときは案内を出さない（裏で記録するだけ）。既定 true */
+    delivered?: boolean;
   },
 ): Promise<DecideResult> {
   const t0 = performance.now();
@@ -672,6 +676,7 @@ export async function decideRoute(
         rawChoice: d.rawChoice,
         sessionID: opts?.sessionID ?? null,
         messageID: opts?.messageID ?? null,
+        delivered: opts?.delivered !== false,
       });
       /* primary が落ちた回も shadow は走らせる（比較の母数を減らさない） */
       if (shadowName) {

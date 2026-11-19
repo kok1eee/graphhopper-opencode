@@ -41,8 +41,8 @@ designing は**ユーザーとの質問と合意**の段階で、設計ドキュ
 
 phase 案内（次のアクションの全文）は system ではなく**会話の中**に届く。
 `<context key="graphhopper-phase">` が現在の phase と次のアクションで、新しい値が前の値を置き換える
-（古い案内は無効）。入口判定と handoff の通知は `## graphhopper 入口判定` / `## graphhopper handoff メモ`
-で始まるメッセージとして届く。goal start・`graphhopper_phase`・resume・handoff load の応答にも
+（古い案内は無効）。handoff の通知は `## graphhopper handoff メモ` で始まるメッセージとして届く。
+入口判定（d1）は会話に出さず、裏で `decisions.jsonl` に記録するだけ（goal を立てるかは変更の大きさで決める）。goal start・`graphhopper_phase`・resume・handoff load の応答にも
 `次:` の形で同じ案内が出る（自動遷移では出ない）。案内が見当たらないときは `graphhopper_status` で
 確認する。同期に失敗したときは継続メッセージに全文が付く。
 
@@ -143,15 +143,16 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
 
 ### 入口判定（goal か direct か）
 
-フルループが大袈裟な作業を弾く入口判定。**判定は plugin の hook が自動で走らせる**
-（メッセージ受付時に d1 を待ち、`## graphhopper 入口判定` で始まるメッセージとして会話に届く。
-待ちは最大 1.5 秒で、間に合わなければ届かない）。`LIQUID_API_KEY` が要る（無いと判定は走らない）:
+フルループが大袈裟な作業を弾く入口判定。**判定は plugin の hook が裏で自動で走らせ、記録だけ残す**
+（メッセージ受付時に d1 を投げっぱなしにし、`decisions.jsonl` に残す。会話には出さず、待ち時間も無い）。
+`LIQUID_API_KEY` が要る。無いときは判定を走らせないので、`decisions.jsonl` に decide 行は残らず、
+`goal_start` の `decision_id` も空になる（行動には影響しない）:
 
-- 判定は 2 択: **goal**（ループを作る）/ **direct**（作らない。届かない）。旧 5 値は direct 以外すべて goal に寄せる
-- 届いたら `graphhopper_goal(action: "start", title: ...)` へ進む。**d1 の判定は参考値**。
-  明らかに単一ファイルの小修正なら goal を作らず直接対応してよい
-- 判定結果は `.graphhopper/decisions.jsonl` に自動記録される（route・confidence・rawChoice・レイテンシ）。
-  手動で判定し直したいときだけ `graphhopper_decide(request)`
+- 判定は 2 択: **goal** / **direct**。旧 5 値は direct 以外すべて goal に寄せる
+- **判定は行動を縛らない**。goal を立てるかは、変更が複数ファイル・設計判断にまたがるかで決める
+- 判定結果は `.graphhopper/decisions.jsonl` に自動記録される（route・confidence・rawChoice・レイテンシ・
+  `delivered: false`）。`goal_start` の履歴に `decision_id` が入るので、判定と結果を後から突き合わせられる
+- 手動で判定し直したいときだけ `graphhopper_decide(request)`
 - 難易度は入口判定では聞かない。goal start 時に題から別の呼び出しで判定する（上の「難易度がどこで決まるか」）
 
 ### designing

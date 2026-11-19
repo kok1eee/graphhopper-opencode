@@ -6,7 +6,8 @@
  * - 判定結果をモデルに渡すための注入文を作る
  * - 判定しない条件（内部 prompt・子セッション・goal 進行中・key 不在・空）を決める
  *
- * 純粋ロジック（shouldRunEntryDecide / formatEntryVerdict）はここで、IO は decision.ts に任せる。
+ * 純粋ロジック（shouldRunEntryDecide）はここで、IO は decision.ts に任せる。
+ * 判定結果は会話に出さない（delivered: false で記録するだけ。g-mwn9al7r）。
  * d1 の HTTP 呼び出しは decision.ts の decideRoute を再利用する（HTTP 部分を複製しない）。
  */
 import {
@@ -19,11 +20,10 @@ import {
 } from "./decision";
 import type { Difficulty } from "./state";
 
-/** hook 経路の d1 待ち時間上限。モデル呼び出しを止めるので短めに切る */
+/* 入口判定（裏で 1 回だけ走らせる）の時間上限。会話を止めないので、多少長くてもよい */
 export const ENTRY_DECIDE_TIMEOUT_MS = 5_000;
 
-/** goal start 時の難易度判定の待ち上限。実測の最大 663ms に対して余裕をみる
- * （入口 hook の 1.5 秒と合わせて 1 往復で最悪 2.5 秒に抑える。design g-mwjsd3om 判断4） */
+/** goal start 時の難易度判定の待ち上限。実測の最大 663ms に対して余裕をみる（design g-mwjsd3om 判断4） */
 export const GOAL_DIFFICULTY_TIMEOUT_MS = 1_000;
 
 /** plugin 内部 prompt の識別子。ctx.session.prompt に付けて渡す */
@@ -96,31 +96,6 @@ export function shouldRunEntryDecide(
   return { run: true };
 }
 
-/**
- * 判定結果をモデルに渡す注入文。
- *
- * - fallback（d1 失敗）や不正 choice、raw=direct は null（＝注入しない）。
- *   判定不能を「重い」と解釈してループを起こさない（design 判断4）。
- * - route の判定には **rawRoute**（confidence 下限で goal に寄せる前の route）を使う。
- *   低 confidence の direct を goal 扱いにして案内を出さないため。
- */
-export function formatEntryVerdict(v: EntryVerdict): string | null {
-  if (v.fallback) return null;
-  const route = v.rawRoute;
-  if (!route) return null;
-  if (route === "direct") return null;
-  const conf = v.confidence === null ? "n/a" : v.confidence.toFixed(2);
-  /* 難易度は goal start 時に題から判定する（design g-mwjsd3om 判断4）ので、ここでは渡さない */
-  return [
-    "## graphhopper 入口判定（d1・自動判定済み）",
-    "",
-    `判定: route=${route}（confidence ${conf}）`,
-    "- graphhopper_goal(action: 'start', title: ...) でループを開始する。",
-    "- 明らかに単一ファイルの小修正・質問応答ならループを作らず直接対応してよい。",
-    "- d1 の判定は参考値。判断に確信があれば自分の判断を優先してよい。",
-  ].join("\n");
-}
-
 /** 判定を実行して記録する。失敗は fallback（route=goal）として返す */
 export async function decideEntry(
   request: string,
@@ -130,6 +105,7 @@ export async function decideEntry(
     sessionID?: string | null;
     messageID?: string | null;
     timeoutMs?: number;
+    delivered?: boolean;
   },
 ): Promise<EntryVerdict> {
   return decideRoute(request, fetchFn, {
@@ -137,6 +113,7 @@ export async function decideEntry(
     sessionID: opts?.sessionID ?? null,
     messageID: opts?.messageID ?? null,
     timeoutMs: opts?.timeoutMs ?? ENTRY_DECIDE_TIMEOUT_MS,
+    delivered: opts?.delivered,
   });
 }
 

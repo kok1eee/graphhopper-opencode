@@ -718,7 +718,14 @@ export function planLogExists(root: string, goalId: string): boolean {
 }
 
 export type HistoryEvent =
-  | { type: "goal_start"; goal: string; title: string; strong?: boolean }
+  | {
+      type: "goal_start";
+      goal: string;
+      title: string;
+      strong?: boolean;
+      /** 直前の入口判定（decisions.jsonl の decide 行）の id。判定と結果の突き合わせ用（g-mwn9al7r） */
+      decision_id?: string | null;
+    }
   | {
       /* 難易度の昇格（design g-mwjsd3om 判断6）。implementing 遷移時に design の
        * 「決めたこと」から再判定して hard に上げた事実を残す（後から精度を数える） */
@@ -880,8 +887,8 @@ export type HistoryEvent =
       reason: string;
     }
   | {
-      /* 入口判定の受け渡し（design g-mwj6481n 判断5）。受付の遅れと取りこぼしの計測用。
-       * injected=積んだ / skipped=判定は返ったが渡さない(direct・fallback) / late=期限切れ */
+      /* 入口判定の受け渡し（design g-mwj6481n 判断5）。**旧記録の読み取り用**。
+       * g-mwn9al7r で案内そのものをやめたため、新しくは出さない */
       type: "entry_verdict_delivery";
       sessionID: string;
       outcome: "injected" | "skipped" | "late" | "error";
@@ -1225,6 +1232,7 @@ export function startGoal(
     goal: goal.id,
     title: goal.title,
     ...(opts?.strong === true ? { strong: true } : {}),
+    decision_id: next.decision_id,
   });
   // design scaffold: 骨格を自動生成（既存があれば壊さない）。
   // 構造検証ゲートのアンカーになる
@@ -1640,7 +1648,7 @@ export function readLastDecisionId(root: string): string | null {
   }
 }
 
-/** セッションの直近の成功 decide 行の id（fallback は除く。5分窓＝ENTRY_DECIDE_FRESH_MS と同値）。
+/** セッションの直近の成功 decide 行の id（fallback は除く。5 分窓）。
  * goal の decision_id を「そのセッションの依頼」に結ぶために使う。
  * d1 障害中は null を返す＝誤った decide に紐付けない。 */
 export function readSessionDecisionId(
@@ -1660,7 +1668,7 @@ export function readSessionDecisionId(
     } finally {
       closeSync(fd);
     }
-    const cutoff = Date.now() - 5 * 60_000; // entry-decide の ENTRY_DECIDE_FRESH_MS と揃える
+    const cutoff = Date.now() - 5 * 60_000; /* 直近 5 分の decide だけを拾う */
     let found: string | null = null;
     for (const l of buf.toString("utf8").split("\n")) {
       if (!l) continue;

@@ -2306,6 +2306,11 @@ describe("goal の decision_id（セッション限定）", () => {
     await logDecision(root, decide("bbbb2222", "sess-B"));
     const a = startGoal(root, "goal A", "sess-A");
     expect(a.state.decision_id).toBe("aaaa1111");
+    /* goal_start の履歴にも同じ id を残す（判定と結果の突き合わせ用） */
+    const ev = readHistory(root).find((h) => h.type === "goal_start") as
+      | { decision_id?: string | null }
+      | undefined;
+    expect(ev?.decision_id).toBe("aaaa1111");
   });
 
   test("fallback 行は採らない（誤結合より未紐付けを選ぶ）", async () => {
@@ -2313,6 +2318,10 @@ describe("goal の decision_id（セッション限定）", () => {
     await logDecision(root, decide("cccc3333", "sess-C", true));
     const c = startGoal(root, "goal C", "sess-C");
     expect(c.state.decision_id).toBeNull();
+    const ev = readHistory(root).find((h) => h.type === "goal_start") as
+      | { decision_id?: string | null }
+      | undefined;
+    expect(ev?.decision_id).toBeNull();
   });
 });
 
