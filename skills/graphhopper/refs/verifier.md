@@ -9,7 +9,11 @@ verify は固定の lens を持たない。変更ごとに角度（疑うこと�
 - 前の diff で drift だった角度は次の diff へ持ち越され、`prior`（valid/invalid/unresolved）で前回の指摘の扱いを判定する。
   `unresolved` があれば drift 扱い
 - 1 巡目に drift があれば、同じ種類の問題を探す追い検証 `siblings` が 1 回だけ続く（最大 2 巡）
-- `router_check` の `angle_slots` は上の枠の数（持ち越した角度は（`add` 由来を除き）枠に数えるので、選ぶ役が選ぶのは残りだけ）。固定の lens 名は返らない
+- **diff トリガ付きチェック**（`refs/checks.md`）: 変更の形（触った path と変わった行）から機械的に
+  決まる確認。当たった項目は選ぶ役の判断に依らず**必ず角度として入る**（`angle_slots` の枠を消費しない。
+  1 回の verify で記載順の先頭から最大 4 件。4 件を超えて落ちた項目はその回は走らないだけで枠にも数えない）。
+  一覧の書き方と項目は `refs/checks.md`。当たりすぎたらトリガを狭める
+- `router_check` の `angle_slots` は上の枠の数（持ち越した角度は `add` と check 由来を除き枠に数えるので、選ぶ役が選ぶのは残りだけ）。固定の lens 名は返らない
 
 #### verify（Code Mode レシピ）
 

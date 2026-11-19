@@ -61,6 +61,9 @@ verify の角度は 1 本 300 秒）。時間切れは `[invoke: timedOut 123.4s
 verify の角度も `timeoutMs` で延ばせる。時間切れの角度は「判定不能」として返り記録されないので、
 もう一度 `graphhopper_verify` を呼ぶと、その角度だけ走り直す。
 
+verify は `refs/checks.md` の diff トリガ付きチェックも必ず実行する（当たった項目だけ・最大 4 件。
+過去に踏んだ不具合を、角度を選ぶ役の判断に依らず拾うため）。
+
 **polish/verify の手順は Code Mode のレシピに固定済み**
 （refs/verifier.md）。調査（researcher/librarian）・簡易な相談（advisor）は
 `graphhopper_invoke` で同期実行できる（`task()` でもよいが、結果が届く前に

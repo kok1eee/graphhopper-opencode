@@ -10,8 +10,9 @@ import type { Difficulty, RouterRoute } from "./state";
 /** 角度の id。一覧の id か、選ぶ役・メインが作った id（実行時に isValidAngleId で検証する） */
 export type AngleId = string;
 
-/** 出どころ。持ち越しても変えない（持ち越しかどうかは別の印） */
-export type AngleSource = "list" | "created" | "default" | "main_add" | "followup";
+/** 出どころ。持ち越しても変えない（持ち越しかどうかは別の印）。
+ * `check` は diff トリガ付きチェック（refs/checks.md）から必須で入った角度 */
+export type AngleSource = "list" | "created" | "default" | "main_add" | "followup" | "check";
 
 export interface Angle {
   id: AngleId;
@@ -144,9 +145,10 @@ const entryOf = (a: Angle, source: AngleSource, carried = false): PlanEntry => (
   carried,
 });
 
-/** 枠に数える角度（`agreement`・メイン追加・持ち越しでない `siblings` は数えない） */
+/** 枠に数える角度（`agreement`・メイン追加・トリガ付きチェックは数えない。
+ * チェックは「必ず走らせる」ものなので、選ぶ役の枠を圧迫しない） */
 function counted(e: PlanEntry): boolean {
-  return e.id !== AGREEMENT_ID && e.source !== "main_add";
+  return e.id !== AGREEMENT_ID && e.source !== "main_add" && e.source !== "check";
 }
 
 export function remainingSlots(plan: AnglePlan, slots: number): number {
@@ -172,6 +174,13 @@ export function carryOver(prev: AnglePlan | null, prevResults: PrevResult[]): Pl
     out.push(entryOf(SIBLINGS, "followup", true));
   }
   return out;
+}
+
+/** diff トリガ付きチェックを計画へ足す（既にある id は足さない。枠を消費しない） */
+export function applyChecks(plan: AnglePlan, entries: PlanEntry[]): AnglePlan {
+  const added = entries.filter((e) => !plan.entries.some((p) => p.id === e.id));
+  if (added.length === 0) return plan;
+  return { ...plan, entries: [...plan.entries, ...added] };
 }
 
 /** 最初の計画（`agreement` と持ち越し。持ち越しは枠を超えても入る） */

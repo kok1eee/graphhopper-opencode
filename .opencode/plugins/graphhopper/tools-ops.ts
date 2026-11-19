@@ -6,6 +6,7 @@
  * handoff の候補列挙は known-sessions sidecar を使う (H2。session.list は v2 plugin API に無い)。
  */
 import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { $ } from "bun";
 import {
   PHASE_ACTION,
@@ -17,6 +18,7 @@ import {
 import { INTERNAL_PROMPT_METADATA_KEY } from "../../../src/entry-decide";
 import { latestSummary } from "../../../src/compaction-store";
 import * as handoff from "../../../src/handoff";
+import { CHECKS_PATH, checkEntries, matchChecks, parseChecks } from "../../../src/checks";
 import { ANGLE_TIMEOUT_MS, invokeStructured, resolveModel } from "../../../src/invoke";
 import { rubricStatus } from "../../../src/verify";
 import { formatScoreboard } from "../../../src/scoreboard-format";
@@ -27,6 +29,7 @@ import {
   SIBLINGS_ID,
   angleSlots,
   applyAdds,
+  applyChecks,
   applyDefaults,
   applyPicks,
   buildSelectorPrompt,
@@ -589,6 +592,27 @@ export function registerOpsTools(
           angles: plan.entries.map((e) => ({ id: e.id, source: e.source, carried: e.carried })),
         });
         state.writeSavedVerify(root, goalId, { v: 2, diff_hash: current, plan, results });
+      }
+
+      /* diff トリガ付きチェック（refs/checks.md）。選ぶ役の判断に依らず、当たった確認は必ず走らせる。
+       * 読めない・壊れている場合は verify を止めない（fail-open） */
+      try {
+        const checksFile = join(root, CHECKS_PATH);
+        if (existsSync(checksFile)) {
+          const matched = matchChecks(
+            readFileSync(paths.diffPath, "utf8"),
+            parseChecks(readFileSync(checksFile, "utf8")),
+          );
+          const fresh = checkEntries(matched);
+          const added = fresh.filter((e) => !plan.entries.some((p) => p.id === e.id));
+          if (added.length > 0) {
+            plan = applyChecks(plan, added);
+            notes.push(`トリガ付きチェック: ${added.map((e) => e.id).join(", ")}（必ず実行）`);
+            state.writeSavedVerify(root, goalId, { v: 2, diff_hash: current, plan, results });
+          }
+        }
+      } catch {
+        // チェック一覧の読み込み失敗で verify を止めない
       }
 
       /* 2. メインの add（枠の外。エラーなら何も足さない） */
