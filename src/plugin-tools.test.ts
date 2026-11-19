@@ -1662,18 +1662,22 @@ describe("plugin tool: 難易度の判定（design g-mwjsd3om 判断4・6）", (
     });
   });
 
-  test("d1 が使えないときは待たずに difficulty: null で始める", async () => {
+  test("d1 が使えないときは呼ばずに difficulty: null で始める", async () => {
     const root = tmpRoot();
-    const started = Date.now();
+    let calls = 0;
     await withD1(null, async () => {
+      /* 仕様は「d1 が使えないときは API を呼ばない」。時間ではなく回数で確かめる */
+      globalThis.fetch = (async () => {
+        calls += 1;
+        return { ok: true, json: async () => ({ answers: {} }) } as unknown as Response;
+      }) as unknown as typeof fetch;
       const out = await tools(root)
         .get("graphhopper_goal")!
         .execute({ action: "start", title: "題" }, { sessionID: "s1" });
       expect(textOf(out)).not.toContain("difficulty=");
       expect(readState(root).difficulty).toBeNull();
     });
-    /* fetch を呼ばないので即座に終わる（待ち上限 1.0 秒に対して十分小さい） */
-    expect(Date.now() - started).toBeLessThan(500);
+    expect(calls).toBe(0);
   });
 
   test("implementing 遷移で決めたことから hard に上げる", async () => {
