@@ -55,7 +55,6 @@ const CFG: GraphhopperConfig = {
   loop_wait_limit_ms: 30 * 60_000,
   loop_restart_pause: true,
   lsp_servers: [],
-  require_critic: false,
   cascade: {
     enabled: false,
     baseline: "minimax/MiniMax-M3.1-Flash",
@@ -271,14 +270,14 @@ describe("subagent read-only guard (v2 permissions)", () => {
       join(root, ".graphhopper", "config.json"),
       JSON.stringify({
         agents: {
-          "graphhopper-critic": "opencode-go/deepseek-v4.1-flash",
+          "graphhopper-librarian": "opencode-go/deepseek-v4.1-flash",
           "graphhopper-oracle": "test-prov/test-model",
         },
       }),
       "utf8",
     );
     const updates = collectAgentUpdates(root);
-    expect(updates["graphhopper-critic"]?.model).toEqual({
+    expect(updates["graphhopper-librarian"]?.model).toEqual({
       providerID: "opencode-go",
       model: "deepseek-v4.1-flash",
     });
@@ -299,7 +298,7 @@ describe("subagent read-only guard (v2 permissions)", () => {
     writeFileSync(
       join(root, ".graphhopper", "config.json"),
       JSON.stringify({
-        agents: { "graphhopper-critic": "opencode-go/gpt-6-luna" },
+        agents: { "graphhopper-librarian": "opencode-go/gpt-6-luna" },
         model_deny: ["opencode-go/gpt-6-luna"],
       }),
       "utf8",
@@ -312,14 +311,14 @@ describe("subagent read-only guard (v2 permissions)", () => {
         else process.env.GRAPHHOPPER_CONFIG = prevCfg;
       }
     })();
-    // built-in 既定（critic は claude-oauth/claude-haiku-5-5）へ戻る
-    expect(updates["graphhopper-critic"]?.model).toEqual({
-      providerID: "claude-oauth",
-      model: "claude-haiku-5-5",
+    // built-in 既定（librarian は minimax/MiniMax-M3.1-Flash）へ戻る
+    expect(updates["graphhopper-librarian"]?.model).toEqual({
+      providerID: "minimax",
+      model: "MiniMax-M3.1-Flash",
     });
     expect(warnings).toEqual([
       {
-        agent: "graphhopper-critic",
+        agent: "graphhopper-librarian",
         model: "opencode-go/gpt-6-luna",
         kind: "deny",
         rule: "opencode-go/gpt-6-luna",
@@ -336,7 +335,7 @@ describe("subagent read-only guard (v2 permissions)", () => {
     mkdirSync(join(root, ".graphhopper"), { recursive: true });
     writeFileSync(
       join(root, ".graphhopper", "config.json"),
-      JSON.stringify({ agents: { "graphhopper-critic": "no-slash" } }),
+      JSON.stringify({ agents: { "graphhopper-librarian": "no-slash" } }),
       "utf8",
     );
     const { warnings } = (() => {
@@ -348,7 +347,7 @@ describe("subagent read-only guard (v2 permissions)", () => {
       }
     })();
     expect(warnings).toContainEqual({
-      agent: "graphhopper-critic",
+      agent: "graphhopper-librarian",
       model: "no-slash",
       kind: "invalid",
     });
@@ -383,7 +382,7 @@ describe("subagent read-only guard (v2 permissions)", () => {
     const advisor = GRAPHHOPPER_AGENTS["graphhopper-advisor"];
     expect(advisor).toBeDefined();
     expect(advisor?.system).toContain("graphhopper-oracle");
-    expect(advisor?.system).toContain("1行JSON");
+    expect(GRAPHHOPPER_AGENTS["graphhopper-critic"]).toBeUndefined();
     // LSP deny (deny-guard方式)
     const rules = buildPermissions(advisor!, "graphhopper-advisor");
     expect(rules).toContainEqual({ action: "lsp_hover", resource: "*", effect: "deny" });
@@ -587,77 +586,15 @@ describe("continuationText 3段階文面", () => {
 });
 
   describe("decide判定parse・thin gate（gate.ts）", () => {
-  test("parseEntryRoute: 正常系とfail-safe", async () => {
+  test("PHASE_ACTION: designing は grilling の案内（critic を含まない）", async () => {
     const g = await import("./gate");
-    expect(g.parseEntryRoute('{"route":"light"}').route).toBe("light");
-    expect(g.parseEntryRoute('{"route":"advised"}').route).toBe("advised");
-    expect(g.parseEntryRoute('{"route":"oracle"}').route).toBe("oracle");
-    expect(g.parseEntryRoute('前置き\n{"route": "direct"}\n後書き').route).toBe("direct");
-    expect(g.parseEntryRoute("garbage").route).toBe("full");
-    expect(g.parseEntryRoute("").route).toBe("full");
-    expect(g.parseEntryRoute(null).route).toBe("full");
-    expect(g.parseEntryRoute('{"route":"Z"}').route).toBe("full");
-    // 旧A/B/C互換（bare・JSON内。simplify指摘のcritical回帰）
-    expect(g.parseEntryRoute('{"route":"B"}').route).toBe("light");
-    expect(g.parseEntryRoute('前置き\n{"route": "c"}\n後書き').route).toBe("direct");
-    expect(g.parseEntryRoute("B").route).toBe("light");
-    expect(g.parseEntryRoute("b").route).toBe("light");
-    expect(g.parseEntryRoute("  c  ").route).toBe("direct");
-    expect(g.parseEntryRoute("B\n").route).toBe("light");
-    expect(g.parseEntryRoute(" A ").route).toBe("full");
-    expect(g.parseEntryRoute("a").route).toBe("full");
-    // 大小文字不問の新名
-    expect(g.parseEntryRoute("Light").route).toBe("light");
-    expect(g.parseEntryRoute("  ADVISED  ").route).toBe("advised");
-  });
-
-  test("effectivePhaseAction: light/advised は注記、difficulty で advisor 節が変わる", async () => {
-    const g = await import("./gate");
-    expect(g.effectivePhaseAction("designing", null)).toBe(g.PHASE_ACTION["designing"]);
-    expect(g.effectivePhaseAction("designing", "full")).toBe(g.PHASE_ACTION["designing"]);
-    expect(g.effectivePhaseAction("designing", "direct")).toBe(g.PHASE_ACTION["designing"]);
-    /* 難易度未判定（null）は「メインが決める」= PHASE_ACTION.designing と同じ */
-    expect(g.effectivePhaseAction("designing", "full", null)).toBe(g.PHASE_ACTION["designing"]);
-
-    /* 既定（normal / 未判定）は判断基準と log の 1 行を出す */
-    const normal = g.effectivePhaseAction("designing", "full", "normal");
-    expect(normal).toContain("graphhopper-advisor");
-    expect(normal).toContain("graphhopper-critic");
-    expect(normal).toContain("自信がない判断");
-    expect(normal).toContain("advisor 省略");
-
-    /* easy は advisor を呼ばない（記録も不要）。critic は base どおり */
-    const easy = g.effectivePhaseAction("designing", "full", "easy");
-    expect(easy).toContain("difficulty=easy なので advisor は省略");
-    expect(easy).not.toContain("graphhopper-advisor");
-    expect(easy).toContain("graphhopper-critic");
-
-    /* hard は advisor を 1 回呼ぶ */
-    const hard = g.effectivePhaseAction("designing", "full", "hard");
-    expect(hard).toContain("difficulty=hard");
-    expect(hard).toContain("graphhopper-advisor");
-    expect(hard).not.toContain("advisor 省略");
-
-    const light = g.effectivePhaseAction("designing", "light");
-    expect(light).toContain("内容規約");
-    expect(light).not.toContain("thin");
-    expect(light).toContain("critic省略");
-    /* light は base 側にも advisor 節を置かない（注記だけで明示する） */
-    expect(light).not.toContain("graphhopper-advisor");
-    expect(g.effectivePhaseAction("polish", "light")).toContain("選んだ角度");
-
-    const advised = g.effectivePhaseAction("designing", "advised");
-    expect(advised).toContain("内容規約");
-    expect(advised).toContain("graphhopper-advisor");
-    // advised は advisor 相談の記録だけが必須で、critic は呼ばない
-    expect(advised).toContain("critic省略");
-    expect(advised).toContain("記録（graphhopper_consult_set）だけは必須");
-
-    const oracle = g.effectivePhaseAction("designing", "oracle");
-    expect(oracle).toContain("graphhopper-oracle");
-    // oracle 入口も advisor の要否は難易度と基準で決める（oracle 相談で代用しない）
-    expect(oracle).toContain("graphhopper-advisor");
-    expect(oracle).toContain("oracle が扱わなかった判断");
+    const d = g.PHASE_ACTION["designing"];
+    expect(d).toContain("質問");
+    expect(d).toContain("決めたこと");
+    expect(d).toContain("graphhopper-advisor");
+    expect(d).not.toContain("critic");
+    expect(g.PHASE_ACTION["implementing"]).not.toContain("design.md");
+    expect(g.PHASE_ACTION["polish"]).not.toContain("escalated");
   });
 
   test("phaseGuideText: bind 済み active goal のときだけ全文（ponytail は implementing だけ）", async () => {

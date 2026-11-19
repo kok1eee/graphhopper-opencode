@@ -17,9 +17,6 @@
  * 系列多様性の議論（flywheelの2-vendor構成）はgraphhopperの**判断node**には不要——
  * 判断は「メイン + verifier」の2層で足りるというgraphhopper自体の設計原則
  * （council再発防止）に合わせ、判断系でvendorを増やさない。
- * ただし設計段階の質チェックnode `graphhopper-critic` は実装前の計画検証で、
- * メインとは別ベンダー（例: Luna）を使うことで系列多様性を設計段階で得る
- * （verifier=実装後のdrift検出 / critic=実装前の計画検証 の役割分担）。
  *
  * 全て読み取り専用（edit deny + bash は `rg` / `fd` のみ許可）。実装はメインループ側だけが行う。
  * ユーザーが opencode.json(c) に同名 agent を定義している場合はそちらを優先する。
@@ -45,7 +42,7 @@ export interface V2AgentDef {
 
 /**
  * 全subagent共通の探索ルール（graft-first）。
- * 背景: researcher/critic/verifier が Grep ツール連打・graft MCP 未使用で
+ * 背景: researcher/verifier が Grep ツール連打・graft MCP 未使用で
  * トークンを浪費する事例が多発したため、prompt レベルで強制する。
  * tier: graft（意味・構造の入口）→ ast-grep（構造パターン）→ rg（テキスト最終手段）。
  *   tgrep は表現力が rg と同じで利点が「巨大repoでの速度」だけであり、index/serve を
@@ -221,62 +218,22 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
 
   "graphhopper-advisor": {
     description:
-      "気軽な相談専用。セカンドオピニオン・advised入口の相談・full の designing で判断の第二意見を取りたいときに使う（モデルは .graphhopper/config.json の agents で設定）。入口トリアージ（graphhopper_decide）はd1 toolに移管済み（agent不要）。stuck時はgraphhopper-oracle（advisorで代替しない）。最終決定は呼び出し側",
+      "気軽な相談専用。designing で判断の第二意見を取りたいときに使う（任意。モデルは .graphhopper/config.json の agents で設定）。stuck時はgraphhopper-oracle（advisorで代替しない）。最終決定は呼び出し側",
     mode: "all",
     model: { providerID: "claude-oauth", model: "claude-opus-5-5" },
     temperature: 0.2,
     bash: SEARCH_ONLY_BASH,
     system: [
-      "あなたはadvisor。相談・判定の助言者。",
+      "あなたはadvisor。相談の助言者。",
       "",
       "役割:",
       "- 問いに対し選択肢・トレードオフ・推奨1つを返す",
-      "- typed choice形式の問いには1行JSONのみで返す（説明・理由文は出さない）",
       "- 最終決定は呼び出し側。あなたは拘束しない",
       "",
       "ルール:",
       "- 推測で答えない。必要ならReadで裏付けを取る",
       "- stuck案件（fail_streak到達）はあなたの領分外。graphhopper-oracleに回す旨を返せ",
       "- コードは書かない。助言だけ",
-      ...SEARCH_RULES,
-    ].join("\n"),
-  },
-
-  "graphhopper-critic": {
-    description:
-      "designingフェーズのdesign.mdを敵対レビューする。要件漏れ・設計の穴・スコープ逸脱を検出する安価な常設チェックnode（モデルは .graphhopper/config.json の agents で設定。haiku級で安価・高速に回し、見逃し率はscoreboardで監視）。verifierとは対照的に実装前の計画のみを対象とする",
-    mode: "all",
-    model: { providerID: "claude-oauth", model: "claude-haiku-5-5" },
-    /* temperature未指定: criticは既定温度で回す（敵対レビュー用途ではばらつき許容）。
-     * verifier等は維持 */
-    bash: SEARCH_ONLY_BASH,
-    system: [
-      "あなたはcritic。実装前に、設計ドキュメントの質を敵対的に検証する。",
-      "",
-      "対象: .graphhopper/plans/<goal-id>.md（designドキュメント）",
-      "goal開始時の会話を保存した意図ログ .graphhopper/plans/<goal-id>.intent.md があれば必ず読み、",
-      "design の前提がユーザーの意図（me: の発言）からズレていないかを追加で見る。",
-      "intent.md は goal 開始時の一次情報であり、design を正とするために読み替えない。",
-      "検証する3観点:",
-      "- 要件漏れ: goalから要件理解・設計判断・実装タスク列に欠落はないか",
-      "- 設計の穴: トレードオフが明示されているか、タスク列で実行可能か",
-      "- スコープ逸脱: goalと無関係な作業・過剰設計・ゴールドプレーティングがないか",
-      "",
-      "機械的に確認できる観点（各項目を yes/no で判定し、no のものだけ finding にする）:",
-      "1. 各設計判断に代替案と棄却理由が書かれているか",
-      "2. 各設計判断に反証条件（この観測が出たら間違い）が書かれているか",
-      "3. 「触らないもの」は具体的か（「必要に応じて」「適宜」などの逃げがないか）",
-      "4. §2 現状の主張に file:line の証拠が付き、主張と対応しているか",
-      "5. §3 の各判断に対応するタスクが §4 にあるか（漏れ、判断に無いタスク）",
-      "6. 判断が実装詳細（定数・関数名の列挙・手順）に踏み込みすぎていないか",
-      "",
-      "drift（乖離）を検出したら全件報告する（confidence/severity付き、閾値カットしない）。",
-      "無ければ「driftなし」と明記する。",
-      "",
-      "ルール:",
-      "- 指摘は具体的に（該当セクション・該当行を引用）",
-      "- 迎合して指摘を捏造しない。問題が無ければはっきりそう言う",
-      "- コードは書かない。読み取りと指摘だけ",
       ...SEARCH_RULES,
     ].join("\n"),
   },
@@ -358,7 +315,7 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
       "呼び出し側が渡す指示（角度・疑うこと・見る範囲、または角度を選ぶ依頼）に従う。担当の角度だけに集中する。",
       "",
       "進捗タスク（source of truth）:",
-      "- 進捗の source of truth は .graphhopper/todos/<goalId>.json（design.md は designing 終端で immutable のため進捗の計測源にできない）",
+      "- 進捗の source of truth は .graphhopper/todos/<goalId>.json（決定記録は designing 終端で不変のため進捗の計測源にできない）",
       "- goalId の解決: `.graphhopper/state.json` の `goal_id` を読む。取れなければ `.graphhopper/todos/` 配下のファイル名（通常1つ）を使う",
       "- 進捗を見る指示のときは必ずこのストアを読む。未完了タスクが残っていないか、cancelled の理由が妥当かを見よ",
       "- ストアが 0 件ならタスクなしとして扱い、進捗起因の drift は報告しない",
@@ -410,7 +367,7 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
 /**
  * LSP読取7件の公開範囲（design g-mu5atclj D5）。
  * main＋researcher＋verifier＋oracleに公開し、
- * critic/simplify/librarian/advisorには明示denyする（deny-guard方式）。
+ * simplify/librarian/advisorには明示denyする（deny-guard方式）。
  */
 const LSP_TOOLS = [
   "lsp_hover",
@@ -423,7 +380,6 @@ const LSP_TOOLS = [
 ] as const;
 
 const LSP_DENY_AGENTS: ReadonlySet<string> = new Set([
-  "graphhopper-critic",
   "graphhopper-simplify",
   "graphhopper-librarian",
   "graphhopper-advisor",

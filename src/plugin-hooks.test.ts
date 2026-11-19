@@ -8,12 +8,13 @@
  * hook 登録 → 呼び出し → decisions.jsonl の記録までを fake ctx で固定する。
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerHooks, tailLikes } from "../.opencode/plugins/graphhopper/hooks";
 import { writeHandoff } from "./handoff";
-import { setPhase as stateSetPhase, startGoal } from "./state";
+import { readState, setEvalCmd, setPhase as stateSetPhase, startGoal } from "./state";
+import { clearAllWaitTimers } from "../.opencode/plugins/graphhopper/shared";
 
 type HookCb = (event: unknown) => void | Promise<void>;
 
@@ -358,7 +359,7 @@ describe("plugin hook: 入口判定は synthetic・system は固定・phase案�
         /* 判定は synthetic（履歴に残り、同じ呼び出しに入る）で 1 回だけ */
         expect(synthetic).toHaveLength(1);
         expect(synthetic[0].text).toContain(INJECT_HEADER);
-        expect(synthetic[0].text).toContain("route: 'light'");
+        expect(synthetic[0].text).toContain("route=goal");
         expect(synthetic[0].resume).toBe(false);
         /* patchFetch は difficulty=normal/0.9 も返すが、hook は難易度を渡さない
          * （goal start で題から判定する。design g-mwjsd3om 判断4 / g-mwkfisl7 T5） */
@@ -607,11 +608,62 @@ describe("plugin hook: idle の phase案内フォールバック（design g-mwj6
     const { ctx, hooks, synthetic } = fakeCtx({ entryThrows: true });
     await registerHooks({ ctx: ctx as never, root });
     startGoal(root, "idle フォールバックのテスト", "s-main");
+    stateSetPhase(root, "implementing");
     await runIdle(hooks, "s-main");
     expect(synthetic.length).toBeGreaterThan(0);
     const cont = synthetic[synthetic.length - 1].text;
     expect(cont).toContain("## graphhopper 次のアクション");
-    expect(cont).toContain("phase: designing");
+    expect(cont).toContain("phase: implementing");
+  });
+
+  test("designing の idle は継続メッセージを積まない（質問して答えを待つ）", async () => {
+    const root = tmpRoot();
+    const { ctx, hooks, synthetic } = fakeCtx();
+    await registerHooks({ ctx: ctx as never, root });
+    startGoal(root, "designing の待ち", "s-main");
+    await runIdle(hooks, "s-main");
+    expect(synthetic.length).toBe(0);
+  });
+
+  test("designing の idle はラウンド数・待ちの記録・eval を動かさない（implementing では動く）", async () => {
+    const idleWith = async (cb: HookCb | undefined, background: unknown[]) => {
+      if (!cb) throw new Error("idle hook が登録されていない");
+      await cb({ sessionID: "s-main", background });
+    };
+    const marker = (root: string) => join(root, "eval-ran.txt");
+    const setup = async (phase: "designing" | "implementing") => {
+      const root = tmpRoot();
+      const { ctx, hooks, synthetic } = fakeCtx();
+      await registerHooks({ ctx: ctx as never, root });
+      startGoal(root, "idle の比較", "s-main");
+      setEvalCmd(root, `touch ${marker(root)}`);
+      if (phase === "implementing") stateSetPhase(root, "implementing");
+      return { root, cb: hooks.get("experimental.idle")?.[0], synthetic };
+    };
+
+    try {
+      /* designing: background 待ちでも通常の idle でも、何も動かない */
+      const d = await setup("designing");
+      const guardBefore = JSON.stringify(readState(d.root).guard);
+      await idleWith(d.cb, [{ kind: "subagent" }]);
+      await idleWith(d.cb, []);
+      expect(JSON.stringify(readState(d.root).guard)).toBe(guardBefore);
+      expect(readState(d.root).guard.rounds).toBe(0);
+      expect(readState(d.root).guard.wait_since).toBeNull();
+      expect(existsSync(marker(d.root))).toBe(false);
+      expect(readState(d.root).phase).toBe("designing");
+      expect(d.synthetic.length).toBe(0);
+
+      /* implementing: 同じ入力で待ちの記録と eval が動く（上の assert が空振りでないことの対） */
+      const w = await setup("implementing");
+      await idleWith(w.cb, [{ kind: "subagent" }]);
+      expect(readState(w.root).guard.wait_since).not.toBeNull();
+      const e = await setup("implementing");
+      await idleWith(e.cb, []);
+      expect(existsSync(marker(e.root))).toBe(true);
+    } finally {
+      clearAllWaitTimers();
+    }
   });
 
   test("entry が使えるときは継続メッセージに全文を付けない（entry が運ぶ）", async () => {
@@ -619,8 +671,9 @@ describe("plugin hook: idle の phase案内フォールバック（design g-mwj6
     const { ctx, hooks, synthetic, entryValue } = fakeCtx();
     await registerHooks({ ctx: ctx as never, root });
     startGoal(root, "idle 正常系のテスト", "s-main");
+    stateSetPhase(root, "implementing");
     await runIdle(hooks, "s-main");
-    expect(entryValue("s-main")).toContain("phase: designing");
+    expect(entryValue("s-main")).toContain("phase: implementing");
     const cont = synthetic[synthetic.length - 1].text;
     expect(cont).not.toContain("## graphhopper 次のアクション");
   });

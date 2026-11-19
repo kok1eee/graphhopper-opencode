@@ -1,7 +1,6 @@
 /** usability ゲートの純関数テスト（design g-mwfltxyt）。 */
 import { describe, expect, test } from "bun:test";
 import {
-  ESCALATE_NEXT,
   PHASE_ACTION,
   isPolicyDocPath,
   policyDocsChanged,
@@ -10,7 +9,7 @@ import {
 
 describe("案内文の呼び出し表記（design g-mwiwxc5a 判断6）", () => {
   test("phase の次アクションと昇格文は graphhopper_invoke を使い、task() を案内しない", () => {
-    for (const text of [PHASE_ACTION.designing, PHASE_ACTION.implementing, ESCALATE_NEXT]) {
+    for (const text of [PHASE_ACTION.designing, PHASE_ACTION.implementing]) {
       expect(text).toContain("graphhopper_invoke");
       expect(text).not.toContain("task(");
       expect(text).not.toContain("subagent_type");
@@ -27,7 +26,7 @@ describe("isPolicyDocPath", () => {
     expect(isPolicyDocPath("src/agents.ts")).toBe(true);
   });
   test("生成物・docs・plan は対象外", () => {
-    expect(isPolicyDocPath(".opencode/agents/graphhopper-critic.md")).toBe(false);
+    expect(isPolicyDocPath(".opencode/agents/graphhopper-verifier.md")).toBe(false);
     expect(isPolicyDocPath("docs/x.md")).toBe(false);
     expect(isPolicyDocPath(".graphhopper/plans/g-x.md")).toBe(false);
     expect(isPolicyDocPath("README.md")).toBe(false);

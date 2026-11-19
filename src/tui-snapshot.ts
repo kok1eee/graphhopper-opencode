@@ -10,10 +10,8 @@ import { closeSync, openSync, readSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import {
   PHASES,
-  type EntryRoute,
   type GoalStatus,
   type Phase,
-  normalizeEntryRoute,
   readConfig,
   readJson,
   readTodosStatus,
@@ -22,7 +20,7 @@ import {
 import { formatTodoChip, type TodoItem } from "./todos";
 import { readRunningInvokeCount } from "./running-invoke";
 
-export type { EntryRoute, GoalStatus, Phase };
+export type { GoalStatus, Phase };
 
 export type PhaseStatus = "done" | "current" | "pending";
 
@@ -51,10 +49,6 @@ export interface Snapshot {
   title: string;
   goalStatus: GoalStatus;
   phase: Phase;
-  /** 入口 route。null は full 未判定（legacy） */
-  entryRoute: EntryRoute | null;
-  /** light/advised から full へ昇格済みか */
-  escalated: boolean;
   sessionID: string | null;
   failStreak: number;
   /** モデルカスケード。null＝未適用 */
@@ -68,7 +62,6 @@ export interface Snapshot {
   };
   loop: { stopCount: number; stopMax: number; blocked: boolean; streak: number };
   verifier: SnapshotVerdict | null;
-  critic: SnapshotVerdict | null;
   /** 進捗タスク。null = タスク無し。unreadable=true はストア不読（進捗不明） */
   tasks: {
     total: number;
@@ -126,9 +119,6 @@ export function shortModel(model: string | null): string {
 export function parsePhase(v: unknown): Phase | null {
   return typeof v === "string" && (PHASES as readonly string[]).includes(v) ? (v as Phase) : null;
 }
-
-/** 入口 route を正規化する（src/state.ts の実装を再利用。旧 A/B/C も受ける） */
-export const parseEntryRoute = normalizeEntryRoute;
 
 function parseVerdict(v: unknown): SnapshotVerdict | null {
   const r = asRecord(v);
@@ -268,8 +258,6 @@ export function historyDetail(entry: Record<string, unknown>): string {
       return `${asString(entry.route) ?? "?"} diff ${asNumber(entry.diff_lines) ?? "?"}`;
     case "verifier_verdict":
       return asString(entry.level) ?? "";
-    case "critic_review_set":
-      return asString(entry.level) ?? "";
     case "attempt":
       return `${asBoolean(entry.ok) ? "ok" : "fail"} streak ${asNumber(entry.fail_streak) ?? "?"}`;
     case "design_gate_block":
@@ -353,8 +341,6 @@ export function buildSnapshot(input: {
     title: asString(goal?.title) ?? "",
     goalStatus,
     phase,
-    entryRoute: parseEntryRoute(state.entry_route),
-    escalated: asString(state.escalated_at) !== null,
     sessionID: asString(state.session_id),
     failStreak: asNumber(state.fail_streak) ?? 0,
     cascade: parseCascade(state.cascade),
@@ -371,7 +357,6 @@ export function buildSnapshot(input: {
       streak: asNumber(state.loop_streak) ?? 0,
     },
     verifier: parseVerdict(state.last_verifier),
-    critic: parseVerdict(state.critic_review),
     tasks: parseTasks(input.todos),
     evalCmd: asString(state.eval_cmd),
     notes: asString(state.notes) ?? "",

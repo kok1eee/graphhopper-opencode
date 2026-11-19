@@ -209,23 +209,6 @@ describe("refs/verifier.md のレシピ（Code Mode）", () => {
     expect(calls.find((c) => c.name === "graphhopper_goal")!.args).toEqual({ action: "complete" });
   });
 
-  test("昇格: レシピは打ち切られ、diag も呼ばない", async () => {
-    const { tools, calls } = recorder(
-      baseImpl({
-        graphhopper_router_check: () => ({
-          escalated: true,
-          simplify: true,
-          route: "polish",
-          lenses: ["requirement", "behavior", "progress"],
-          next: "design.md を肉付け",
-        }),
-      }),
-    );
-    const out = (await runRecipe(recipe("start") + "\n" + recipe("tail"), tools)) as string;
-    expect(String(out)).toContain("昇格して designing に戻った");
-    expect(calls.map((c) => c.name)).toEqual(["graphhopper_router_check"]);
-  });
-
   test("polish 1バッチ目: simplify の提案を返して止まる", async () => {
     const { tools, calls } = recorder(
       baseImpl({

@@ -1,3 +1,4 @@
+import { recordTemplate } from "./record";
 /**
  * graphhopper state 管理
  *
@@ -31,14 +32,11 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { decodeUtf8Strict, sha1Hex } from "./hashedit";
+import { sha1Hex } from "./hashedit";
 import {
   addTodo,
   applyMark,
   formatTodoList,
-  parseSeedTasks,
-  parseTaskLines,
-  seedMerge,
   splitTodoItems,
   todoGateError,
   todoProgress,
@@ -66,28 +64,11 @@ export interface Goal {
   paused_snapshot?: GoalSnapshot | null;
 }
 
-/** entry相談の種別。advisor＝advised入口の第二意見、oracle＝oracle入口の開始時相談。
- * stuck時のoracle相談とは区別しない（entry gateは遷移時点の存在だけ見る） */
-export type ConsultKind = "advisor" | "oracle";
-
-/** entry相談の記録。判定ではなく存在記録のためlevelを持たない（scoreboard汚染防止）。
- * 相談の実在は検証しない（critic_setと同型の既知トレードオフ） */
-export interface ConsultRecord {
-  summary: string;
-  /** 相談を実行したモデル（未指定時はconfig agents表からkind別に補完） */
-  model?: string | null;
-  at: string;
-}
-
 /** pause時に退避するgoal固有文脈（単一LoopStateの使い回しによる漏れ対策） */
 export interface GoalSnapshot {
   phase: Phase;
   router: RouterState;
   last_verifier: VerifierVerdict | null;
-  critic_review: CriticVerdict | null;
-  /** entry相談記録。別goal走行後のresumeで他goalの記録を継承（リーク）／自記録を喪失しないよう退避する */
-  advisor_consult: ConsultRecord | null;
-  oracle_consult: ConsultRecord | null;
   eval_cmd: string | null;
   notes: string;
   /** goal start時の脏れ。resume後も自goal基準を維持するため退避する */
@@ -127,26 +108,6 @@ export type VerdictLevel = "clean" | "drift";
 export type DriftTarget = "implementing" | "design" | "requirements";
 /** 角度の id（旧 lens の 4 値を含む。実行時の検証は angles.ts の isValidAngleId） */
 export type VerifierLens = string;
-
-/* 入口トリアージのroute。null＝full（未呼び出し・legacyの機械定義）。
- * light/advised→full昇格のみ可（full→light禁止のラチェット）。directはgoalを作らない */
-export type EntryRoute = "full" | "light" | "direct" | "advised" | "oracle";
-
-/* 旧A/B/C→新名の写像（history既存値はdisk上不変。read時に正規化する） */
-const LEGACY_ROUTE_MAP: Record<string, EntryRoute> = {
-  A: "full",
-  B: "light",
-  C: "direct",
-};
-
-export function normalizeEntryRoute(v: unknown): EntryRoute | null {
-  if (typeof v !== "string") return null;
-  const t = v.trim().toLowerCase();
-  const names: EntryRoute[] = ["full", "light", "direct", "advised", "oracle"];
-  if ((names as string[]).includes(t)) return t as EntryRoute;
-  const legacy = LEGACY_ROUTE_MAP[v.trim().toUpperCase()];
-  return legacy ?? null;
-}
 
 /** difficulty の正規化。未知値は null（昇格しない） */
 export function normalizeDifficulty(v: unknown): Difficulty | null {
@@ -188,17 +149,6 @@ export interface UsabilityVerdict {
   files: string[];
   /** 対象文書の内容の sha1（review 後の変更検知用）。null＝計算不能 */
   doc_hash: string | null;
-  model?: string | null;
-  at: string;
-}
-
-/** designing終了前のdesign.md質レビュー（graphhopper-critic、opt-in・ハードゲート無し）の記録。
- * phase遷移の前提条件にはしない——design時点では客観的な閾値が無く、ゲート化すると
- * 「薄く書いてゲートを避ける」自己判断エロージョンを再生産するだけのため。 */
-export interface CriticVerdict {
-  level: VerdictLevel;
-  reason: string;
-  /** レビューを実行したモデル（未指定時はconfig既定で補完） */
   model?: string | null;
   at: string;
 }
@@ -272,12 +222,6 @@ export interface LoopState {
   router: RouterState;
   /** polish フェーズの verifier fan-out 結果。null = 未実行 */
   last_verifier: VerifierVerdict | null;
-  /** designing終了前のcritic review結果。null = 未実行（opt-in、setPhaseの前提条件にはしない） */
-  critic_review: CriticVerdict | null;
-  /** advised入口のadvisor相談記録。null = 未相談（designing→implementingの機械ゲート） */
-  advisor_consult: ConsultRecord | null;
-  /** oracle入口の開始時相談記録。null = 未相談（designing→implementingの機械ゲート） */
-  oracle_consult: ConsultRecord | null;
   /**
    * implementing での連続失敗数（graphhopper_attempt が機械カウント）。
    * stuck_threshold に達したら graphhopper-oracle への相談を促す。
@@ -355,8 +299,6 @@ export interface LoopState {
   rubric_hash: string | null;
   /** goal start の strong: true（goal の間だけ強いモデルで回す） */
   strong_mode: boolean;
-  /** 入口判定のroute。null＝full（未呼び出し・legacy）。light/advised→full昇格のみ可 */
-  entry_route: EntryRoute | null;
   /** 入口判定の難易度。null＝未判定（昇格しない） */
   difficulty: Difficulty | null;
   /** 入口判定(decide)の較正ログ id。decisions.jsonl の decide 行と outcome 行を結ぶ。null＝未判定 */
@@ -365,8 +307,6 @@ export interface LoopState {
   cascade: CascadeState | null;
   /** 自動継続の上限ガード */
   guard: LoopGuard;
-  /** light/advised→full昇格の実施時刻。null＝未昇格 */
-  escalated_at: string | null;
   updated_at: string;
 }
 
@@ -459,9 +399,6 @@ export interface GraphhopperConfig {
   stuck_diff_stall: number;
   /** 追加LSP server定義（design g-mu5atclj D4）。同extensionsはbuiltinを上書き、未知は追記 */
   lsp_servers: { command: string; args: string[]; extensions: string[] }[];
-  /** trueで designing→implementing 遷移に critic_review 記録を要求する。
-   * 既定 false（opt-in維持。ゲート化の是非は未決のためflagで両対応） */
-  require_critic: boolean;
   /** 自動継続の上限: 継続を積む回数（既定 50） */
   loop_max_rounds: number;
   /** 自動継続の上限: 進捗なしが連続した回数（既定 3） */
@@ -524,7 +461,6 @@ export const DEFAULT_CONFIG: GraphhopperConfig = {
   loop_wait_limit_ms: 30 * 60_000,
   loop_restart_pause: true,
   lsp_servers: [],
-  require_critic: false,
   cascade: {
     enabled: false,
     baseline: "minimax/MiniMax-M3.1-Flash",
@@ -569,7 +505,7 @@ export function planPath(root: string, goalId: string): string {
 }
 
 /* ---------- 進捗 todo ストア ----------
- * 進捗の source of truth。design.md は planning 終端で immutable なので計測源にできない。
+ * 進捗の source of truth。決定記録は designing 終端で不変なので計測源にできない。
  * goal ごとに 1 ファイル。plugin の tool と hook の両方から read・write できる。 */
 export function todosPath(root: string, goalId: string): string {
   return join(dir(root), "todos", `${goalId}.json`);
@@ -624,101 +560,11 @@ export function writeTodos(root: string, store: TodoStore): void {
   atomicWrite(p, store);
 }
 
-/** design.md の読み込み状態。missing=タスク無し相当／unreadable=進捗不明 */
-export type PlanReadState = "ok" | "missing" | "unreadable";
-
-/**
- * design.md が読めるか判定する。
- * - missing: ファイルが無い（タスクの記録源が無い＝タスク0件相当。既存 goal の後方互換）
- * - unreadable: あるが読めない（非UTF-8・fs エラー）。進捗が不明なので fail-closed の対象
- */
-export function planReadState(root: string, goalId: string): PlanReadState {
-  const p = planPath(root, goalId);
-  if (!existsSync(p)) return "missing";
-  try {
-    decodeUtf8Strict(readFileSync(p));
-    return "ok";
-  } catch {
-    return "unreadable";
-  }
-}
-
-/**
- * タスクの seed を保証する（冪等 merge）。
- * design.md の「タスク列」セクションを毎回読み、**ストアに無いものだけ追記**する。
- * - 既存タスクの id と status は保つ（消さない・上書きしない）
- * - 既存 goal の移行救済（デプロイ時点で implementing だった goal も追跡される）
- * - 同じ文言が既にあるときは追加しない（text 一致で照合）
- *
- * warn=true のときだけ seed の異常（チェックボックスが取得できない・同文重複）を
- * history に残す。読み取り専用の経路では噪声になるので渡さない。
- */
-export function ensureTodos(
-  root: string,
-  goalId: string,
-  opts: { warn?: boolean } = {},
-): TodoStore {
-  const { store, valid } = readTodosStatus(root, goalId);
-  if (!valid) {
-    // 壊れたストアは上書きしない（完了記録を失う）。警告して保留する。
-    if (opts.warn) {
-      recordEvent(root, {
-        type: "todo_seed_warning",
-        goal: goalId,
-        reason: "todo ストアが壊れている（読み込めません）。上書きせず保留した。",
-      });
-    }
-    return store;
-  }
-  let raw = "";
-  try {
-    raw = decodeUtf8Strict(readFileSync(planPath(root, goalId)));
-  } catch {
-    // design.md が読めない（不存在・非UTF-8・fs エラー）なら seed できない。
-    // 無言で返すとゲートが無言で開くので、警告を残す。
-    if (opts.warn) {
-      recordEvent(root, {
-        type: "todo_seed_warning",
-        goal: goalId,
-        reason: "design.md を読み込めなかった（不存在・非UTF-8・fs エラー）ためタスクを seed できない",
-      });
-    }
-    return store;
-  }
-  const tasks = parseSeedTasks(raw);
-  if (tasks.length === 0) {
-    // チェックボックスが文書全体にあるのにタスク列セクションから取れなかった
-    // = 見出し名辿い_progress ゲートが無言で無効化される。見えるようにする。
-    const all = parseTaskLines(raw);
-    if (opts.warn && all.length > 0) {
-      recordEvent(root, {
-        type: "todo_seed_warning",
-        goal: goalId,
-        reason:
-          `design.md にチェックボックスが ${all.length} 行あるが「タスク列」セクションから取得できない` +
-          `（見出し名を確認せよ。進捗ゲートが無効になる）`,
-      });
-    }
-    return store;
-  }
-  const merged = seedMerge(store, tasks, new Date().toISOString());
-  if (opts.warn && merged.duplicateTexts > 0) {
-    recordEvent(root, {
-      type: "todo_seed_warning",
-      goal: goalId,
-      reason: `design.md に同じ文言のタスクが ${merged.duplicateTexts} 件ある（別 id で seed した）`,
-    });
-  }
-  if (merged.added === 0) return store;
-  writeTodos(root, merged.store);
-  return merged.store;
-}
-
 export type TodoAction = "list" | "start" | "done" | "cancel" | "add" | "reopen";
 
 /**
  * 進捗タスクの1行サマリ。タスク 0 件なら null（行ごと落とす）。応答文の単一源泉。
- * 読み取り専用（seed しない）。seed は designing→implementing 遷移と todoAction のみ。
+ * 読み取り専用。
  */
 export function todoSummaryLine(root: string, goalId: string): string | null {
   try {
@@ -800,7 +646,7 @@ export function todoAction(
       store: loaded.store,
     };
   }
-  const store = ensureTodos(root, goalId);
+  const store = loaded.store;
   const now = new Date().toISOString();
   if (action === "list") {
     return { ok: true, text: formatTodoList(store), store };
@@ -838,43 +684,9 @@ export function todoAction(
 }
 
 /* design doc scaffold: goal開始時に骨格を自動生成する。
- * 構造検証（gate.ts checkDesignDoc）のアンカー。既存ファイルは壊さない（冪等）。 */
+ * 決定記録（record.ts）の雛形。既存ファイルは壊さない（冪等）。 */
 export function designTemplate(goalId: string, title: string): string {
-  return [
-    `# design: ${title} (${goalId})`,
-    ``,
-    `> 意図ログ: .graphhopper/plans/${goalId}.intent.md（goal 開始時の会話。無ければ capture 失敗）`,
-    `> critic と agreement 角度はこれを読み、design の前提がユーザーの意図からズレていないかを見る。`,
-    ``,
-    `## 1. goal理解`,
-    ``,
-    `（何を・なぜやるか。1〜3文）`,
-    ``,
-    `## 2. 現状`,
-    ``,
-    `（調査済み事実。\`src/foo.ts:123\` の形で最低2箇所、根拠を付ける）`,
-    ``,
-    `## 3. 設計判断`,
-    ``,
-    `1. **（決定を1行で）**`,
-    `   - 理由: （なぜそれを選ぶか）`,
-    `   - 代替案: （他案。採らない理由）`,
-    `   - 反証条件: （この観測が出たらこの決定は間違い）`,
-    ``,
-    `## 4. 実装タスク列`,
-    ``,
-    `- [ ] T1（判断1）: （タスク）`,
-    ``,
-    `## 5. 触らないもの（スコープ外）`,
-    ``,
-    `- （この goal で変えないもの。境界を具体的に）`,
-    ``,
-    `## 6. ユーザーの承認が要るもの`,
-    ``,
-    `- （本番変更・戻せない削除・push・キー操作など。基準は skills/graphhopper/SKILL.md の`,
-    `  「ユーザーの承認が要るもの」節。無ければ「なし（理由: …）」と書く）`,
-    ``,
-  ].join("\n");
+  return recordTemplate(goalId, title);
 }
 
 /** scaffoldが無ければ生成する。生成したら true、既存なら false */
@@ -909,7 +721,7 @@ export type HistoryEvent =
   | { type: "goal_start"; goal: string; title: string; strong?: boolean }
   | {
       /* 難易度の昇格（design g-mwjsd3om 判断6）。implementing 遷移時に design の
-       * タスク列から再判定して hard に上げた事実を残す（後から精度を数える） */
+       * 「決めたこと」から再判定して hard に上げた事実を残す（後から精度を数える） */
       type: "difficulty_upgraded";
       goal: string;
       from: Difficulty | null;
@@ -993,13 +805,13 @@ export type HistoryEvent =
     }
   | { type: "rubric_snapshot_failed"; goal: string }
   | { type: "rubric_changed"; goal: string }
-  | { type: "rubric_legacy"; goal: string }
   | {
       type: "angles_selected";
       goal: string;
       angles: { id: string; source: string; carried: boolean }[];
     }
   | { type: "angle_select_failed"; goal: string; reason: string }
+  | { type: "invoke"; goal: string; agent: string; model: string | null; timed_out: boolean; cancelled: boolean }
   | { type: "angle_followup"; goal: string; carried: boolean; level: VerdictLevel | "unknown" }
   | { type: "verifier_self_modified"; goal: string; code: boolean; agent: boolean }
   | { type: "config_invalid_gate"; goal: string; gate: string }
@@ -1010,20 +822,6 @@ export type HistoryEvent =
       goal: string;
       tool: string;
       path: string;
-    }
-  | {
-      type: "critic_review_set";
-      goal: string;
-      level: VerdictLevel;
-      model?: string | null;
-    }
-  | {
-      /* entry相談の記録。判定ではなく存在記録のためlevelを持たない
-       *（scoreboard汚染防止。switchはdefaultのまま） */
-      type: "consult_set";
-      goal: string;
-      kind: ConsultKind;
-      model?: string | null;
     }
   | {
       type: "attempt";
@@ -1047,8 +845,8 @@ export type HistoryEvent =
       text?: string;
     }
   | {
-      /* seed の異常（チェックボックスが取れない・同文重複）。
-       * 見出し名の違いで進捗ゲートが無言で無効化されるのを防ぐための可視化 */
+      /* 進捗ストアが読めず polish への遷移を拒否した記録。
+       * 型名は旧 seed 時代のまま（既存の履歴を読めるように変えない） */
       type: "todo_seed_warning";
       goal: string;
       reason: string;
@@ -1073,21 +871,13 @@ export type HistoryEvent =
       reason: string;
     }
   | {
-      /* 入口判定の記録。Cはgoalを作らないためgoal任意。
-       * 監査用1行（誤Cの検知・回収のためhistoryには残す） */
-      type: "entry_route";
-      goal?: string;
-      route: EntryRoute;
-      reason?: string;
-    }
-  | {
       /* 入口判定の受け渡し（design g-mwj6481n 判断5）。受付の遅れと取りこぼしの計測用。
        * injected=積んだ / skipped=判定は返ったが渡さない(direct・fallback) / late=期限切れ */
       type: "entry_verdict_delivery";
       sessionID: string;
       outcome: "injected" | "skipped" | "late" | "error";
       waited_ms: number;
-      route: EntryRoute | null;
+      route: string | null;
     }
   | {
       /* phase案内（instructions.entry）の同期失敗（design g-mwj6481n 判断8）。
@@ -1097,24 +887,19 @@ export type HistoryEvent =
       ok: boolean;
       error?: string;
     }
-  | { type: "escalated"; goal: string; from: EntryRoute; at: string }
   | {
       /* 改善ループ用per-goal集計行。complete時にgoal_completeと2行1appendで同時書き込み。
-       * 全てhistory由来の機械事実。欠測はnull（entry_route未記録のみ"full"）。
-       * last-write集計（entry_routeのみfirst＝昇格前。escalatedと組合せて区別） */
+       * 全てhistory由来の機械事実。欠測はnull。last-write集計 */
       type: "goal_summary";
       goal: string;
       title: string;
       duration_s: number | null;
-      entry_route: EntryRoute;
       router_route: RouterRoute | null;
       diff_lines: number | null;
       lenses: VerifierLens[];
       verdict_level: VerdictLevel | null;
       verdict_target: DriftTarget | null;
       max_fail_streak: number;
-      escalated: boolean;
-      critic_level: VerdictLevel | null;
       rewinds: number;
       verifier_rounds: number;
       score: number | null;
@@ -1264,7 +1049,6 @@ export function readConfig(root: string): GraphhopperConfig {
     stuck_diff_stall:
       raw.stuck_diff_stall ?? DEFAULT_CONFIG.stuck_diff_stall,
     lsp_servers: raw.lsp_servers ?? DEFAULT_CONFIG.lsp_servers,
-    require_critic: raw.require_critic ?? DEFAULT_CONFIG.require_critic,
     cascade: {
       ...DEFAULT_CONFIG.cascade,
       ...(raw.cascade ?? {}),
@@ -1311,9 +1095,6 @@ function emptyState(): LoopState {
       deep_reason: null,
     },
     last_verifier: null,
-    critic_review: null,
-    advisor_consult: null,
-    oracle_consult: null,
     fail_streak: 0,
     eval_cmd: null,
     last_continuation_marker: null,
@@ -1326,7 +1107,6 @@ function emptyState(): LoopState {
     last_diff_lines: null,
     diff_stall: 0,
     last_stuck_reasons: [],
-    entry_route: null,
     difficulty: null,
     decision_id: null,
     cascade: null,
@@ -1338,7 +1118,6 @@ function emptyState(): LoopState {
       pending: false,
       boot: null,
     },
-    escalated_at: null,
     initial_diff_lines: null,
     initial_diff_files: null,
     stash_diff_hash: null,
@@ -1424,27 +1203,13 @@ export function startGoal(
     session_id: sessionID,
     strong_mode: opts?.strong === true,
   };
-  // pending entry_route（route_set先行）の消費。無ければnull＝full。
-  // directはpendingを書かない（historyのみ）ため消費集合に入れない
-  const pending = readPendingRoute(root);
   /* decision_id は「このセッションの成功 decide」に結ぶ。グローバルな last_decision は
    * 他セッションの依頼を拾うことがあり、d1 障害中は特に誤結合になる */
   next.decision_id = sessionID
     ? readSessionDecisionId(root, sessionID)
     : readLastDecisionId(root);
-  if (
-    pending &&
-    (pending.route === "full" ||
-      pending.route === "light" ||
-      pending.route === "advised" ||
-      pending.route === "oracle")
-  ) {
-    next.entry_route = pending.route;
-  }
-  /* 難易度は pending（route_set でメインが明示）を優先し、無ければ start 時の題の判定
-   * （judgeGoalDifficulty）を使う。どちらも無ければ null＝未判定（design g-mwjsd3om 判断4） */
-  next.difficulty = pending?.difficulty ?? opts?.difficulty ?? null;
-  clearPendingRoute(root);
+  /* 難易度は start 時の題の判定（judgeGoalDifficulty）。無ければ null＝未判定 */
+  next.difficulty = opts?.difficulty ?? null;
   writeState(root, next);
   recordEvent(root, {
     type: "goal_start",
@@ -1452,14 +1217,6 @@ export function startGoal(
     title: goal.title,
     ...(opts?.strong === true ? { strong: true } : {}),
   });
-  if (next.entry_route) {
-    recordEvent(root, {
-      type: "entry_route",
-      goal: goal.id,
-      route: next.entry_route,
-      reason: pending?.reason,
-    });
-  }
   // design scaffold: 骨格を自動生成（既存があれば壊さない）。
   // 構造検証ゲートのアンカーになる
   scaffoldDesignDoc(root, goal.id, goal.title);
@@ -1496,9 +1253,6 @@ export function pauseGoal(root: string): ActiveLoop | null {
         phase: state.phase,
         router: state.router,
         last_verifier: state.last_verifier,
-        critic_review: state.critic_review,
-        advisor_consult: state.advisor_consult,
-        oracle_consult: state.oracle_consult,
         eval_cmd: state.eval_cmd,
         notes: state.notes,
         initial_diff_lines: state.initial_diff_lines,
@@ -1560,10 +1314,6 @@ export function resumeGoal(
               phase: snap.phase,
               router: snap.router,
               last_verifier: snap.last_verifier,
-              critic_review: snap.critic_review,
-              // 旧snapshot（field無し）→null＝legacy扱い
-              advisor_consult: snap.advisor_consult ?? null,
-              oracle_consult: snap.oracle_consult ?? null,
               eval_cmd: snap.eval_cmd,
               notes: snap.notes,
               // 旧snapshot（field無し）→null＝legacy扱い
@@ -1725,7 +1475,7 @@ export type GoalSummaryRecord = Extract<
 > & { ts?: string };
 
 /* per-goal集計の構築（history走査。computeGoalScoreと同型）。
- * last-write集計（entry_routeのみfirst＝昇格前）。
+ * last-write集計。
  * 未complete・pause中にも呼べる（durationはnow基準。欠測はnull） */
 export function buildGoalSummary(
   root: string,
@@ -1735,16 +1485,12 @@ export function buildGoalSummary(
   const now = opts?.now ?? new Date().toISOString();
   let title = "(unknown)";
   let startTs: string | null = null;
-  let entryRoute: EntryRoute = "full";
-  let entrySeen = false;
   let routerRoute: RouterRoute | null = null;
   let diffLines: number | null = null;
   let lenses: VerifierLens[] = [];
   let verdictLevel: VerdictLevel | null = null;
   let verdictTarget: DriftTarget | null = null;
   let maxFail = 0;
-  let escalated = false;
-  let criticLevel: VerdictLevel | null = null;
   let rewinds = 0;
   let verifierRounds = 0;
   for (const h of readHistory(root)) {
@@ -1754,13 +1500,6 @@ export function buildGoalSummary(
         if (startTs === null) {
           startTs = h.ts ?? null;
           title = h.title;
-        }
-        break;
-      case "entry_route":
-        if (!entrySeen) {
-          // 旧A/B/C行は新名に正規化（disk不変・read時変換）
-          entryRoute = normalizeEntryRoute(h.route) ?? "full";
-          entrySeen = true;
         }
         break;
       case "router_check":
@@ -1777,12 +1516,6 @@ export function buildGoalSummary(
       case "eval_run":
         if (h.fail_streak > maxFail) maxFail = h.fail_streak;
         break;
-      case "escalated":
-        escalated = true;
-        break;
-      case "critic_review_set":
-        criticLevel = h.level;
-        break;
       case "phase":
         if (h.from === "polish" && h.to === "implementing") rewinds += 1;
         break;
@@ -1798,15 +1531,12 @@ export function buildGoalSummary(
     title,
     duration_s:
       Number.isNaN(duration) || duration < 0 ? null : Math.round(duration),
-    entry_route: entryRoute,
     router_route: routerRoute,
     diff_lines: diffLines,
     lenses,
     verdict_level: verdictLevel,
     verdict_target: verdictTarget,
     max_fail_streak: maxFail,
-    escalated,
-    critic_level: criticLevel,
     rewinds,
     verifier_rounds: verifierRounds,
     score: opts?.score ?? null,
@@ -1881,50 +1611,6 @@ export function resetLoopForClear(root: string): void {
   });
 }
 
-export interface PendingRoute {
-  route: EntryRoute;
-  reason?: string;
-  /** 入口判定の難易度（goal start で LoopState へ移す） */
-  difficulty?: Difficulty | null;
-  at: string;
-}
-
-function pendingRoutePath(root: string): string {
-  return join(dir(root), "pending_route.json");
-}
-
-/** route_set先行の一時置き場（goal start時に消費・削除。再起動耐性のためstate外ファイル） */
-export function writePendingRoute(
-  root: string,
-  route: EntryRoute,
-  reason?: string,
-  difficulty?: Difficulty | null,
-): void {
-  try {
-    mkdirSync(dir(root), { recursive: true });
-    writeFileSync(
-      pendingRoutePath(root),
-      JSON.stringify({ route, reason, difficulty: difficulty ?? null, at: new Date().toISOString() }),
-      "utf8",
-    );
-  } catch {
-    // 書けなければpending無し扱い（→A）。軽さ優先で黙殺
-  }
-}
-
-export function readPendingRoute(root: string): PendingRoute | null {
-  try {
-    const raw = readFileSync(pendingRoutePath(root), "utf8");
-    const p = JSON.parse(raw) as Partial<PendingRoute>;
-    // 旧A/B/Cも受理し新名に正規化（history互換）。directは消費側で除外する
-    const route = normalizeEntryRoute(p.route);
-    if (!route) return null;
-    return { route, reason: p.reason, difficulty: normalizeDifficulty(p.difficulty), at: String(p.at ?? "") };
-  } catch {
-    return null;
-  }
-}
-
 /** 直近の decide の id（decide が書き、goal start が拾う）。鮮度は10分 */
 export function writeLastDecisionId(root: string, id: string): void {
   try {
@@ -1987,41 +1673,6 @@ export function readSessionDecisionId(
   }
 }
 
-export function clearPendingRoute(root: string): void {
-  try {
-    unlinkSync(pendingRoutePath(root));
-  } catch {
-    // 存在しなければ何もしない
-  }
-}
-
-/** route_set→goal先行の救済: entry未記録のactive goalに直接bindする。
- * 記録済み・goal無し・非active（done/paused）・directはnull（pendingのみ残る／directはhistoryのみ）。
- * done＋nullにbindするとpendingが消えて次回startが欠測になる（live実証済み）ため塞ぐ。
- * pausedも塞ぐ（resumeがentry_routeを復元しない既存穴と複合するため） */
-export function bindEntryRoute(
-  root: string,
-  route: EntryRoute,
-  reason?: string,
-  difficulty?: Difficulty | null,
-): ActiveLoop | null {
-  const active = getActive(root);
-  if (!active || active.goal.status !== "active" || active.state.entry_route) return null;
-  if (route === "direct") return null;
-  const r = mutateActive(root, () => ({
-    state: { entry_route: route, ...(difficulty ? { difficulty } : {}) },
-  }));
-  if (r) {
-    recordEvent(root, {
-      type: "entry_route",
-      goal: r.goal.id,
-      route,
-      reason,
-    });
-  }
-  return r;
-}
-
 /** 難易度を書き換える（implementing 遷移の再判定用。design g-mwjsd3om 判断6） */
 export function setDifficulty(root: string, difficulty: Difficulty): ActiveLoop | null {
   return mutateActive(root, () => ({ state: { difficulty } }));
@@ -2074,39 +1725,10 @@ export function clearCascadeState(root: string): void {
   writeState(root, { ...s, cascade: null });
 }
 
-/* light/advised→full昇格（ラチェット）。full→light・null→lightは拒否。
- * 実効: entry_route=full＋escalated_at＋phaseをdesigningに戻す（design肉付け＋critic1回＋
- * fan-outのため。LEGAL_TRANSITIONSの昇格専用経路を使う）。direct・oracle・goal無しはnull */
-export function escalateEntryRoute(root: string): ActiveLoop | null {
-  const active = getActive(root);
-  if (!active) return null;
-  const from = active.state.entry_route;
-  if (from !== "light" && from !== "advised") return null;
-  const r = mutateActive(root, () => ({
-    state: {
-      entry_route: "full" as EntryRoute,
-      escalated_at: new Date().toISOString(),
-      phase: "designing" as Phase,
-      ...phaseResetFields(),
-      last_verifier: null,
-    },
-  }));
-  if (r) {
-    recordEvent(root, {
-      type: "escalated",
-      goal: r.goal.id,
-      from,
-      at: r.state.escalated_at ?? "",
-    });
-  }
-  return r;
-}
-
 /* 遷移合法性表（takt workflow doctorの発想の機械版）。
  * - 同一phaseは許可（notes更新等の無遷移呼び出しのため）
  * - polish→implementingのみ巻き戻し可（verifier driftの行き先）
- * - implementing/polish→designingはlight/advised→full昇格専用経路（escalateEntryRoute経由。
- *   濫用時はhistoryのentry_route/escalated/escalated_atで監査可）
+ * - implementing/polish→designingは、決定記録を直す・合意をやり直すときの巻き戻し
  * - *→doneは不可: doneはcompleteGoal（verifier cleanガード付き）のみ。
  *   clearActiveGoalはstate直書きのためこの表の対象外 */
 export const LEGAL_TRANSITIONS: Record<Phase, Phase[]> = {
@@ -2120,7 +1742,7 @@ export function isLegalPhaseTransition(from: Phase, to: Phase): boolean {
   return (LEGAL_TRANSITIONS[from] ?? []).includes(to);
 }
 
-/* phase遷移時のカウンタリセット集合（setPhaseとescalateEntryRouteで共有。
+/* phase遷移時のカウンタリセット集合（setPhase用。
  * 巻き戻し直後のstuck早期発火・fail引き継ぎを防ぐ） */
 function phaseResetFields(): Partial<LoopState> {
   return {
@@ -2173,8 +1795,7 @@ export function setPhaseChecked(
   // 進捗ゲート: implementing→polish は未完了タスクを残さない。
   // - ストアが読めない場合は fail-closed（拒否する）。タスク0件だと無言で通ると
   //   進捗の強制点が消えるため、「読めない」と「0件」を区別する。
-  // - ストアが空なら移行救済として design.md から seed する（デプロイ時点で
-  //   implementing だった goal も追跡対象にする。design 判断2）。
+  // - ストアが空なら通す（進捗タスクは任意の道具。決定記録からは作らない）。
   if (before && before.state.phase === "implementing" && phase === "polish") {
     const loaded = readTodosStatus(root, before.goal.id);
     const storeErr = todoStoreError(loaded);
@@ -2186,28 +1807,9 @@ export function setPhaseChecked(
       });
       return { ok: false, active: null, error: storeErr };
     }
-    const store =
-      loaded.store.items.length === 0
-        ? ensureTodos(root, before.goal.id, { warn: true })
-        : loaded.store;
-    // design.md が「あるが読めない」場合は進捗が不明なので fail-closed。
-    // （design.md が無い ＝ タスク0件相当は既存 goal の後方互換として通す）
-    if (store.items.length === 0 && planReadState(root, before.goal.id) === "unreadable") {
-      const err =
-        "design.md を読み込めません（不正なエンコーディングの可能性）。進捗を機械的に強制できないため遷移を拒否します（fail-closed）";
-      recordEvent(root, {
-        type: "todo_seed_warning",
-        goal: before.goal.id,
-        reason: err,
-      });
-      return { ok: false, active: null, error: err };
-    }
+    const store = loaded.store;
     const err = todoGateError(store);
     if (err) return { ok: false, active: null, error: err };
-  }
-  // seed は designing→implementing の遷移時にだけ行う（implementing 中は design.md を触らない）
-  if (before && before.state.phase === "designing" && phase === "implementing") {
-    ensureTodos(root, before.goal.id, { warn: true });
   }
   const r = mutateActive(root, () => ({
     // phaseが変わるたびfail系・stuck系カウンタをリセット
@@ -2990,66 +2592,6 @@ export function formatLensModels(
     })
     .filter((x): x is string => x !== null)
     .join(",");
-}
-
-/** design.md質レビュー（graphhopper-critic）の結果を記録する。opt-inでありphase遷移の
- * 前提条件にはしない（verifier_setのlens空拒否のようなself-graded防止機構は付けない）。 */
-export function setCriticVerdict(
-  root: string,
-  verdict: Omit<CriticVerdict, "at">,
-): LoopState {
-  const state = readState(root);
-  const model =
-    verdict.model ?? readConfig(root).agents["graphhopper-critic"] ?? null;
-  const next: LoopState = {
-    ...state,
-    critic_review: { ...verdict, model, at: new Date().toISOString() },
-  };
-  writeState(root, next);
-  if (state.goal_id) {
-    recordEvent(root, {
-      type: "critic_review_set",
-      goal: state.goal_id,
-      level: verdict.level,
-      model,
-    });
-  }
-  return next;
-}
-
-/** entry相談（graphhopper-advisor／graphhopper-oracle）の記録。存在記録であり
- * 相談の実在は検証しない（critic_setと同型の既知トレードオフ）。
- * designing→implementingの機械ゲート（checkPhaseMove）の入力になる。 */
-export function setConsult(
-  root: string,
-  kind: ConsultKind,
-  consult: Omit<ConsultRecord, "at">,
-): LoopState {
-  const state = readState(root);
-  const agentKey =
-    kind === "advisor" ? "graphhopper-advisor" : "graphhopper-oracle";
-  const model = consult.model ?? readConfig(root).agents[agentKey] ?? null;
-  const record: ConsultRecord = {
-    ...consult,
-    model,
-    at: new Date().toISOString(),
-  };
-  const next: LoopState = {
-    ...state,
-    ...(kind === "advisor"
-      ? { advisor_consult: record }
-      : { oracle_consult: record }),
-  };
-  writeState(root, next);
-  if (state.goal_id) {
-    recordEvent(root, {
-      type: "consult_set",
-      goal: state.goal_id,
-      kind,
-      model,
-    });
-  }
-  return next;
 }
 
 /* ================================================================== *
@@ -4071,14 +3613,11 @@ export interface GoalLineage {
   /** polish → implementing の巻き戻し回数（verifier drift の機械証跡） */
   rewinds: number;
   verifier: { level: VerdictLevel; target: DriftTarget | null; lens: VerifierLens[] }[];
-  critic: VerdictLevel | null;
   evalRuns: { pass: number; fail: number };
   maxFailStreak: number;
   gateBlocks: number;
   editedFiles: string[];
   routerChecks: { diff_lines: number; route: RouterRoute }[];
-  /** 入口route（first-seen・正規化済み。telemetryのbuildGoalSummaryと同型。欠測null） */
-  entry_route: EntryRoute | null;
   /** complete時の機械採点（未completeは null） */
   score: GoalScore | null;
 }
@@ -4097,13 +3636,11 @@ export function buildLineage(root: string): {
       phases: ["designing"],
       rewinds: 0,
       verifier: [],
-      critic: null,
       evalRuns: { pass: 0, fail: 0 },
       maxFailStreak: 0,
       gateBlocks: 0,
       editedFiles: [],
       routerChecks: [],
-      entry_route: null,
       score: g.score ?? null,
     });
   }
@@ -4118,13 +3655,11 @@ export function buildLineage(root: string): {
         phases: ["designing"],
         rewinds: 0,
         verifier: [],
-        critic: null,
-        evalRuns: { pass: 0, fail: 0 },
+          evalRuns: { pass: 0, fail: 0 },
         maxFailStreak: 0,
         gateBlocks: 0,
         editedFiles: [],
         routerChecks: [],
-        entry_route: null,
         score: null,
       };
       byId.set(goalId, l);
@@ -4144,9 +3679,6 @@ export function buildLineage(root: string): {
       case "verifier_verdict":
         l.verifier.push({ level: h.level, target: h.target, lens: h.lens });
         break;
-      case "critic_review_set":
-        l.critic = h.level;
-        break;
       case "eval_run":
         if (h.ok) l.evalRuns.pass += 1;
         else l.evalRuns.fail += 1;
@@ -4164,14 +3696,6 @@ export function buildLineage(root: string): {
       case "router_check":
         l.routerChecks.push({ diff_lines: h.diff_lines, route: h.route });
         break;
-      case "entry_route":
-        // telemetry（buildGoalSummary）と同型：first-seen＋旧A/B/C正規化
-        if (l.entry_route === null) {
-          l.entry_route = normalizeEntryRoute(
-            (h as { route?: unknown }).route,
-          ) ?? "full";
-        }
-        break;
       default:
         break;
     }
@@ -4180,13 +3704,13 @@ export function buildLineage(root: string): {
 }
 
 /* ================================================================== *
- * 評価機能（成績表）: モデル×役割の成績表。verdict/criticイベントの model 欄を
+ * 評価機能（成績表）: モデル×役割の成績表。verdictイベントの model 欄を
  * 集計する。帰属は記録値のみ（推測で紐付けない）。goal転帰は lineage 由来。
  * ================================================================== */
 
 export interface ModelRoleStats {
   model: string;
-  role: "verifier" | "critic";
+  role: "verifier";
   verdicts: number;
   clean: number;
   drift: number;
@@ -4220,7 +3744,7 @@ export function buildScoreboard(root: string): Scoreboard {
   const byModel = new Map<string, ModelRoleStats>();
   const bump = (
     model: string | null | undefined,
-    role: "verifier" | "critic",
+    role: "verifier",
     level: VerdictLevel,
     mixed: boolean,
   ) => {
@@ -4252,7 +3776,7 @@ export function buildScoreboard(root: string): Scoreboard {
       for (const m of distinct) {
         bump(m === "(unknown)" ? null : m, "verifier", h.level, mixed);
       }
-    } else if (h.type === "critic_review_set") bump(h.model, "critic", h.level, false);
+    }
   }
   const lin = buildLineage(root);
   const goals: GoalOutcome[] = lin.goals.map((g) => ({
@@ -4303,7 +3827,7 @@ function buildHints(models: ModelRoleStats[], goals: GoalOutcome[]): string[] {
       hints.push(`${g.id} "${g.title}": score ${g.score}（<${HINT_LOW_SCORE}）。要振り返り`);
     }
     if (g.rewinds >= HINT_MANY_REWINDS) {
-      hints.push(`${g.id}: 巻き戻し${g.rewinds}回。設計乖離が大きい（design/critic側の要因確認）`);
+      hints.push(`${g.id}: 巻き戻し${g.rewinds}回。設計乖離が大きい（決定記録側の要因確認）`);
     }
   }
   return hints;

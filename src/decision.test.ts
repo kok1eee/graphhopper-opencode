@@ -27,25 +27,28 @@ const setKey = (v: string | undefined) => {
 const restore = () => setKey(SAVED_KEY);
 
 describe("mapDecisionAnswer（d1 choice写像）", () => {
-  test("5択はそのまま通す", () => {
-    for (const r of ["full", "light", "direct", "advised", "oracle"]) {
+  test("2択はそのまま通す。旧 5 値は direct 以外 goal に寄る", () => {
+    for (const r of ["goal", "direct"]) {
       expect(mapDecisionAnswer(r, 0.99)).toMatchObject({ route: r });
     }
+    for (const r of ["full", "light", "advised", "oracle"]) {
+      expect(mapDecisionAnswer(r, 0.99)).toMatchObject({ route: "goal" });
+    }
   });
-  test("低confidenceはfullに倒す", () => {
-    const r = mapDecisionAnswer("light", DECISION_CONFIDENCE_FLOOR - 0.01);
-    expect(r.route).toBe("full");
+  test("低confidenceはgoalに倒す", () => {
+    const r = mapDecisionAnswer("goal", DECISION_CONFIDENCE_FLOOR - 0.01);
+    expect(r.route).toBe("goal");
     expect(r.reason).toContain("低confidence");
   });
   test("境界値（==floor）は通す", () => {
     expect(
-      mapDecisionAnswer("light", DECISION_CONFIDENCE_FLOOR).route,
-    ).toBe("light");
+      mapDecisionAnswer("goal", DECISION_CONFIDENCE_FLOOR).route,
+    ).toBe("goal");
   });
-  test("不正choice・5択外・非文字列はfull", () => {
-    expect(mapDecisionAnswer("unknown", 0.99).route).toBe("full");
-    expect(mapDecisionAnswer(null, 0.99).route).toBe("full");
-    expect(mapDecisionAnswer(42, 0.99).route).toBe("full");
+  test("不正choice・5択外・非文字列はgoal", () => {
+    expect(mapDecisionAnswer("unknown", 0.99).route).toBe("goal");
+    expect(mapDecisionAnswer(null, 0.99).route).toBe("goal");
+    expect(mapDecisionAnswer(42, 0.99).route).toBe("goal");
   });
   test("confidence欠測は通す（null許容）", () => {
     const r = mapDecisionAnswer("direct", undefined);
@@ -73,18 +76,18 @@ describe("mapDifficultyAnswer（難易度写像）", () => {
 
 describe("decideRoute（fail-safe）", () => {
 
-  test("key未設定→full", async () => {
+  test("key未設定→goal", async () => {
     setKey(undefined);
     try {
       const r = await decideRoute("何かやる");
-      expect(r.route).toBe("full");
+      expect(r.route).toBe("goal");
       expect(r.reason).toContain("LIQUID_API_KEY未設定");
     } finally {
       restore();
     }
   });
 
-  test("HTTP失敗→full（fetchは1回のみ）", async () => {
+  test("HTTP失敗→goal（fetchは1回のみ）", async () => {
     setKey("liquid_test");
     let calls = 0;
     const fakeFetch = (async () => {
@@ -93,7 +96,7 @@ describe("decideRoute（fail-safe）", () => {
     }) as unknown as typeof fetch;
     try {
       const r = await decideRoute("何かやる", fakeFetch);
-      expect(r.route).toBe("full");
+      expect(r.route).toBe("goal");
       expect(r.reason).toContain("429");
       expect(calls).toBe(1);
     } finally {
@@ -110,7 +113,7 @@ describe("decideRoute（fail-safe）", () => {
         ok: true,
         json: async () => ({
           answers: {
-            route: { choice: "light", confidence: 0.9 },
+            route: { choice: "goal", confidence: 0.9 },
             difficulty: { choice: "hard", confidence: 0.8 },
           },
         }),
@@ -118,7 +121,7 @@ describe("decideRoute（fail-safe）", () => {
     }) as unknown as typeof fetch;
     try {
       const r = await decideRoute("何かやる", fakeFetch);
-      expect(r).toMatchObject({ route: "light", confidence: 0.9, difficulty: null });
+      expect(r).toMatchObject({ route: "goal", confidence: 0.9, difficulty: null });
       expect(asked).toEqual(["route"]);
     } finally {
       restore();
@@ -129,11 +132,11 @@ describe("decideRoute（fail-safe）", () => {
     setKey("liquid_test");
     const fakeFetch = (async () => ({
       ok: true,
-      json: async () => ({ answers: { route: { choice: "light", confidence: 0.9 } } }),
+      json: async () => ({ answers: { route: { choice: "goal", confidence: 0.9 } } }),
     })) as unknown as typeof fetch;
     try {
       const r = await decideRoute("何かやる", fakeFetch);
-      expect(r).toMatchObject({ route: "light", difficulty: null });
+      expect(r).toMatchObject({ route: "goal", difficulty: null });
     } finally {
       restore();
     }
@@ -159,11 +162,11 @@ describe("callDecision（fail-safe）", () => {
     setKey(undefined);
     try {
       const r = await decideRoute("何か", fetch, { root });
-      expect(r.route).toBe("full");
+      expect(r.route).toBe("goal");
       const { readFileSync } = await import("node:fs");
       const { join } = await import("node:path");
       const [line] = readFileSync(join(root, ".graphhopper", "decisions.jsonl"), "utf-8").trim().split("\n").map((l) => JSON.parse(l));
-      expect(line).toMatchObject({ kind: "decide", result: "full", fallback: true });
+      expect(line).toMatchObject({ kind: "decide", result: "goal", fallback: true });
     } finally {
       restore();
     }
@@ -333,7 +336,7 @@ describe("logDecision（較正ログ）", () => {
     await logDecision(root, {
       kind: "decide",
       request: "あ".repeat(500),
-      result: "full",
+      result: "goal",
       confidence: null,
       latencyMs: 1,
       fallback: false,
@@ -350,11 +353,11 @@ describe("logDecision（較正ログ）", () => {
       const fake = (async () => ({
         ok: true,
         json: async () => ({
-          answers: { route: { choice: "light", confidence: 0.8 } },
+          answers: { route: { choice: "goal", confidence: 0.8 } },
         }),
       })) as unknown as typeof fetch;
       const r = await decideRoute("何か", fake);
-      expect(r.route).toBe("light");
+      expect(r.route).toBe("goal");
       // 書込先がファイルでmkdir失敗してもthrowせず結果を返す
       const { writeFileSync } = await import("node:fs");
       const notDir = "/tmp/gh-decide-log-notdir";
@@ -362,7 +365,7 @@ describe("logDecision（較正ログ）", () => {
       await logDecision(notDir, {
         kind: "decide",
         request: "x",
-        result: "full",
+        result: "goal",
         confidence: null,
         latencyMs: 1,
         fallback: false,
@@ -573,7 +576,7 @@ describe("decideRoute の shadow（並走比較）", () => {
         ok: true,
         json: async () => ({
           answers: {
-            route: { choice: isJev ? "full" : "light", confidence: isJev ? 0.9 : 0.8 },
+            route: { choice: isJev ? "goal" : "goal", confidence: isJev ? 0.9 : 0.8 },
             difficulty: { choice: "normal", confidence: 0.7 },
           },
         }),
@@ -587,16 +590,16 @@ describe("decideRoute の shadow（並走比較）", () => {
     try {
       const calls: string[] = [];
       const r = await decideRoute("typoを直す", splitFetch(calls), { root });
-      expect(r.route).toBe("light");
+      expect(r.route).toBe("goal");
       await Promise.all(pendingShadows());
       const rows = await lines(root);
       const decide = rows.find((x) => x.kind === "decide");
       const shadow = rows.find((x) => x.kind === "shadow");
-      expect(decide).toMatchObject({ result: "light", provider: "d1" });
+      expect(decide).toMatchObject({ result: "goal", provider: "d1" });
       expect(shadow).toMatchObject({
         provider: "jev",
-        result: "full",
-        rawChoice: "full",
+        result: "goal",
+        rawChoice: "goal",
         fallback: false,
       });
       expect(shadow?.decision_id).toBe(decide?.id);
@@ -669,7 +672,7 @@ describe("decideRoute の shadow（並走比較）", () => {
     try {
       const calls: string[] = [];
       const r = await decideRoute("何か", splitFetch(calls), { root });
-      expect(r.route).toBe("full");
+      expect(r.route).toBe("goal");
       await Promise.all(pendingShadows());
       expect(calls).toEqual(["jev"]);
     } finally {

@@ -101,8 +101,8 @@ export function shouldRunEntryDecide(
  *
  * - fallback（d1 失敗）や不正 choice、raw=direct は null（＝注入しない）。
  *   判定不能を「重い」と解釈してループを起こさない（design 判断4）。
- * - route の判定には **rawRoute**（confidence 下限で full に潰される前の route）を使う。
- *   mapped route を使うと 5 択 choice の confidence が常に 0.6 未満で全依頼が full になる（design 判断3）。
+ * - route の判定には **rawRoute**（confidence 下限で goal に寄せる前の route）を使う。
+ *   低 confidence の direct を goal 扱いにして案内を出さないため。
  */
 export function formatEntryVerdict(v: EntryVerdict): string | null {
   if (v.fallback) return null;
@@ -115,14 +115,13 @@ export function formatEntryVerdict(v: EntryVerdict): string | null {
     "## graphhopper 入口判定（d1・自動判定済み）",
     "",
     `判定: route=${route}（confidence ${conf}）`,
-    `- graphhopper_route_set(route: '${route}', reason: 'd1判定') を呼び、` +
-      `graphhopper_goal(action: 'start', title: ...) でループを開始する。`,
-    "- 明らかに単一ファイルの小修正・質問応答ならループを作らず直接対応してよい（route_set 不要）。",
-    "- d1 の判定は参考値。判断に確信があれば route_set で上書きしてよい。",
+    "- graphhopper_goal(action: 'start', title: ...) でループを開始する。",
+    "- 明らかに単一ファイルの小修正・質問応答ならループを作らず直接対応してよい。",
+    "- d1 の判定は参考値。判断に確信があれば自分の判断を優先してよい。",
   ].join("\n");
 }
 
-/** 判定を実行して記録する。失敗は fallback（route=full）として返す */
+/** 判定を実行して記録する。失敗は fallback（route=goal）として返す */
 export async function decideEntry(
   request: string,
   fetchFn: FetchFn = fetch,

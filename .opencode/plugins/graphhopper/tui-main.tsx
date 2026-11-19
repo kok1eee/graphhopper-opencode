@@ -3,7 +3,7 @@
  *
  * 3面:
  *  - prompt.footer.status : 常時見える1行チップ（サイドバー非表示でも残る）
- *  - sidebar.content      : phase ラダー＋goal＋verifier/critic バッジ
+ *  - sidebar.content      : phase ラダー＋goal＋verifier バッジ
  *  - session.panel        : `/gh` で開く詳細（history 末尾つき）
  *
  * データは `.graphhopper/*.json` を直接読む（src/tui-snapshot.ts）。読み取り専用。
@@ -152,16 +152,10 @@ function Badges(props: { snapshot: Snapshot }) {
   const colors = useColors();
   const color = (level: "clean" | "drift" | null) =>
     level === "clean" ? colors.success : level === "drift" ? colors.warning : colors.faint;
-  const critic = () => props.snapshot.critic;
   const verifier = () => props.snapshot.verifier;
   return (
     <box flexDirection="row">
-      <text fg={colors.muted}>critic </text>
-      <text fg={color(critic()?.level ?? null)}>{verdictMark(critic()?.level ?? null)}</text>
-      <Show when={formatAge(critic()?.at ?? null)}>
-        <text fg={colors.faint}> {formatAge(critic()?.at ?? null)}</text>
-      </Show>
-      <text fg={colors.muted}> · verify </text>
+      <text fg={colors.muted}>verify </text>
       <text fg={color(verifier()?.level ?? null)}>{verdictMark(verifier()?.level ?? null)}</text>
       <Show when={formatAge(verifier()?.at ?? null)}>
         <text fg={colors.faint}> {formatAge(verifier()?.at ?? null)}</text>
@@ -219,12 +213,6 @@ function Sidebar() {
             <text fg={colors.muted}>
               <b>graphhopper</b>
             </text>
-            <Show when={value().entryRoute}>
-              <text fg={colors.accent}> {value().entryRoute}</text>
-            </Show>
-            <Show when={value().escalated}>
-              <text fg={colors.warning}> ↑</text>
-            </Show>
           </box>
           <Ladder phase={value().phase} />
           <Show when={value().title}>
@@ -350,10 +338,6 @@ function Panel(props: { panel: { close: () => void; toggleFullscreen: () => void
           <text> </text>
           <Ladder phase={value().phase} />
           <Row label="goal" value={value().goalStatus} />
-          <Row
-            label="route"
-            value={`${value().entryRoute ?? "full (未判定)"}${value().escalated ? " (escalated)" : ""}`}
-          />
           <Row label="session" value={value().sessionID ?? "unbound"} />
           <Row
             label="diff"
@@ -372,7 +356,6 @@ function Panel(props: { panel: { close: () => void; toggleFullscreen: () => void
                   : `✓${value().tasks!.done}/${value().tasks!.total}（未 ${value().tasks!.open}）`
             }
           />
-          <Row label="critic" value={verdictText(value().critic)} />
           <Row label="verifier" value={verdictText(value().verifier)} />
           <Row
             label="loop"

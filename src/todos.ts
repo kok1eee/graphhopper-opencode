@@ -1,16 +1,16 @@
 /**
  * todo — 進捗ストアの純粋層。
  *
- * 型・パーサ・状態遷移・ゲート判定のみ。IO は src/state.ts（readTodos/writeTodos/ensureTodos）。
+ * 型・パーサ・状態遷移・ゲート判定のみ。IO は src/state.ts（readTodos/writeTodos）。
  * 「進捗の source of truth」は graphhopper 自身のストア（.graphhopper/todos/<goalId>.json）。
- * design.md は planning 終端で immutable のため進捗の計測源にできない（進捗Lens との二重管理も避ける）。
+ * 決定記録は designing 終端で不変のため進捗の計測源にできない（進捗Lens との二重管理も避ける）。
  */
 
 /** タスクの状態。pending/in_progress が「未完了」 */
 export type TodoStatus = "pending" | "in_progress" | "completed" | "cancelled";
 
 export interface TodoItem {
-  /** 連番で採番した ID（t1, t2, ...）。design.md の行番号は使わない */
+  /** 連番で採番した ID（t1, t2, ...）。決定記録の行番号は使わない */
   id: string;
   text: string;
   status: TodoStatus;
@@ -25,21 +25,6 @@ export interface TodoStore {
   updated_at: string;
 }
 
-/** scaffold が生成するプレースホルダ行。実タスクではないので seed 対象外 */
-export const SCAFFOLD_TASK_PLACEHOLDER = "T1（判断1）: （タスク）";
-
-/** タスク列セクションの見出し（seed の対象範囲） */
-const TASK_SECTION_HEADING = /^#{2,}\s+.*タスク列.*$/m;
-/**
- * フォールバックの見出し。design doc の構造ゲート（gate.ts）は
- * 「タスク」を含む見出ししか要求しないので、ここも緩く合わせる。
- * 嚴密版が見つからないときはこれを使う（見出し名の違いで
- * 進捗ゲートが無言で無効化されるのを防ぐ）。
- */
-const TASK_SECTION_FALLBACK = /^#{2,}\s+.*タスク.*$/m;
-/** 次の見出し（m フラグ必須。無いと全体を切り出せない） */
-const ANY_HEADING = /^#{2,}\s+/m;
-
 /** 状態遷移表。pending→* はBeware、終端からの差し戻し/復旧も許す */
 const ALLOWED_TRANSITIONS: Record<TodoStatus, readonly TodoStatus[]> = {
   pending: ["in_progress", "completed", "cancelled"],
@@ -52,58 +37,6 @@ export function isAllowedTransition(from: TodoStatus, to: TodoStatus): boolean {
   return ALLOWED_TRANSITIONS[from].includes(to);
 }
 
-export interface ParsedTask {
-  text: string;
-  done: boolean;
-}
-
-/* チェックボックス行の正規表現。既存の extractTasks と同一の挙動を保つ */
-const TASK_LINE = /^\s*-\s*\[([ x])\]\s*(\S.*)$/;
-
-/**
- * 全チェックボックス行を抽出する（read-only）。
- * 既存の extractTasks と同じ素朴な行パース。ネスト・改行またぎは対象外。
- */
-export function parseTaskLines(raw: string): ParsedTask[] {
-  const items: ParsedTask[] = [];
-  for (const line of raw.split("\n")) {
-    const m = line.match(TASK_LINE);
-    if (!m) continue;
-    items.push({ text: (m[2] ?? "").slice(0, 200), done: m[1] === "x" });
-  }
-  return items;
-}
-
-/**
- * 「タスク列」セクションの本文を切り出す。
- * 見出し /^#{2,}\s+.*タスク列.*$/ の直後から次の同階層見出しまで。
- * 該当セクションが無ければ「タスク」を含む見出しにフォールバックし、
- * それでも無ければ空文字。
- */
-export function extractTaskSection(raw: string): string {
-  return sectionBody(raw, TASK_SECTION_HEADING) ?? sectionBody(raw, TASK_SECTION_FALLBACK) ?? "";
-}
-
-/** 見出し正規表現に一致するセクションの本文を返す（無ければ null） */
-function sectionBody(raw: string, heading: RegExp): string | null {
-  const m = raw.match(heading);
-  if (!m || m.index === undefined) return null;
-  const rest = raw.slice(m.index + m[0].length);
-  const next = rest.search(ANY_HEADING);
-  return next >= 0 ? rest.slice(0, next) : rest;
-}
-
-/**
- * seed 対象のタスク行を抽出する。
- * - 「タスク列」セクション内のチェックボックス行だけ（受け入れ基準などの別セクションは対象外）
- * - scaffold のプレースホルダ行は除く
- */
-export function parseSeedTasks(raw: string): ParsedTask[] {
-  return parseTaskLines(extractTaskSection(raw)).filter(
-    (t) => t.text !== SCAFFOLD_TASK_PLACEHOLDER,
-  );
-}
-
 /** 既存 ID から次の連番を採番する（t1..tn の max+1） */
 export function nextTodoId(items: readonly TodoItem[]): string {
   let max = 0;
@@ -114,59 +47,6 @@ export function nextTodoId(items: readonly TodoItem[]): string {
     if (Number.isFinite(n) && n > max) max = n;
   }
   return `t${max + 1}`;
-}
-
-export interface SeedResult {
-  store: TodoStore;
-  /** 新規追加件数 */
-  added: number;
-  /** design.md 内で同じ文言が複数回出た場合の回数（呼び出し側で警告に使う） */
-  duplicateTexts: number;
-}
-
-/**
- * seed の idempotent merge。
- * 既存ストアは消さず、design.md のタスク集合との差分だけを追記する。
- * 照合はテキスト一致（複数回出現する文言は出現順で対応づける）。
- */
-export function seedMerge(
-  store: TodoStore,
-  tasks: readonly ParsedTask[],
-  now: string,
-): SeedResult {
-  const items = [...store.items];
-  const counts = new Map<string, number>();
-  for (const it of items) counts.set(it.text, (counts.get(it.text) ?? 0) + 1);
-
-  const seenInTasks = new Map<string, number>();
-  let added = 0;
-  for (const t of tasks) {
-    seenInTasks.set(t.text, (seenInTasks.get(t.text) ?? 0) + 1);
-    const c = counts.get(t.text) ?? 0;
-    if (c > 0) {
-      // 既存タスクが design.md 側と対応。追加しない（id を保つ）
-      counts.set(t.text, c - 1);
-      continue;
-    }
-    // 新規追加。counts は「既存ストアに何個あるか」なので増やさない
-    // （同文が design.md に複数あれば、それぞれ別 id で追加する）
-    items.push({
-      id: nextTodoId(items),
-      text: t.text,
-      status: t.done ? "completed" : "pending",
-      updated_at: now,
-    });
-    added++;
-  }
-
-  let duplicateTexts = 0;
-  for (const n of seenInTasks.values()) if (n > 1) duplicateTexts += n - 1;
-
-  return {
-    store: { ...store, items, updated_at: now },
-    added,
-    duplicateTexts,
-  };
 }
 
 export interface TodoProgress {

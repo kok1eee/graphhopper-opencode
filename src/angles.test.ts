@@ -20,14 +20,15 @@ import {
 } from "./angles";
 
 describe("枠の数", () => {
-  test("昇格済み 4・light/advised 非昇格 1・polish 4・advisor と未判定 2", () => {
-    expect(angleSlots({ route: "advisor", entryRoute: "light", escalated: true })).toBe(4);
-    expect(angleSlots({ route: "polish", entryRoute: "light", escalated: false })).toBe(1);
-    expect(angleSlots({ route: "polish", entryRoute: "advised", escalated: false })).toBe(1);
-    expect(angleSlots({ route: "polish", entryRoute: "full", escalated: false })).toBe(4);
-    expect(angleSlots({ route: "advisor", entryRoute: "full", escalated: false })).toBe(2);
-    expect(angleSlots({ route: null, entryRoute: null, escalated: false })).toBe(2);
-    expect(angleSlots({ route: "polish", entryRoute: "direct", escalated: false })).toBe(4);
+  test("easy は 1、それ以外は変更の大きさで polish 4・advisor と未判定 2", () => {
+    expect(angleSlots({ route: "polish", difficulty: "easy" })).toBe(1);
+    expect(angleSlots({ route: "advisor", difficulty: "easy" })).toBe(1);
+    expect(angleSlots({ route: "polish", difficulty: "normal" })).toBe(4);
+    expect(angleSlots({ route: "advisor", difficulty: "hard" })).toBe(2);
+    expect(angleSlots({ route: "polish", difficulty: "hard" })).toBe(4);
+    expect(angleSlots({ route: "advisor", difficulty: "normal" })).toBe(2);
+    expect(angleSlots({ route: "polish", difficulty: null })).toBe(4);
+    expect(angleSlots({ route: null, difficulty: null })).toBe(2);
   });
 });
 

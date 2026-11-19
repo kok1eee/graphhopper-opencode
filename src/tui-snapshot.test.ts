@@ -11,7 +11,6 @@ import {
   formatAge,
   formatChip,
   loadSnapshot,
-  parseEntryRoute,
   parseHistory,
   parsePhase,
   phaseLadder,
@@ -45,20 +44,12 @@ function state(over: Record<string, unknown> = {}): Record<string, unknown> {
 
 const goals = { goals: [{ id: "g-test", title: "TUI表示", status: "active" }], active: "g-test" };
 
-describe("parsePhase / parseEntryRoute", () => {
+describe("parsePhase", () => {
   test("既知の phase だけ通す", () => {
     expect(parsePhase("polish")).toBe("polish");
     expect(parsePhase("done")).toBe("done");
     expect(parsePhase("bogus")).toBeNull();
     expect(parsePhase(undefined)).toBeNull();
-  });
-
-  test("旧 A/B/C 表記を写像する", () => {
-    expect(parseEntryRoute("A")).toBe("full");
-    expect(parseEntryRoute("b")).toBe("light");
-    expect(parseEntryRoute("C")).toBe("direct");
-    expect(parseEntryRoute("advised")).toBe("advised");
-    expect(parseEntryRoute("")).toBeNull();
   });
 });
 
@@ -84,11 +75,9 @@ describe("buildSnapshot", () => {
     expect(snap?.goalID).toBe("g-test");
     expect(snap?.title).toBe("TUI表示");
     expect(snap?.phase).toBe("implementing");
-    expect(snap?.entryRoute).toBe("full");
     expect(snap?.failStreak).toBe(2);
     expect(snap?.verifier?.level).toBe("clean");
     expect(snap?.verifier?.at).toBe("2026-10-20T00:00:00.000Z");
-    expect(snap?.critic?.level).toBe("drift");
     expect(snap?.diff.lines).toBe(12);
     expect(snap?.diff.threshold).toBe(400);
     expect(snap?.diff.route).toBe("advisor");

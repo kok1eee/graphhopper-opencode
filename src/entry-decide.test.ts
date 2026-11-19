@@ -134,9 +134,9 @@ describe("isInternalPrompt（plugin 内部 prompt の識別）", () => {
 
 describe("formatEntryVerdict（モデルへ渡す注入文）", () => {
   const verdict = (over: Partial<ReturnType<typeof mapDecisionAnswer>>) => ({
-    route: "full" as const,
-    rawChoice: "light",
-    rawRoute: "light" as const,
+    route: "goal" as const,
+    rawChoice: "goal",
+    rawRoute: "goal" as const,
     confidence: 0.55,
     reason: "d1判定(light)",
     fallback: false,
@@ -157,9 +157,9 @@ describe("formatEntryVerdict（モデルへ渡す注入文）", () => {
     expect(formatEntryVerdict(verdict({ rawRoute: null, rawChoice: "bogus" }))).toBeNull();
   });
 
-  test("raw route を route_set に渡す指示を含む", () => {
+  test("goal start の指示を含む", () => {
     const text = formatEntryVerdict(verdict({})) ?? "";
-    expect(text).toContain("route: 'light'");
+    expect(text).toContain("route=goal");
     expect(text).toContain("graphhopper_goal(action: 'start'");
     expect(text).toContain("graphhopper 入口判定");
   });
@@ -184,20 +184,20 @@ describe("decideEntry（判定と記録）", () => {
       const v = await decideEntry(
         "重い依頼",
         fakeFetch({
-          route: { choice: "light", confidence: 0.3 },
+          route: { choice: "goal", confidence: 0.3 },
           difficulty: { choice: "easy", confidence: 0.9 },
         }),
         { root, sessionID: "sess-x" },
       );
       // confidence 0.3 は floor 未満なので mapped route は full になるが raw は light
-      expect(v.route).toBe("full");
-      expect(v.rawRoute).toBe("light");
-      expect(v.rawChoice).toBe("light");
+      expect(v.route).toBe("goal");
+      expect(v.rawRoute).toBe("goal");
+      expect(v.rawChoice).toBe("goal");
       const [row] = readRows(root);
       expect(row).toMatchObject({
         kind: "decide",
-        result: "full",
-        rawChoice: "light",
+        result: "goal",
+        rawChoice: "goal",
         sessionID: "sess-x",
         fallback: false,
       });

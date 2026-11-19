@@ -19,7 +19,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { compliantDesignDoc } from "./design-fixture";
+import { compliantDesignDoc, fillCompliantDesign } from "./design-fixture";
 import { join } from "node:path";
 import { registerCoreTools } from "../.opencode/plugins/graphhopper/tools-core";
 import { registerOpsTools } from "../.opencode/plugins/graphhopper/tools-ops";
@@ -31,12 +31,10 @@ import {
   computeDiffHash,
   pauseGoal,
   recordEvent,
-  writePendingRoute,
   planPath,
   readTodos,
   getActive,
   readState,
-  setConsult,
   setVerifierVerdict,
   startGoal,
   todosPath,
@@ -283,6 +281,69 @@ describe("plugin tool: goal start の意図ログ（design g-mwebh9vl）", () =>
   });
 });
 
+describe("plugin tool: implementing へ進むとき意図ログに designing 中の会話を足す", () => {
+  test("開始後の質問と答えが後ろに足され、開始時の部分は残る", async () => {
+    const root = tmpRoot();
+    const msgs: Record<string, unknown>[] = [
+      { type: "user", text: "こうしたい", time: { created: 1 } },
+      { type: "assistant", content: [{ type: "text", text: "調べます" }], time: { created: 2 } },
+    ];
+    const ctx = { session: { context: async () => msgs } };
+    await tools(root, ctx)
+      .get("graphhopper_goal")!
+      .execute({ action: "start", title: "t" }, { sessionID: "s1" });
+    const dir = join(root, ".graphhopper", "plans");
+    const file = join(dir, readdirSync(dir).find((f) => f.endsWith(".intent.md"))!);
+    const before = readFileSync(file, "utf8");
+    expect(before).not.toContain("designing 中の会話");
+
+    const later = Date.now() + 60_000;
+    msgs.push(
+      { type: "assistant", content: [{ type: "text", text: "A と B のどちらにしますか" }], time: { created: later } },
+      { type: "user", text: "A で", time: { created: later + 1 } },
+    );
+    fillCompliantDesign(root);
+    const out = await tools(root, ctx)
+      .get("graphhopper_phase")!
+      .execute({ phase: "implementing" }, { sessionID: "s1" });
+    expect(textOf(out)).toContain("phase -> implementing");
+
+    const after = readFileSync(file, "utf8");
+    expect(after.startsWith(before.trimEnd())).toBe(true);
+    const tail = after.slice(before.trimEnd().length);
+    expect(tail).toContain("## designing 中の会話");
+    expect(tail).toContain("assistant: A と B のどちらにしますか");
+    expect(tail).toContain("me: A で");
+    expect(tail).not.toContain("こうしたい");
+  });
+
+  test("会話の取得に失敗しても遷移は通り、意図ログは変わらない", async () => {
+    const root = tmpRoot();
+    let fail = false;
+    const ctx = {
+      session: {
+        context: async () => {
+          if (fail) throw new Error("boom");
+          return [{ type: "user", text: "こうしたい", time: { created: 1 } }];
+        },
+      },
+    };
+    await tools(root, ctx)
+      .get("graphhopper_goal")!
+      .execute({ action: "start", title: "t" }, { sessionID: "s1" });
+    const dir = join(root, ".graphhopper", "plans");
+    const file = join(dir, readdirSync(dir).find((f) => f.endsWith(".intent.md"))!);
+    const before = readFileSync(file, "utf8");
+    fail = true;
+    fillCompliantDesign(root);
+    const out = await tools(root, ctx)
+      .get("graphhopper_phase")!
+      .execute({ phase: "implementing" }, { sessionID: "s1" });
+    expect(textOf(out)).toContain("phase -> implementing");
+    expect(readFileSync(file, "utf8")).toBe(before);
+  });
+});
+
 describe("plugin tool: complete の diff hash ゲート（design g-mwd3n5bo）", () => {
   test("検証後に差分が変わると拒否し、force で通り goal_complete に残る", async () => {
     const { $ } = await import("bun");
@@ -402,7 +463,7 @@ describe("plugin tool: resume の catalog 警告（design g-mw8xvsg8）", () => 
       const agentsDir = join(root, ".opencode", "agents");
       mkdirSync(agentsDir, { recursive: true });
       writeFileSync(
-        join(agentsDir, "graphhopper-critic.md"),
+        join(agentsDir, "graphhopper-librarian.md"),
         '---\nmodel: "opencode-go/gpt-6-luna"\n---\nbody\n',
         "utf8",
       );
@@ -436,9 +497,12 @@ describe("plugin tool: graphhopper_todo", () => {
     const t = tools(root).get("graphhopper_todo");
     const ctx = { sessionID: "s1" };
 
-    // designing→implementing で seed（plugin 経路）
+    // 決定記録にチェックボックスがあっても、遷移ではタスクは作られない
     const phase = tools(root).get("graphhopper_phase");
     await phase!.execute({ phase: "implementing" }, ctx);
+    expect(readTodos(root, g.id).items.length).toBe(0);
+    await t!.execute({ action: "add", text: "T1（判断1）: 実装する" }, ctx);
+    await t!.execute({ action: "add", text: "T2（判断1）: テストを書く" }, ctx);
     expect(readTodos(root, g.id).items.length).toBe(2);
 
     const listed = textOf(await t!.execute({ action: "list" }, ctx));
@@ -464,6 +528,7 @@ describe("plugin tool: graphhopper_phase の進捗ゲート", () => {
     const phase = tools(root).get("graphhopper_phase");
     const ctx = { sessionID: "s1" };
     await phase!.execute({ phase: "implementing" }, ctx);
+    await tools(root).get("graphhopper_todo")!.execute({ action: "add", text: "T1: 実装する" }, ctx);
     const out = textOf(await phase!.execute({ phase: "polish" }, ctx));
     expect(out).toContain("未完了");
     expect(out).not.toContain("phase -> polish");
@@ -477,8 +542,12 @@ describe("plugin tool: graphhopper_phase の進捗ゲート", () => {
     const todo = tools(root).get("graphhopper_todo");
     const ctx = { sessionID: "s1" };
     await phase!.execute({ phase: "implementing" }, ctx);
-    await todo!.execute({ action: "done", id: "t1" }, ctx);
-    await todo!.execute({ action: "cancel", id: "t2", reason: "不要" }, ctx);
+    await todo!.execute({ action: "add", text: "T1: 実装する" }, ctx);
+    await todo!.execute({ action: "add", text: "T2: テストを書く" }, ctx);
+    expect(textOf(await todo!.execute({ action: "done", id: "t1" }, ctx))).toContain("t1 -> completed");
+    expect(
+      textOf(await todo!.execute({ action: "cancel", id: "t2", reason: "不要" }, ctx)),
+    ).toContain("t2 -> cancelled");
     const out = textOf(await phase!.execute({ phase: "polish" }, ctx));
     expect(out).toContain("phase -> polish");
   });
@@ -491,19 +560,16 @@ describe("plugin tool: graphhopper_phase の進捗ゲート", () => {
     expect(readState(root).phase).toBe("designing");
   });
 
-  test("ストアが空なら design.md から seed して進捗ゲートを見る", async () => {
+  test("ストアが空なら、決定記録にチェックボックスがあっても polish へ進める", async () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s1").goal;
     writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
     const phase = tools(root).get("graphhopper_phase");
     const ctx = { sessionID: "s1" };
     await phase!.execute({ phase: "implementing" }, ctx);
-    // ストアを消して「移行救済の seed」経路に落とす
-    unlinkSync(todosPath(root, g.id));
     const out = textOf(await phase!.execute({ phase: "polish" }, ctx));
-    expect(out).toContain("未完了");
-    // seed された結果がストアに残る（0件のまま素通りしない）
-    expect(readTodos(root, g.id).items.length).toBe(2);
+    expect(out).toContain("phase -> polish");
+    expect(readTodos(root, g.id).items.length).toBe(0);
   });
 });
 
@@ -531,11 +597,35 @@ describe("plugin: invoke / scoreboard", () => {
     process.env["GH_OPENCODE_BIN"] = bin;
     try {
       const r = (await opsTools(dir).get("graphhopper_invoke")!.execute(
-        { agent: "graphhopper-critic", prompt: "x" },
+        { agent: "graphhopper-librarian", prompt: "x" },
         {},
       )) as { content: string };
       expect(r.content).toContain("critic says OK");
       expect(r.content).not.toContain("[invoke:");
+    } finally {
+      if (prev === undefined) delete process.env["GH_OPENCODE_BIN"];
+      else process.env["GH_OPENCODE_BIN"] = prev;
+    }
+  });
+
+  test("invoke は active goal があれば履歴に invoke を残す", async () => {
+    const dir = tmpRoot();
+    startGoal(dir, "t", "s1");
+    const bin = join(dir, "fake-opencode");
+    writeFileSync(bin, "#!/bin/sh\necho ok\n", { mode: 0o755 });
+    const prev = process.env["GH_OPENCODE_BIN"];
+    process.env["GH_OPENCODE_BIN"] = bin;
+    try {
+      await opsTools(dir).get("graphhopper_invoke")!.execute(
+        { agent: "graphhopper-advisor", prompt: "x" },
+        {},
+      );
+      const { readHistory } = await import("./state");
+      const ev = readHistory(dir).find((h) => (h as { type: string }).type === "invoke") as
+        | { agent: string; timed_out: boolean }
+        | undefined;
+      expect(ev?.agent).toBe("graphhopper-advisor");
+      expect(ev?.timed_out).toBe(false);
     } finally {
       if (prev === undefined) delete process.env["GH_OPENCODE_BIN"];
       else process.env["GH_OPENCODE_BIN"] = prev;
@@ -552,7 +642,7 @@ describe("plugin: invoke / scoreboard", () => {
       const ac = new AbortController();
       ac.abort();
       const r = (await opsTools(dir).get("graphhopper_invoke")!.execute(
-        { agent: "graphhopper-critic", prompt: "x" },
+        { agent: "graphhopper-librarian", prompt: "x" },
         { signal: ac.signal },
       )) as { content: string };
       expect(r.content).toContain("[invoke:");
@@ -818,7 +908,6 @@ describe("plugin: 構造化 return（design g-mwiocibp 判断1・5）", () => {
       await opsTools(root).get("graphhopper_router_check")!.execute({}, { sessionID: "s1" }),
     );
     expect(r.output["route"]).toBe("polish");
-    expect(r.output["escalated"]).toBe(false);
     expect(r.output["angle_slots"]).toBe(4);
     expect(r.output["simplify"]).toBe(true);
     expect(typeof r.output["diff_lines"]).toBe("number");
@@ -833,31 +922,6 @@ describe("plugin: 構造化 return（design g-mwiocibp 判断1・5）", () => {
     expect(r.output["route"]).toBe("advisor");
     expect(r.output["angle_slots"]).toBe(2);
     expect(r.output["simplify"]).toBe(false);
-  });
-
-  test("router_check は light＋大diffで昇格し escalated=true（レシピ打ち切り）", async () => {
-    const { $ } = await import("bun");
-    const root = tmpRoot();
-    await $`git init -q ${root}`.quiet();
-    await $`git -C ${root} config user.email t@t`.quiet();
-    await $`git -C ${root} config user.name t`.quiet();
-    writeFileSync(join(root, "a.txt"), "x\n");
-    writeFileSync(join(root, ".gitignore"), ".graphhopper/\n");
-    await $`git -C ${root} add -A`.quiet();
-    await $`git -C ${root} commit -qm init`.quiet();
-    startGoal(root, "esc", "s1");
-    const { bindEntryRoute, getActive } = await import("./state");
-    bindEntryRoute(root, "light");
-    writeFileSync(join(root, "a.txt"), Array(450).fill("y").join("\n") + "\n");
-    const r = outOf(
-      await opsTools(root).get("graphhopper_router_check")!.execute({}, { sessionID: "s1" }),
-    );
-    expect(r.output["escalated"]).toBe(true);
-    expect(r.output["angle_slots"]).toBe(4);
-    expect(r.content).toContain("自動昇格");
-    const active = getActive(root)!;
-    expect(active.state.phase).toBe("designing");
-    expect(active.state.entry_route).toBe("full");
   });
 
   test("diff_stash は path/lines/baseline を output で返す", async () => {
@@ -1507,13 +1571,9 @@ describe("plugin: 廃止した経路の残骸が無い", () => {
 });
 
 describe("lineage: history から goal の系譜を復元する", () => {
-  test("critic / eval / gate block / 編集 / 入口route が載る", () => {
+  test("eval / gate block / 編集が載る", () => {
     const root = tmpRoot();
-    // pending を consume して entry_route=advised で開始（session 無しでも開始できる）
-    writePendingRoute(root, "advised", "r");
     const { goal } = startGoal(root, "lineage", "");
-    expect(readState(root).entry_route).toBe("advised");
-    recordEvent(root, { type: "critic_review_set", goal: goal.id, level: "clean" });
     recordEvent(root, { type: "design_gate_block", goal: goal.id, tool: "edit", path: "a.ts" });
     recordEvent(root, { type: "hash_edit_applied", goal: goal.id, path: "src/a.ts" });
     recordEvent(root, { type: "eval_run", goal: goal.id, ok: true, fail_streak: 0 });
@@ -1521,11 +1581,9 @@ describe("lineage: history から goal の系譜を復元する", () => {
     const lin = buildLineage(root);
     const l = lin.goals.find((x) => x.id === goal.id);
     expect(l).toBeDefined();
-    expect(l!.critic).toBe("clean");
     expect(l!.gateBlocks).toBe(1);
     expect(l!.editedFiles).toEqual(["src/a.ts"]);
     expect(l!.evalRuns).toEqual({ pass: 1, fail: 1 });
-    expect(l!.entry_route).toBe("advised");
   });
 });
 
@@ -1598,70 +1656,7 @@ describe("plugin tool: 難易度の判定（design g-mwjsd3om 判断4・6）", (
     expect(Date.now() - started).toBeLessThan(500);
   });
 
-  test("pending の difficulty があれば判定せずそれを優先する", async () => {
-    const root = tmpRoot();
-    writePendingRoute(root, "full", "d1", "hard");
-    await withD1(d1Fetch("easy", 0.99), async () => {
-      await tools(root)
-        .get("graphhopper_goal")!
-        .execute({ action: "start", title: "題" }, { sessionID: "s1" });
-      expect(readState(root).difficulty).toBe("hard");
-    });
-  });
-
-  test("start で hard の goal は implementing 遷移で advisor 案内が出る（難易度は変えない）", async () => {
-    const root = tmpRoot();
-    writePendingRoute(root, "full", "d1", "hard");
-    await withD1(null, async () => {
-      startGoal(root, "題", "s1");
-      expect(readState(root).difficulty).toBe("hard");
-      writeFileSync(
-        planPath(root, getActive(root)!.goal.id),
-        compliantDesignDoc({
-          title: "題",
-          tasks: [
-            "- [ ] T1（判断1）: `src/a.ts` の hook を新しい仕組みに置き換える",
-            "- [ ] T2（判断1）: 移行とテスト",
-          ],
-        }),
-        "utf8",
-      );
-    });
-    const out = await tools(root)
-      .get("graphhopper_phase")!
-      .execute({ phase: "implementing" }, { sessionID: "s1" });
-    const body = textOf(out);
-    /* 再判定していないので「→ hard」は出ない。案内だけが出る（design g-mwkfisl7 判断1） */
-    expect(body).toContain("difficulty=hard のまま");
-    expect(body).not.toContain("→ hard");
-    expect(body).toContain("graphhopper-advisor");
-    expect(readState(root).difficulty).toBe("hard");
-    const rows = readFileSync(join(root, ".graphhopper", "history.jsonl"), "utf8")
-      .trim()
-      .split("\n")
-      .map((l) => JSON.parse(l) as Record<string, unknown>);
-    expect(rows.some((r) => r.type === "difficulty_upgraded")).toBe(false);
-  });
-
-  test("start で hard でも advisor 実施済みなら案内しない", async () => {
-    const root = tmpRoot();
-    writePendingRoute(root, "full", "d1", "hard");
-    await withD1(null, async () => {
-      startGoal(root, "題", "s1");
-      setConsult(root, "advisor", { summary: "design を見て方向に賛成" });
-      writeFileSync(
-        planPath(root, getActive(root)!.goal.id),
-        compliantDesignDoc({ title: "題", tasks: ["- [ ] T1（判断1）: 直す"] }),
-        "utf8",
-      );
-    });
-    const out = await tools(root)
-      .get("graphhopper_phase")!
-      .execute({ phase: "implementing" }, { sessionID: "s1" });
-    expect(textOf(out)).not.toContain("graphhopper-advisor");
-  });
-
-  test("implementing 遷移でタスク列から hard に上げ、advisor 未実施なら案内する", async () => {
+  test("implementing 遷移で決めたことから hard に上げる", async () => {
     const root = tmpRoot();
     await withD1(null, async () => {
       startGoal(root, "題", "s1");
@@ -1683,7 +1678,6 @@ describe("plugin tool: 難易度の判定（design g-mwjsd3om 判断4・6）", (
         .execute({ phase: "implementing" }, { sessionID: "s1" });
       const body = textOf(out);
       expect(body).toContain("→ hard");
-      expect(body).toContain("graphhopper-advisor");
       expect(readState(root).difficulty).toBe("hard");
       const rows = readFileSync(join(root, ".graphhopper", "history.jsonl"), "utf8")
         .trim()
@@ -1691,6 +1685,97 @@ describe("plugin tool: 難易度の判定（design g-mwjsd3om 判断4・6）", (
         .map((l) => JSON.parse(l) as Record<string, unknown>);
       expect(rows.some((r) => r.type === "difficulty_upgraded")).toBe(true);
     });
+  });
+
+  /** 題の判定を from にして goal を始め、決定記録を書く */
+  const startWith = async (root: string, from: "easy" | "normal" | null, decided: string) => {
+    await withD1(from ? d1Fetch(from, 0.95) : null, async () => {
+      await tools(root)
+        .get("graphhopper_goal")!
+        .execute({ action: "start", title: "題" }, { sessionID: "s1" });
+    });
+    expect(readState(root).difficulty).toBe(from);
+    writeFileSync(
+      planPath(root, getActive(root)!.goal.id),
+      [
+        "# 決定記録",
+        "",
+        "## 決めたこと",
+        "",
+        `- ${decided}`,
+        "",
+        "## やらないこと",
+        "",
+        "- 本番の変更はしない",
+        "",
+        "## 完了の確かめ方",
+        "",
+        "- テストが通ること",
+        "",
+        "## 実装タスク列",
+        "",
+        "- [ ] タスク列にだけ書いた文言",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+  };
+  const moveWith = async (root: string, choice: string, confidence: number, bodies?: string[]) => {
+    const impl = (async (_url: unknown, init?: { body?: unknown }) => {
+      bodies?.push(String(init?.body ?? ""));
+      return { ok: true, json: async () => ({ answers: { difficulty: { choice, confidence } } }) };
+    }) as unknown as typeof fetch;
+    return withD1(impl, async () =>
+      textOf(
+        await tools(root)
+          .get("graphhopper_phase")!
+          .execute({ phase: "implementing" }, { sessionID: "s1" }),
+      ),
+    );
+  };
+
+  test("判定し直しの入力は題と「決めたこと」の本文（タスク列は渡さない）", async () => {
+    const root = tmpRoot();
+    await startWith(root, null, "hook を新しい仕組みに置き換える合意");
+    const bodies: string[] = [];
+    await moveWith(root, "hard", 0.8, bodies);
+    expect(bodies.length).toBe(1);
+    expect(bodies[0]).toContain("題");
+    expect(bodies[0]).toContain("hook を新しい仕組みに置き換える合意");
+    expect(bodies[0]).not.toContain("タスク列にだけ書いた文言");
+    expect(bodies[0]).not.toContain("本番の変更はしない");
+  });
+
+  test("easy は normal の判定で normal に上がる（履歴に from/to が残る）", async () => {
+    const root = tmpRoot();
+    await startWith(root, "easy", "複数ファイルにまたがる変更にする");
+    const body = await moveWith(root, "normal", 0.7);
+    expect(body).toContain("easy → normal");
+    expect(readState(root).difficulty).toBe("normal");
+    const rows = readFileSync(join(root, ".graphhopper", "history.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const up = rows.find((r) => r.type === "difficulty_upgraded");
+    expect(up?.from).toBe("easy");
+    expect(up?.to).toBe("normal");
+  });
+
+  test("下がる方向・同じ難易度・判定なしからの normal は反映しない", async () => {
+    const down = tmpRoot();
+    await startWith(down, "normal", "小さな修正");
+    expect(await moveWith(down, "easy", 0.95)).not.toContain("difficulty:");
+    expect(readState(down).difficulty).toBe("normal");
+
+    const same = tmpRoot();
+    await startWith(same, "easy", "小さな修正");
+    expect(await moveWith(same, "easy", 0.95)).not.toContain("difficulty:");
+    expect(readState(same).difficulty).toBe("easy");
+
+    const none = tmpRoot();
+    await startWith(none, null, "普通の変更");
+    expect(await moveWith(none, "normal", 0.7)).not.toContain("difficulty:");
+    expect(readState(none).difficulty).toBeNull();
   });
 
   test("confidence 0.7 未満の hard は昇格しない（降格もしない）", async () => {

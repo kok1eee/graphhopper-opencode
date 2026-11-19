@@ -10,8 +10,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { todoSection } from "./prompts";
 import {
-  ensureTodos,
-  planPath,
   readTodosStatus,
   startGoal,
   todoAction,
@@ -19,31 +17,16 @@ import {
   todoSummaryLine,
   todosPath,
 } from "./state";
-import { parseTaskLines } from "./todos";
 
 function tmpRoot(): string {
   return mkdtempSync(join(tmpdir(), "gh-charter-test-"));
 }
 
-/** 注意: 旧形式の fixture（§5 が空・§3 が空）。checkPhaseMove の内容規約は通らない。
- * phase 遷移を伴うテストを足すときは src/design-fixture.ts の compliantDesignDoc を使う。 */
-const DESIGN_WITH_TASKS = [
-  "# design: charter test",
-  "",
-  "## 1. goal理解",
-  "",
-  "## 2. 現状",
-  "",
-  "## 3. 設計判断",
-  "",
-  "## 4. 実装タスク列",
-  "",
-  "- [ ] T1 実装する",
-  "- [ ] T2 テストを書く",
-  "",
-  "## 5. 棄却した代替案",
-  "",
-].join("\n");
+/** 進捗タスクを 2 件足す（タスクは決定記録から作られない。自分で add する） */
+function addTasks(root: string, goalId: string): void {
+  todoAction(root, goalId, "add", { text: "T1 実装する" });
+  todoAction(root, goalId, "add", { text: "T2 テストを書く" });
+}
 
 function render(_name: string, root: string, goalId: string): string {
   return todoSection(root, goalId);
@@ -53,7 +36,7 @@ describe("progress lens charter への進捗埋め込み", () => {
   test("graphhopper-verifier-progress にタスク一覧が載る", () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    addTasks(root, g.id);
     todoAction(root, g.id, "add", { text: "手動追加タスク" });
     const out = render("graphhopper-verifier-progress", root, g.id);
     expect(out).toContain("進捗タスク");
@@ -64,7 +47,7 @@ describe("progress lens charter への進捗埋め込み", () => {
   test("graphhopper-verifier-general にもタスク一覧が載る（progress と非対称にしない）", () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    addTasks(root, g.id);
     todoAction(root, g.id, "add", { text: "手動追加タスク" });
     const out = render("graphhopper-verifier-general", root, g.id);
     expect(out).toContain("進捗タスク");
@@ -103,24 +86,19 @@ describe("progress lens charter への進捗埋め込み", () => {
 });
 
 describe("進捗ビュー（progress lens と TUI が同じ数え方をする）", () => {
-  test("ストア基準の進捗と design.md 由来のタスクが一致する", () => {
+  test("足したタスクと完了がストア基準の進捗に出る", () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
-    ensureTodos(root, g.id);
+    addTasks(root, g.id);
     todoAction(root, g.id, "add", { text: "手動追加タスク" });
     todoAction(root, g.id, "done", { id: "t1" });
-    // ストア基準: design.md の2件 + 手動1件 = 3件、うち1件完了
+    // 3 件足して 1 件完了
     const loaded = readTodosStatus(root, g.id);
     const view = todoProgressView(loaded);
     expect(view.total).toBe(3);
     expect(view.done).toBe(1);
     expect(view.open).toBe(2);
     expect(view.unreadable).toBeUndefined();
-    // design.md 由来は done=0（design.md は immutable なので check されない）
-    const planTasks = parseTaskLines(DESIGN_WITH_TASKS);
-    expect(planTasks.length).toBe(2);
-    expect(planTasks.filter((t) => t.done).length).toBe(0);
     expect(todoSummaryLine(root, g.id)).toContain("1/3");
   });
 

@@ -37,7 +37,7 @@ export const JEV_PAID_MODEL = "jev-1.13";
 /** 次のモデルへ落としてよいHTTP status（課金・権限・未知モデル・レート制限のみ）。
  * 400/422（リクエスト不正）で有料を叩かない＝無駄な課金を避ける */
 const FALLBACK_STATUSES = new Set([402, 403, 404, 429]);
-/** routeのconfidenceがこれ未満ならfullに倒す（初期値。scoreboardで調整） */
+/** routeのconfidenceがこれ未満ならgoalに倒す（初期値。scoreboardで調整） */
 export const DECISION_CONFIDENCE_FLOOR = 0.6;
 export const DECISION_TIMEOUT_MS = 15_000;
 /** 一過性の失敗（timeout/429/5xx/ネットワーク）のリトライ回数（テストが参照する） */
@@ -145,7 +145,7 @@ export type DecisionLog = {
   difficulty?: string | null;
   difficultyConfidence?: number | null;
   /** decide行: d1が選んだ生のchoice（fail-safe適用前。較正用）。
-   * route は confidence 下限で full に潰されうるので、判定の意図は raw 才知道る */
+   * route は confidence 下限で goal に寄せられうるので、判定の意図は raw を見る */
   rawChoice?: string | null;
   /** 判定を行ったセッション（hook経由の自動判定で発生。null=不明） */
   sessionID?: string | null;
@@ -196,15 +196,10 @@ export function formatDecisionSummary(r: DecideResult): string[] {
   ];
 }
 
-/** decide結果から次に採る行動の指示文（route_set 引数つき） */
+/** decide結果から次に採る行動の指示文 */
 export function formatDecisionNextStep(r: DecideResult): string {
-  if (r.route === "direct") {
-    return "次: loopなしで直接対応せよ。goalは作らない（必要なら graphhopper_route_set(route: 'direct') でhistoryに残す）。";
-  }
-  const diffArg = r.difficulty
-    ? `, difficulty: '${r.difficulty}'`
-    : "（difficulty は unknown なので省略。easy/normal/hard 以外は渡せない）";
-  return `次: graphhopper_route_set(route, reason${diffArg}) で記録する。full/light/advised/oracleなら graphhopper_goal(start)（pending routeが消費される）。`;
+  if (r.route === "direct") return "次: loopなしで直接対応せよ。goalは作らない。";
+  return "次: graphhopper_goal(action: 'start', title: ...) でループを開始する。";
 }
 
 /* d1応答からNoul確率を抜く（compact側と共有。応答形変更時の修正点集約） */
@@ -331,7 +326,7 @@ export async function callDecision(
 }
 
 /* callDecision＋一過性失敗のみ最大retries回リトライ。key未設定・4xx・不正応答は即返す。
- * 入口routeは使わない（goal開始時の一度きりで待たせたくない。失敗してもfullに倒れるだけ） */
+ * 入口routeは使わない（goal開始時の一度きりで待たせたくない。失敗してもgoalに倒れるだけ） */
 export async function callDecisionWithRetry(
   stateText: string,
   questions: Record<string, DecisionQuestion>,
@@ -351,26 +346,30 @@ export async function callDecisionWithRetry(
 
 /* ───────── 入口route ───────── */
 
-/* 5択criteria。現行判定基準の移植（ラベルのみ送付は不可）。
- * fullは「以下に当てはまらない全て」のため該当文で定義する */
-export const DECISION_ROUTE_CRITERIA: Record<state.EntryRoute, string> = {
-  full: "フルループ。設計判断を要する・複数関心にまたがる・規模不明・曖昧・以下のいずれにも当てはまらない全ての作業",
-  light:
-    "軽量。全て満たす時のみ → (1)単一関心 (2)設計判断が少ない（1件以上。判断ゼロの作業はdirect） (3)既存パターンの踏襲 (4)テスト容易。1つでも欠けたらfull",
-  advised:
-    "軽量＋第二意見。light条件を満たす＋影響範囲の読みに迷いがある／第二意見が欲しい軽微変更",
-  oracle:
-    "多角。full相当＋最初から多角的視点が必要（アーキテクチャ判断・複雑デバッグ・不慣れなパターン）",
+/** 入口の判定は 2 択（goal＝ループを回す / direct＝直接対応） */
+export type EntryRoute = "goal" | "direct";
+
+/** 旧 5 値・旧 A/B/C は direct 以外すべて goal に寄せる（読み取り時の変換） */
+export function normalizeRoute(v: unknown): EntryRoute | null {
+  if (typeof v !== "string") return null;
+  const t = v.trim().toLowerCase();
+  if (t === "direct" || t === "c") return "direct";
+  if (["goal", "full", "light", "advised", "oracle", "a", "b"].includes(t)) return "goal";
+  return null;
+}
+
+export const DECISION_ROUTE_CRITERIA: Record<EntryRoute, string> = {
+  goal: "ループを回す。複数ファイルにまたがる変更・設計判断を含む実装・規模不明・曖昧な依頼",
   direct: "直行。単一ファイルの小修正・質問への回答・一回きりのコマンド実行",
 };
 
 export type DecideResult = {
-  route: state.EntryRoute;
+  route: EntryRoute;
   /** d1が選んだ生のchoice文字列（fail-safe適用前）。不正応答ならnull */
   rawChoice: string | null;
   /** rawChoiceを正規化したroute（fail-safe適用前）。不正choiceならnull。
-   * route は confidence 下限で full に潰されるので「d1の意図」を見るのはこちら */
-  rawRoute: state.EntryRoute | null;
+   * route は confidence 下限で goal に寄せられるので「d1の意図」を見るのはこちら */
+  rawRoute: EntryRoute | null;
   confidence: number | null;
   reason: string;
   /** true＝d1 呼び出しが失敗した（判定不能）。呼び出し側は極性を決める */
@@ -437,7 +436,7 @@ export type DifficultyResult = {
 
 /**
  * 難易度だけを判定する（design g-mwjsd3om 判断4）。route とは別の呼び出しにするのは、
- * 入力が違う（題・design のタスク列）ため。opts.root があれば decisions.jsonl に
+ * 入力が違う（題・決定記録の「決めたこと」）ため。opts.root があれば decisions.jsonl に
  * kind="difficulty" で残す（route の decide 行を汚さない）。
  */
 export async function decideDifficulty(
@@ -514,24 +513,24 @@ export async function decideDifficulty(
 }
 
 /* d1応答のchoice＋confidence→route写像（純粋関数。単体テスト対象）。
- * 不正choice・5択外・低confidenceはfull */
+ * 不正choice・低confidenceはgoal（旧5値はdirect以外をgoalに寄せて受理） */
 export function mapDecisionAnswer(
   choice: unknown,
   confidence: unknown,
 ): DecideResult {
   const rawChoice = typeof choice === "string" ? choice : null;
-  const route = rawChoice ? state.normalizeEntryRoute(rawChoice) : null;
+  const route = rawChoice ? normalizeRoute(rawChoice) : null;
   if (!route) {
-    return { route: "full", rawChoice, rawRoute: null, confidence: null, reason: "d1不正choice→full", fallback: false, difficulty: null, difficultyConfidence: null };
+    return { route: "goal", rawChoice, rawRoute: null, confidence: null, reason: "d1不正choice→goal", fallback: false, difficulty: null, difficultyConfidence: null };
   }
   const conf = typeof confidence === "number" ? confidence : null;
   if (conf !== null && conf < DECISION_CONFIDENCE_FLOOR) {
     return {
-      route: "full",
+      route: "goal",
       rawChoice,
       rawRoute: route,
       confidence: conf,
-      reason: `d1低confidence(${conf})→full`,
+      reason: `d1低confidence(${conf})→goal`,
       fallback: false,
       difficulty: null,
       difficultyConfidence: null,
@@ -614,7 +613,7 @@ function scheduleShadow(args: {
   void p.finally(() => inflightShadows.delete(p));
 }
 
-/* 入口routeを判定モデルで判定する。失敗は一律full（現行fail-safe極性＝重い側）。
+/* 入口routeを判定モデルで判定する。失敗は一律goal（fail-safe極性＝重い側）。
  * opts.root があれば較正ログに追記する（無ければ記録しない。テストは無指定）
  * opts.sessionID を渡すと較正ログにセッションを残せる（hook経由の自動判定用）
  * opts.timeoutMs で timeout を上書きできる（hook経路は短い待ち時間に切る）
@@ -637,11 +636,11 @@ export async function decideRoute(
   const timeoutMs = opts?.timeoutMs ?? DECISION_TIMEOUT_MS;
   const questions: Record<string, DecisionQuestion> = {
     /* 難易度は decideDifficulty で別に聞く（design g-mwjsd3om 判断4）。
-     * 入力が違う（発話ではなく goal の題・design のタスク列）ため同居させない。 */
+     * 入力が違う（発話ではなく goal の題・決定記録の「決めたこと」）ため同居させない。 */
     route: {
       type: "choice",
       instructions:
-        "この作業内容に適したgraphhopperの入口routeを1つ選べ。迷ったらfull",
+        "この作業内容に適したgraphhopperの入口routeを1つ選べ。迷ったらgoal",
       criteria: DECISION_ROUTE_CRITERIA,
     },
   };
@@ -699,11 +698,11 @@ export async function decideRoute(
   if (!r.ok) {
     return finish(
       {
-        route: "full",
+        route: "goal",
         rawChoice: null,
         rawRoute: null,
         confidence: null,
-        reason: `${r.reason}→full`,
+        reason: `${r.reason}→goal`,
         fallback: true,
         difficulty: null,
         difficultyConfidence: null,

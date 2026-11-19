@@ -5,7 +5,7 @@
  * 計画の組み立て・選ぶ役の prompt と出力の読み取りだけを持つ（I/O・state の実行時依存なし）。
  * 判断ロジックを tool 側に置くと凍結の監視から漏れるので、純粋関数としてここに置く。
  */
-import type { EntryRoute, RouterRoute } from "./state";
+import type { Difficulty, RouterRoute } from "./state";
 
 /** 角度の id。一覧の id か、選ぶ役・メインが作った id（実行時に isValidAngleId で検証する） */
 export type AngleId = string;
@@ -126,14 +126,12 @@ export interface AnglePlan {
 
 export interface SlotInput {
   route: RouterRoute | null;
-  entryRoute: EntryRoute | null;
-  escalated: boolean;
+  difficulty: Difficulty | null;
 }
 
 /** `agreement` 以外の角度の枠。判定の順は旧 planVerifier と同じ */
 export function angleSlots(o: SlotInput): number {
-  if (o.escalated) return 4;
-  if (o.entryRoute === "light" || o.entryRoute === "advised") return 1;
+  if (o.difficulty === "easy") return 1;
   return o.route === "polish" ? 4 : 2;
 }
 

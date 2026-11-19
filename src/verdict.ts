@@ -15,7 +15,7 @@ import type {
 
 /** verifier fan-out の1レンズ分の結果（verifier_set の results 要素）。
  * model は per-lens上書き（deep時の上位モデル等）。省略時はトップレベルmodel→config既定。
- * 申告値であり実在は検証しない（critic_set／consult_set同型の既知トレードオフ） */
+ * 申告値であり実在は検証しない（既知のトレードオフ） */
 export interface VerifierResult {
   lens: VerifierLens;
   level: VerdictLevel;

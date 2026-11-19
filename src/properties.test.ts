@@ -2,14 +2,13 @@
  * 性質テスト（design g-mwmnvx3x 判断2）。
  *
  * 「壊れたら必ず落ちる」性質だけを置く。生成器は手書き（fast-check を足さない）。
- * 依存を増やさない代わりに、対象を往復・冪等・上限の 3 つに絞る。
+ * 依存を増やさない代わりに、対象を往復・上限に絞る。
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { formatModelRef, parseModelRef } from "./agents";
-import { seedMerge, type ParsedTask, type TodoStore } from "./todos";
 import { taskWindow } from "./tui-snapshot";
 import { readTodos, startGoal, writeTodos } from "./state";
 
@@ -40,43 +39,6 @@ describe("性質: modelRef の往復（encode → decode → encode が一致）
         }
       }
     }
-  });
-});
-
-describe("性質: seedMerge の冪等（2 回 merge しても増えない）", () => {
-  const task = (text: string): ParsedTask => ({ text } as ParsedTask);
-  const empty = (): TodoStore => ({ goal_id: "g-x", items: [], updated_at: "" });
-
-  const cases: { name: string; tasks: string[] }[] = [
-    { name: "空", tasks: [] },
-    { name: "1 件", tasks: ["T1（判断1）: a"] },
-    { name: "5 件", tasks: ["T1: a", "T2: b", "T3: c", "T4: d", "T5: e"] },
-  ];
-
-  test("同じ tasks を 2 回 merge すると 2 回目は追加 0・item 数が変わらない", () => {
-    for (const c of cases) {
-      const tasks = c.tasks.map(task);
-      const once = seedMerge(empty(), tasks, "2026-01-01T00:00:00.000Z");
-      const twice = seedMerge(once.store, tasks, "2026-01-01T00:00:01.000Z");
-      expect(twice.added).toBe(0);
-      expect(twice.store.items).toHaveLength(once.store.items.length);
-      expect(twice.store.items.map((i) => i.text)).toEqual(once.store.items.map((i) => i.text));
-    }
-  });
-
-  test("1 件だけ足しても既存の id・状態は変わらない", () => {
-    const base = seedMerge(empty(), [task("T1: a"), task("T2: b")], "2026-01-01T00:00:00.000Z");
-    const marked: TodoStore = {
-      ...base.store,
-      items: base.store.items.map((i, idx) =>
-        idx === 0 ? { ...i, status: "completed" as const } : i,
-      ),
-    };
-    const next = seedMerge(marked, [task("T1: a"), task("T2: b"), task("T3: c")], "2026-01-01T00:00:02.000Z");
-    expect(next.added).toBe(1);
-    expect(next.store.items[0]?.id).toBe(marked.items[0]?.id);
-    expect(next.store.items[0]?.status).toBe("completed");
-    expect(next.store.items.map((i) => i.id)).toContain("t3");
   });
 });
 

@@ -35,20 +35,20 @@ describe("bakeAgents", () => {
     const outDir = tmpOut();
     const r = bakeAgents({
       outDir,
-      agents: { "graphhopper-critic": "opencode-go/gpt-6-luna" },
+      agents: { "graphhopper-librarian": "opencode-go/gpt-6-luna" },
       policy: { deny: ["opencode-go/gpt-6-luna"] },
     });
     expect(r.ok).toBe(false);
     expect(r.written).toEqual([]);
     expect(r.violations).toEqual([
       {
-        agent: "graphhopper-critic",
+        agent: "graphhopper-librarian",
         model: "opencode-go/gpt-6-luna",
         kind: "deny",
         rule: "opencode-go/gpt-6-luna",
       },
     ]);
-    expect(existsSync(join(outDir, "graphhopper-critic.md"))).toBe(false);
+    expect(existsSync(join(outDir, "graphhopper-librarian.md"))).toBe(false);
     // 違反が無い agent も書かれない（all-or-nothing）
     expect(existsSync(join(outDir, "graphhopper-verifier.md"))).toBe(false);
     expect(existsSync(join(outDir, "graphhopper-oracle.md"))).toBe(false);
@@ -71,8 +71,8 @@ describe("bakeAgents", () => {
     const oracle = readFileSync(join(outDir, "graphhopper-oracle.md"), "utf8");
     expect(oracle).toContain('model: "claude-oauth/claude-fable-5-2#xhigh"');
     // variant が無い agent は今までどおり
-    const critic = readFileSync(join(outDir, "graphhopper-critic.md"), "utf8");
-    expect(critic).toContain('model: "claude-oauth/claude-haiku-5-5"');
+    const critic = readFileSync(join(outDir, "graphhopper-librarian.md"), "utf8");
+    expect(critic).toContain('model: "minimax/MiniMax-M3.1-Flash"');
     // 焼いた catalog を読み直してもポリシー違反にならない（variant は判定に含めない）
     expect(catalogPolicyViolations(root, {})).toEqual([]);
     expect(
@@ -114,40 +114,40 @@ describe("bakeAgents", () => {
     const outDir = tmpOut();
     const r = bakeAgents({
       outDir,
-      agents: { "graphhopper-critic": "test/p" },
+      agents: { "graphhopper-librarian": "test/p" },
       policy: {},
     });
     expect(r.ok).toBe(true);
     expect(r.violations).toEqual([]);
-    const md = readFileSync(join(outDir, "graphhopper-critic.md"), "utf8");
+    const md = readFileSync(join(outDir, "graphhopper-librarian.md"), "utf8");
     expect(md).toContain('model: "test/p"');
   });
 
   test("違反時は既存ファイルを書き換えない", () => {
     const outDir = tmpOut();
-    bakeAgents({ outDir, agents: { "graphhopper-critic": "test/p" }, policy: {} });
-    const before = readFileSync(join(outDir, "graphhopper-critic.md"), "utf8");
+    bakeAgents({ outDir, agents: { "graphhopper-librarian": "test/p" }, policy: {} });
+    const before = readFileSync(join(outDir, "graphhopper-librarian.md"), "utf8");
     const r = bakeAgents({
       outDir,
-      agents: { "graphhopper-critic": "opencode-go/kimi-k3.1-pro" },
+      agents: { "graphhopper-librarian": "opencode-go/kimi-k3.1-pro" },
       policy: { deny: ["opencode-go/kimi-*"] },
     });
     expect(r.ok).toBe(false);
-    expect(readFileSync(join(outDir, "graphhopper-critic.md"), "utf8")).toBe(before);
+    expect(readFileSync(join(outDir, "graphhopper-librarian.md"), "utf8")).toBe(before);
   });
 
   test("形式不正のモデルと未知の agent 名も違反にする", () => {
     const r = bakeAgents({
       outDir: tmpOut(),
       agents: {
-        "graphhopper-critic": "no-slash",
+        "graphhopper-librarian": "no-slash",
         "graphhopper-verifer": "test/p",
       },
       policy: {},
     });
     expect(r.ok).toBe(false);
     expect(r.violations).toContainEqual({
-      agent: "graphhopper-critic",
+      agent: "graphhopper-librarian",
       model: "no-slash",
       kind: "invalid",
     });
@@ -160,10 +160,10 @@ describe("bakeAgents", () => {
 
   test("checkOnly: 一致なら ok、config 変更後は stale（全文比較）", () => {
     const outDir = tmpOut();
-    bakeAgents({ outDir, agents: { "graphhopper-critic": "test/p" }, policy: {} });
+    bakeAgents({ outDir, agents: { "graphhopper-librarian": "test/p" }, policy: {} });
     const same = bakeAgents({
       outDir,
-      agents: { "graphhopper-critic": "test/p" },
+      agents: { "graphhopper-librarian": "test/p" },
       policy: {},
       checkOnly: true,
     });
@@ -172,25 +172,25 @@ describe("bakeAgents", () => {
 
     const changed = bakeAgents({
       outDir,
-      agents: { "graphhopper-critic": "test/q" },
+      agents: { "graphhopper-librarian": "test/q" },
       policy: {},
       checkOnly: true,
     });
     expect(changed.ok).toBe(false);
     expect(changed.stale).toEqual([
-      { agent: "graphhopper-critic", expected: "test/q", actual: "test/p" },
+      { agent: "graphhopper-librarian", expected: "test/q", actual: "test/p" },
     ]);
   });
 
   test("checkOnly は model 以外のドリフト（description 変更）も検出する", () => {
     const outDir = tmpOut();
     bakeAgents({ outDir, agents: {}, policy: {} });
-    const path = join(outDir, "graphhopper-critic.md");
+    const path = join(outDir, "graphhopper-librarian.md");
     const before = readFileSync(path, "utf8");
     writeFileSync(path, before.replace(/^description: .*$/m, 'description: "changed"'), "utf8");
     const r = bakeAgents({ outDir, agents: {}, policy: {}, checkOnly: true });
     expect(r.ok).toBe(false);
-    expect(r.stale.some((s) => s.agent === "graphhopper-critic")).toBe(true);
+    expect(r.stale.some((s) => s.agent === "graphhopper-librarian")).toBe(true);
   });
 
   test("CLI: 拒否モデルで exit 1・書き込みなし", () => {
@@ -200,12 +200,12 @@ describe("bakeAgents", () => {
     const r = runCli(["--out", outDir], cfgPath);
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("model_deny");
-    expect(existsSync(join(outDir, "graphhopper-critic.md"))).toBe(false);
+    expect(existsSync(join(outDir, "graphhopper-librarian.md"))).toBe(false);
   });
 
   test("CLI --global-only: global の deny で exit 1、破損 JSON でも exit 1", () => {
     const bad = tmpCfg({
-      agents: { "graphhopper-critic": "opencode-go/gpt-6-luna" },
+      agents: { "graphhopper-librarian": "opencode-go/gpt-6-luna" },
       model_deny: ["opencode-go/gpt-6-luna"],
     });
     const outDir = tmpOut();
@@ -225,18 +225,18 @@ describe("bakeAgents", () => {
     const base = tmpCfg({});
     const write = runCli(["--global-only", "--out", outDir], base);
     expect(write.status).toBe(0);
-    expect(existsSync(join(outDir, "graphhopper-critic.md"))).toBe(true);
+    expect(existsSync(join(outDir, "graphhopper-librarian.md"))).toBe(true);
 
     const ok = runCli(["--global-only", "--check", "--out", outDir], base);
     expect(ok.status).toBe(0);
     expect(ok.stdout).toContain("ok:");
 
-    const changed = tmpCfg({ agents: { "graphhopper-critic": "test/p" } });
+    const changed = tmpCfg({ agents: { "graphhopper-librarian": "test/p" } });
     const stale = runCli(["--global-only", "--check", "--out", outDir], changed);
     expect(stale.status).toBe(1);
-    expect(stale.stderr).toContain("stale: graphhopper-critic");
+    expect(stale.stderr).toContain("stale: graphhopper-librarian");
     // --check は書き込まない
-    expect(readFileSync(join(outDir, "graphhopper-critic.md"), "utf8")).not.toContain(
+    expect(readFileSync(join(outDir, "graphhopper-librarian.md"), "utf8")).not.toContain(
       'model: "test/p"',
     );
   });
@@ -249,7 +249,7 @@ describe("bakeAgents", () => {
     expect(catalogPolicyViolations(root, { model_deny: ["opencode-go/gpt-*"] })).toEqual([]);
 
     // catalog に拒否モデルを焼き込んだ状態を作る
-    const path = join(outDir, "graphhopper-critic.md");
+    const path = join(outDir, "graphhopper-librarian.md");
     writeFileSync(
       path,
       readFileSync(path, "utf8").replace(/^model: ".*"$/m, 'model: "opencode-go/gpt-6-luna"'),
@@ -257,7 +257,7 @@ describe("bakeAgents", () => {
     );
     expect(catalogPolicyViolations(root, { model_deny: ["opencode-go/gpt-*"] })).toEqual([
       {
-        agent: "graphhopper-critic",
+        agent: "graphhopper-librarian",
         model: "opencode-go/gpt-6-luna",
         kind: "deny",
         rule: "opencode-go/gpt-*",
@@ -271,14 +271,14 @@ describe("bakeAgents", () => {
     bakeAgents({ outDir, agents: {}, policy: {} });
     expect(catalogPolicyWarning(root, { model_deny: ["opencode-go/gpt-*"] })).toBeNull();
 
-    const path = join(outDir, "graphhopper-critic.md");
+    const path = join(outDir, "graphhopper-librarian.md");
     writeFileSync(
       path,
       readFileSync(path, "utf8").replace(/^model: ".*"$/m, 'model: "opencode-go/gpt-6-luna"'),
       "utf8",
     );
     const warn = catalogPolicyWarning(root, { model_deny: ["opencode-go/gpt-*"] });
-    expect(warn).toContain("graphhopper-critic");
+    expect(warn).toContain("graphhopper-librarian");
     expect(warn).toContain("gen-agents");
     expect(warn).toContain("resume");
   });
@@ -319,7 +319,7 @@ describe("bakeAgents", () => {
     const dir = join(home, ".config", "opencode", "agents");
     mkdirSync(dir, { recursive: true });
     writeFileSync(
-      join(dir, "graphhopper-critic.md"),
+      join(dir, "graphhopper-librarian.md"),
       '---\nmodel: "opencode-go/gpt-6-luna"\n---\nbody\n',
       "utf8",
     );

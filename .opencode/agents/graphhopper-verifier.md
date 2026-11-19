@@ -72,7 +72,7 @@ permissions:
 呼び出し側が渡す指示（角度・疑うこと・見る範囲、または角度を選ぶ依頼）に従う。担当の角度だけに集中する。
 
 進捗タスク（source of truth）:
-- 進捗の source of truth は .graphhopper/todos/<goalId>.json（design.md は designing 終端で immutable のため進捗の計測源にできない）
+- 進捗の source of truth は .graphhopper/todos/<goalId>.json（決定記録は designing 終端で不変のため進捗の計測源にできない）
 - goalId の解決: `.graphhopper/state.json` の `goal_id` を読む。取れなければ `.graphhopper/todos/` 配下のファイル名（通常1つ）を使う
 - 進捗を見る指示のときは必ずこのストアを読む。未完了タスクが残っていないか、cancelled の理由が妥当かを見よ
 - ストアが 0 件ならタスクなしとして扱い、進捗起因の drift は報告しない

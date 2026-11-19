@@ -4,10 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFile
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { $ } from "bun";
-import { SCAFFOLD_TASK_PLACEHOLDER } from "./todos";
 import {
-  designTemplate,
-  ensureTodos,
   completeGoal,
   evalToPolish,
   evalTransitionInput,
@@ -35,58 +32,31 @@ function shell() {
   return $ as never;
 }
 
-/** 注意: 旧形式の fixture（§5 が空・§3 が空）。checkPhaseMove の内容規約は通らない。
- * phase 遷移を伴うテストを足すときは src/design-fixture.ts の compliantDesignDoc を使う。 */
-const DESIGN_WITH_TASKS = [
-  "# design: t",
-  "",
-  "## 1. goal理解",
-  "",
-  "## 2. 現状",
-  "",
-  "## 3. 設計判断",
-  "",
-  "## 4. 実装タスク列",
-  "",
-  "- [ ] T1 実装する",
-  "- [ ] T2 テストを書く",
-  "",
-  "## 5. 棄却した代替案",
-  "",
-].join("\n");
+/** 進捗タスクを 2 件足す（タスクは決定記録から作られない。自分で add する） */
+function addTasks(root: string, goalId: string): void {
+  todoAction(root, goalId, "add", { text: "T1 実装する" });
+  todoAction(root, goalId, "add", { text: "T2 テストを書く" });
+}
 
 describe("進捗 todo ストア", () => {
-  test("design.md のタスク列が seed される", () => {
+  test("決定記録にチェックボックスがあっても、タスクは自動では作られない", () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
-    const store = ensureTodos(root, g.id);
-    expect(store.items.map((i) => i.text)).toEqual(["T1 実装する", "T2 テストを書く"]);
-    expect(store.items.every((i) => i.status === "pending")).toBe(true);
-  });
-
-  test("ensureTodos は冪等（再実行しても増えない）", () => {
-    const root = tmpRoot();
-    const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
-    ensureTodos(root, g.id);
-    const again = ensureTodos(root, g.id);
-    expect(again.items.length).toBe(2);
-  });
-
-  test("scaffold だけの design.md ではタスク 0 件（ゲートが無効）", () => {
-    const root = tmpRoot();
-    const g = startGoal(root, "t", "s").goal;
-    // startGoal が scaffold を作る。プレースホルダは seed 対象外
-    expect(ensureTodos(root, g.id).items.length).toBe(0);
-    // テンプレのタスク行と seed 除外の定数がズレていないこと（drift の原因を一発で示す）
-    expect(designTemplate("g-x", "t")).toContain(SCAFFOLD_TASK_PLACEHOLDER);
+    writeFileSync(
+      planPath(root, g.id),
+      ["# 決定記録", "", "## 実装タスク列", "", "- [ ] T1 実装する", ""].join("\n"),
+      "utf8",
+    );
+    setPhase(root, "implementing");
+    expect(readTodos(root, g.id).items.length).toBe(0);
+    expect(todoAction(root, g.id, "list").store.items.length).toBe(0);
+    expect(setPhaseChecked(root, "polish").ok).toBe(true);
   });
 
   test("todoAction: list/start/done/cancel/add と監査記録", () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    addTasks(root, g.id);
 
     const list = todoAction(root, g.id, "list");
     expect(list.ok).toBe(true);
@@ -116,7 +86,7 @@ describe("進捗 todo ストア", () => {
   test("todo_update が history に残る", () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    addTasks(root, g.id);
     todoAction(root, g.id, "done", { id: "t1" });
     const hist = readFileSync(join(root, ".graphhopper", "history.jsonl"), "utf8");
     expect(hist).toContain('"todo_update"');
@@ -128,7 +98,7 @@ describe("implementing→polish の進捗ゲート", () => {
   test("未完了タスクがあれば遷移を拒否する", () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    addTasks(root, g.id);
     setPhase(root, "implementing");
     const r = setPhaseChecked(root, "polish");
     expect(r.ok).toBe(false);
@@ -139,7 +109,7 @@ describe("implementing→polish の進捗ゲート", () => {
   test("checkPhaseMove も同じ判定を返す", () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    addTasks(root, g.id);
     setPhase(root, "implementing");
     expect(checkPhaseMove(root, "polish")).toContain("未完了");
   });
@@ -147,7 +117,7 @@ describe("implementing→polish の進捗ゲート", () => {
   test("全件 completed / cancelled なら遷移できる", () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    addTasks(root, g.id);
     setPhase(root, "implementing");
     todoAction(root, g.id, "done", { id: "t1" });
     todoAction(root, g.id, "cancel", { id: "t2", reason: "不要" });
@@ -166,7 +136,7 @@ describe("implementing→polish の進捗ゲート", () => {
   test("polish→implementing→polish でもタスクは残る", () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    addTasks(root, g.id);
     setPhase(root, "implementing");
     todoAction(root, g.id, "done", { id: "t1" });
     todoAction(root, g.id, "cancel", { id: "t2", reason: "不要" });
@@ -177,29 +147,10 @@ describe("implementing→polish の進捗ゲート", () => {
     expect(readTodos(root, g.id).items.length).toBe(2);
   });
 
-  test("designing→implementing 遷移で seed される", () => {
-    const root = tmpRoot();
-    const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
-    // 遷移前はストアが無い（読み取りは副作用なし）
-    expect(readTodos(root, g.id).items.length).toBe(0);
-    setPhase(root, "implementing");
-    expect(readTodos(root, g.id).items.length).toBe(2);
-  });
-
-  test("todoSummaryLine は読み取り専用（seed しない）", () => {
-    const root = tmpRoot();
-    const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
-    expect(todoSummaryLine(root, g.id)).toBeNull();
-    // 呼び出してもストアは作られない（副作用なし）
-    expect(readTodos(root, g.id).items.length).toBe(0);
-  });
-
   test("evalToPolish: 実効diff=0 では polish へ進まない（旧分岐の維持）", async () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    addTasks(root, g.id);
     setPhase(root, "implementing");
     // baseline は取れるが差分 0 のケース
     const t = await evalToPolish(shell(), root, {
@@ -216,7 +167,7 @@ describe("implementing→polish の進捗ゲート", () => {
   test("evalToPolish: 未完了タスクがあれば遷移しない（ゲート）", async () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    addTasks(root, g.id);
     setPhase(root, "implementing");
     const t = await evalToPolish(shell(), root, {
       cmd: "true",
@@ -240,7 +191,7 @@ describe("implementing→polish の進捗ゲート", () => {
   test("evalToPolish: タスク完了後は diff>0 で polish へ進む", async () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    addTasks(root, g.id);
     setPhase(root, "implementing");
     todoAction(root, g.id, "done", { id: "t1" });
     todoAction(root, g.id, "cancel", { id: "t2", reason: "不要" });
@@ -256,7 +207,7 @@ describe("implementing→polish の進捗ゲート", () => {
   test("evalToPolish: baseline 未取得なら baseline 分岐で polish へ進む（simplify スキップ）", async () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    addTasks(root, g.id);
     setPhase(root, "implementing");
     // タスクを片付けて進捗ゲートを通す
     todoAction(root, g.id, "done", { id: "t1" });
@@ -270,7 +221,7 @@ describe("implementing→polish の進捗ゲート", () => {
   test("evalToPolish: baseline 未取得でも未完了タスクがあれば遷移しない", async () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    addTasks(root, g.id);
     setPhase(root, "implementing");
     const t = await evalToPolish(shell(), root, { cmd: "true", baseline: null, diffLines: 0 });
     expect(t.transitioned).toBe(false);
@@ -293,40 +244,13 @@ describe("implementing→polish の進捗ゲート", () => {
   test("reopen で cancelled タスクを pending に戻せる", () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    addTasks(root, g.id);
     setPhase(root, "implementing");
     todoAction(root, g.id, "cancel", { id: "t1", reason: "誤操作" });
     expect(readTodos(root, g.id).items[0]?.status).toBe("cancelled");
     const r = todoAction(root, g.id, "reopen", { id: "t1" });
     expect(r.ok).toBe(true);
     expect(readTodos(root, g.id).items[0]?.status).toBe("pending");
-  });
-
-  test("既存 goal の移行救済: ストアが空でもゲートで seed される", () => {
-    const root = tmpRoot();
-    const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
-    setPhase(root, "implementing");
-    // ストアを消して「移行救済」を再現（デプロイ時点で implementing だった goal 相当）
-    unlinkSync(todosPath(root, g.id));
-    expect(readTodos(root, g.id).items.length).toBe(0);
-    // ゲートが seed して拒否する
-    const r = setPhaseChecked(root, "polish");
-    expect(r.ok).toBe(false);
-    expect(r.error).toContain("未完了");
-    expect(readTodos(root, g.id).items.length).toBe(2);
-  });
-
-  test("design.md が読めない場合は polish への遷移を拒否する（fail-closed）", () => {
-    const root = tmpRoot();
-    const g = startGoal(root, "t", "s").goal;
-    setPhase(root, "implementing");
-    // design.md を不正な UTF-8 にする（decodeUtf8Strict が throw する）
-    writeFileSync(planPath(root, g.id), Buffer.from([0xff, 0xfe, 0x00, 0x41]));
-    const r = setPhaseChecked(root, "polish");
-    expect(r.ok).toBe(false);
-    expect(r.error).toContain("design.md");
-    expect(readState(root).phase).toBe("implementing");
   });
 
   test("design.md が無い場合はタスク0件として通す（既存 goal の後方互換）", () => {
@@ -342,7 +266,7 @@ describe("implementing→polish の進捗ゲート", () => {
   test("壊れたストアは polish への遷移を拒否する（fail-closed）", () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    addTasks(root, g.id);
     setPhase(root, "implementing");
     const p = todosPath(root, g.id);
     mkdirSync(dirname(p), { recursive: true });
@@ -383,7 +307,7 @@ describe("implementing→polish の進捗ゲート", () => {
   test("壊れたストアは上書きされず、todoAction はエラーを返す", () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    addTasks(root, g.id);
     const p = todosPath(root, g.id);
     mkdirSync(dirname(p), { recursive: true });
     writeFileSync(p, "{ broken", "utf8");
@@ -429,41 +353,6 @@ describe("implementing→polish の進捗ゲート", () => {
     expect(readTodosStatus(root, g.id).valid).toBe(false);
   });
 
-  test("design.md にチェックボックスがあるのにタスク列セクションが無いと todo_seed_warning を残す", () => {
-    const root = tmpRoot();
-    const g = startGoal(root, "t", "s").goal;
-    // 「タスク」を含まない見出しのセクションにチェックボックスを置く
-    writeFileSync(
-      planPath(root, g.id),
-      ["# design", "", "## 4. 実装手順", "", "- [ ] T1 実装する", ""].join("\n"),
-      "utf8",
-    );
-    setPhase(root, "implementing");
-    const hist = readFileSync(join(root, ".graphhopper", "history.jsonl"), "utf8");
-    expect(hist).toContain("todo_seed_warning");
-  });
-
-  test("同文タスクの seed は todo_seed_warning を残す", () => {
-    const root = tmpRoot();
-    const g = startGoal(root, "t", "s").goal;
-    writeFileSync(
-      planPath(root, g.id),
-      [
-        "# design",
-        "",
-        "## 4. 実装タスク列",
-        "",
-        "- [ ] 同じタスク",
-        "- [ ] 同じタスク",
-        "",
-      ].join("\n"),
-      "utf8",
-    );
-    setPhase(root, "implementing");
-    const hist = readFileSync(join(root, ".graphhopper", "history.jsonl"), "utf8");
-    expect(hist).toContain("todo_seed_warning");
-  });
-
   test("items が配列でないストアも空として扱う", () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
@@ -478,7 +367,7 @@ describe("完了 goal のアーカイブ", () => {
   test("completeGoal で todos/plans が archive/ へ移り、内容は残る", () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    addTasks(root, g.id);
     todoAction(root, g.id, "add", { text: "x" });
     expect(existsSync(todosPath(root, g.id))).toBe(true);
     completeGoal(root);
@@ -495,7 +384,7 @@ describe("goalResumeContext（compact・handoff 共通）", () => {
     const root = tmpRoot();
     expect(goalResumeContext(root)).toBeNull();
     const g = startGoal(root, "t", "s").goal;
-    writeFileSync(planPath(root, g.id), DESIGN_WITH_TASKS, "utf8");
+    addTasks(root, g.id);
     setPhase(root, "implementing");
     const out = goalResumeContext(root, { includeLoop: true })!;
     expect(out).toContain(g.id);

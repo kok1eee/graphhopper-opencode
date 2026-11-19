@@ -10,7 +10,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { effectivePhaseAction, goalResumeContext } from "./gate";
+import { goalResumeContext, PHASE_ACTION } from "./gate";
 import * as state from "./state";
 
 export const HANDOFF_FILE = "HANDOFF.md";
@@ -227,7 +227,7 @@ export function renderHandoff(root: string, opts: RenderOpts = {}): string | nul
     "",
     "## 状態",
     "",
-    `- goal: ${goal.status} / phase: ${s.phase} / entry_route: ${s.entry_route ?? "(未判定)"}`,
+    `- goal: ${goal.status} / phase: ${s.phase}`,
     `- difficulty: ${s.difficulty ?? "(未判定)"} / cascade: ${s.cascade?.level ?? "(none)"}${s.cascade?.reason ? `（${s.cascade.reason}）` : ""}`,
     `- eval_cmd: ${s.eval_cmd ?? "(未設定)"}`,
     `- fail_streak: ${s.fail_streak} / loop: stop_count=${s.loop_stop_count}`,
@@ -235,7 +235,7 @@ export function renderHandoff(root: string, opts: RenderOpts = {}): string | nul
     "",
     "## 次のアクション",
     "",
-    effectivePhaseAction(s.phase, s.entry_route, s.difficulty),
+    PHASE_ACTION[s.phase],
     "",
     "## タスク",
     "",
@@ -247,9 +247,6 @@ export function renderHandoff(root: string, opts: RenderOpts = {}): string | nul
     s.last_verifier
       ? `- verifier: ${s.last_verifier.level}（${s.last_verifier.reason}） lens=${s.last_verifier.lens.join(",")} at=${s.last_verifier.at}`
       : "- verifier: (未実行)",
-    s.critic_review ? `- critic: ${s.critic_review.level}（${s.critic_review.reason}）` : "- critic: (未実行)",
-    s.advisor_consult ? `- advisor: ${s.advisor_consult.summary}` : null,
-    s.oracle_consult ? `- oracle: ${s.oracle_consult.summary}` : null,
     "",
     "## 参照ファイル",
     "",

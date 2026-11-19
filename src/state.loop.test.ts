@@ -50,7 +50,6 @@ import {
   recordEvent,
   resetLoopForClear,
   resumeGoal,
-  setCriticVerdict,
   setIntentPath,
   setPhase,
   setStartBaselineRev,
@@ -82,7 +81,6 @@ const CFG: GraphhopperConfig = {
   loop_wait_limit_ms: 30 * 60_000,
   loop_restart_pause: true,
   lsp_servers: [],
-  require_critic: false,
   cascade: {
     enabled: false,
     baseline: "minimax/MiniMax-M3.1-Flash",
@@ -783,7 +781,7 @@ describe("config 2層解決（グローバル既定 → プロジェクト上書
   test("プロジェクトは同名だけ上書きし、他はグローバルを継承する", () => {
     withGlobal(
       {
-        agents: { "graphhopper-verifier": "global-v", "graphhopper-critic": "global-c" },
+        agents: { "graphhopper-verifier": "global-v", "graphhopper-librarian": "global-c" },
         stuck_threshold: 9,
       },
       () => {
@@ -791,7 +789,7 @@ describe("config 2層解決（グローバル既定 → プロジェクト上書
         withProject(root, { agents: { "graphhopper-verifier": "project-v" } });
         const cfg = readConfig(root);
         expect(cfg.agents["graphhopper-verifier"]).toBe("project-v");
-        expect(cfg.agents["graphhopper-critic"]).toBe("global-c");
+        expect(cfg.agents["graphhopper-librarian"]).toBe("global-c");
         expect(cfg.stuck_threshold).toBe(9);
       },
     );
@@ -1300,27 +1298,6 @@ describe("discover goal紐付け", () => {
   });
 });
 
-describe("critic gate（flag両対応）", () => {
-  test("既定falseでは素通り・trueではcritic必須", async () => {
-    const { checkPhaseMove } = await import("./gate");
-    const root = tmpRoot();
-    startGoal(root, "t", "s");
-    fillCompliantDesign(root);
-    // 既定configはrequire_critic=false（このrepoのconfig.jsonもfalseのはずだが
-    // テストrootにはconfigが無い→DEFAULT false）
-    expect(checkPhaseMove(root, "implementing")).toBeNull();
-    // trueに倒す
-    writeFileSync(
-      join(root, ".graphhopper", "config.json"),
-      JSON.stringify({ require_critic: true }),
-    );
-    const err = checkPhaseMove(root, "implementing");
-    expect(err).toContain("require_critic");
-    setCriticVerdict(root, { level: "clean", reason: "ok" });
-    expect(checkPhaseMove(root, "implementing")).toBeNull();
-  });
-});
-
 describe("design scaffold＋構造ゲート", () => {
   test("startGoalで骨格が自動生成され、冪等（既存を壊さない）", async () => {
     const { scaffoldDesignDoc } = await import("./state");
@@ -1330,106 +1307,61 @@ describe("design scaffold＋構造ゲート", () => {
     const p = planPath(root, g.id);
     expect(existsSync(p)).toBe(true);
     const raw = readFileSync(p, "utf8");
-    expect(raw).toContain("## 1. goal理解");
-    expect(raw).toContain("## 4. 実装タスク列");
-    /* 承認の要否を design 時点で書かせる（design g-mwkgfssi 判断5） */
-    expect(raw).toContain("## 6. ユーザーの承認が要るもの");
+    expect(raw).toContain("## 決めたこと");
+    expect(raw).toContain("## やらないこと");
+    expect(raw).toContain("## 完了の確かめ方");
     writeFileSync(p, "# custom\n");
     expect(scaffoldDesignDoc(root, g.id, "t")).toBe(false);
     expect(readFileSync(p, "utf8")).toBe("# custom\n");
   });
 
-  test("checkDesignDoc: テンプレ通過・欠落検出・ファイル不在", async () => {
-    const { checkDesignDoc } = await import("./gate");
-    const root = tmpRoot();
-    const g = startGoal(root, "t", "s").goal;
-    expect(checkDesignDoc(root, g.id)).toEqual([]);
-    const { planPath } = await import("./state");
-    writeFileSync(planPath(root, g.id), "# design\n\n## 1. goal理解\n");
-    const missing = checkDesignDoc(root, g.id);
-    expect(missing).toContain("現状");
-    expect(missing).toContain("設計判断");
-    expect(checkDesignDoc(root, "g-nonexistent")).toEqual(["design doc自体が無い"]);
-  });
-
-  test("checkPhaseMove: scaffold は内容規約で止まり、埋めれば通り、骨格を削ると骨格不足", async () => {
+  test("checkPhaseMove: scaffold は止まり、埋めれば通り、見出しを削ると止まる", async () => {
     const { checkPhaseMove } = await import("./gate");
     const { planPath } = await import("./state");
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
-    // scaffold は節を持つが中身がプレースホルダなので内容規約で止まる（判断10の反証条件）
     const scaffoldErr = checkPhaseMove(root, "implementing");
-    expect(scaffoldErr).toContain("規約に違反");
-    expect(scaffoldErr).toContain("§2");
+    expect(scaffoldErr).toContain("決定記録");
     fillCompliantDesign(root);
-    // full（未判定）は advisor 相談の記録が無くても進める（運用規則で、機械ゲートではない）
     expect(checkPhaseMove(root, "implementing")).toBeNull();
     writeFileSync(planPath(root, g.id), "# empty\n");
-    const err = checkPhaseMove(root, "implementing");
-    expect(err).toContain("骨格不足");
+    expect(checkPhaseMove(root, "implementing")).toContain("見出しが無い");
   });
 
-  test("light/advised でも内容規約が効く（scaffold は止まり、規約準拠なら通る）", async () => {
+  test("旧形式の state（entry_route・critic_review など）が残っていても落ちない", async () => {
     const s = await import("./state");
     const { checkPhaseMove } = await import("./gate");
     const root = tmpRoot();
     startGoal(root, "t", "s");
-    s.bindEntryRoute(root, "light");
-    expect(checkPhaseMove(root, "implementing")).toContain("規約に違反");
+    const sp = join(root, ".graphhopper", "state.json");
+    const st = JSON.parse(readFileSync(sp, "utf8"));
+    Object.assign(st, {
+      entry_route: "advised",
+      escalated_at: "2026-01-01T00:00:00.000Z",
+      critic_review: { level: "drift", reason: "x", at: "t" },
+      advisor_consult: { summary: "x", at: "t" },
+    });
+    writeFileSync(sp, JSON.stringify(st));
+    writeFileSync(join(root, ".graphhopper", "config.json"), JSON.stringify({ require_critic: true }));
     fillCompliantDesign(root);
+    expect(s.getActive(root)).not.toBeNull();
     expect(checkPhaseMove(root, "implementing")).toBeNull();
-
-    const root2 = tmpRoot();
-    startGoal(root2, "t", "s");
-    s.bindEntryRoute(root2, "advised");
-    // advised は相談ゲートが先に効くため、記録してから内容規約を見る
-    s.setConsult(root2, "advisor", { summary: "asked, ok" });
-    expect(checkPhaseMove(root2, "implementing")).toContain("規約に違反");
-    fillCompliantDesign(root2);
-    expect(checkPhaseMove(root2, "implementing")).toBeNull();
-  });
-});
-
-describe("タスク列抽出（progress素材）", () => {
-  test("チェックボックス行を抽出・完了数を数える", async () => {
-    const { extractTasks, checkDesignDoc } = await import("./gate");
-    const { planPath } = await import("./state");
-    const root = tmpRoot();
-    const g = startGoal(root, "t", "s").goal;
-    // scaffold自体が `- [ ] T1` を1行含む
-    const sc = extractTasks(root, g.id);
-    expect(sc.total).toBe(1);
-    expect(sc.done).toBe(0);
-    writeFileSync(
-      planPath(root, g.id),
-      "# d\n\n- [x] done1\n- [ ] todo1\n- plain bullet\n",
-    );
-    const p = extractTasks(root, g.id);
-    expect(p.total).toBe(2);
-    expect(p.done).toBe(1);
-    expect(p.items[0]).toEqual({ text: "done1", done: true });
   });
 
-  test("ファイル不在は空", async () => {
-    const { extractTasks } = await import("./gate");
-    expect(extractTasks(tmpRoot(), "g-nope")).toEqual({ total: 0, done: 0, items: [] });
-  });
 });
 
 describe("評価機能（state層）", () => {
   test("verdict未指定modelはconfig既定で補完される", async () => {
-    const { setVerifierVerdict, setCriticVerdict } = await import("./state");
+    const { setVerifierVerdict } = await import("./state");
     const root = tmpRoot();
     startGoal(root, "t", "s");
     mkdirSync(join(root, ".graphhopper"), { recursive: true });
     writeFileSync(
       join(root, ".graphhopper", "config.json"),
-      JSON.stringify({ agents: { "graphhopper-verifier": "m/v", "graphhopper-critic": "m/c" } }),
+      JSON.stringify({ agents: { "graphhopper-verifier": "m/v" } }),
     );
     const v = setVerifierVerdict(root, { level: "clean", reason: "r", target: null, lens: ["general"] });
     expect(v.last_verifier?.model).toBe("m/v");
-    const c = setCriticVerdict(root, { level: "drift", reason: "r" });
-    expect(c.critic_review?.model).toBe("m/c");
     const v2 = setVerifierVerdict(root, { level: "clean", reason: "r", target: null, lens: ["general"], model: "x/y" });
     expect(v2.last_verifier?.model).toBe("x/y");
   });
@@ -1627,31 +1559,6 @@ describe("deep検知（RISK_PATHS×自goal差分）", () => {
     const st2 = await s.recordRouterCheckWithRisk(shell2, root2, "abc123", 5, "advisor");
     expect(st2.router.deep).toBe(false);
     expect(st2.router.deep_reason).toBeNull();
-  });
-
-  test("deepはconsult gateと直交する", async () => {
-    const s = await import("./state");
-    const { checkPhaseMove } = await import("./gate");
-    const root = tmpRoot();
-    s.startGoal(root, "t", "s1");
-    fillCompliantDesign(root);
-    s.bindEntryRoute(root, "advised");
-    s.snapshotInitialDiffFiles(root, []);
-    const shell = fakeShell({ code: 0, out: "src/state.ts\n" }, { code: 0, out: "" });
-    await s.recordRouterCheckWithRisk(shell, root, "abc123", 10, "advisor");
-    // deepでも相談なしでは通らない
-    expect(checkPhaseMove(root, "implementing")).toContain(
-      "graphhopper_consult_set",
-    );
-    s.setConsult(root, "advisor", { summary: "ok" });
-    expect(checkPhaseMove(root, "implementing")).toBeNull();
-    // full entry＋deepは相談なしで通る
-    const root2 = tmpRoot();
-    s.startGoal(root2, "t", "s1");
-    fillCompliantDesign(root2);
-    s.snapshotInitialDiffFiles(root2, []);
-    await s.recordRouterCheckWithRisk(shell, root2, "abc123", 10, "advisor");
-    expect(checkPhaseMove(root2, "implementing")).toBeNull();
   });
 
   test("shell例外時はfail-open（deepなし）", async () => {
@@ -2216,283 +2123,6 @@ describe("退避diff掃除（complete/clear）", () => {
   });
 });
 
-describe("entry_route（入口トリアージ）", () => {
-  test("pendingはgoal startで消費される（light）", async () => {
-    const s = await import("./state");
-    const root = tmpRoot();
-    s.writePendingRoute(root, "light", "test");
-    expect(s.readPendingRoute(root)?.route).toBe("light");
-    const { goal } = s.startGoal(root, "t", "s1");
-    expect(s.getActive(root)!.state.entry_route).toBe("light");
-    expect(s.readPendingRoute(root)).toBeNull();
-    expect(
-      s.readHistory(root).some((h) => h.type === "entry_route" && (h as { route?: string }).route === "light" && (h as { goal?: string }).goal === goal.id),
-    ).toBe(true);
-  });
-
-  test("旧B pendingはlightに正規化される", async () => {
-    const s = await import("./state");
-    const root = tmpRoot();
-    const { writeFileSync } = await import("node:fs");
-    const { join } = await import("node:path");
-    mkdirSync(join(root, ".graphhopper"), { recursive: true });
-    writeFileSync(
-      join(root, ".graphhopper", "pending_route.json"),
-      JSON.stringify({ route: "B", reason: "legacy", at: "t" }),
-    );
-    expect(s.readPendingRoute(root)?.route).toBe("light");
-  });
-
-  test("pending無しはnull＝full", async () => {
-    const s = await import("./state");
-    const root = tmpRoot();
-    s.startGoal(root, "t", "s1");
-    expect(s.getActive(root)!.state.entry_route).toBeNull();
-  });
-
-  test("bindEntryRouteは未記録にのみbindする（direct拒否）", async () => {
-    const s = await import("./state");
-    const root = tmpRoot();
-    s.startGoal(root, "t", "s1");
-    expect(s.bindEntryRoute(root, "advised", "r")!.state.entry_route).toBe("advised");
-    expect(s.bindEntryRoute(root, "full", "r")).toBeNull();
-    expect(s.getActive(root)!.state.entry_route).toBe("advised");
-    const root2 = tmpRoot();
-    s.startGoal(root2, "t", "s1");
-    expect(s.bindEntryRoute(root2, "direct", "r")).toBeNull();
-    expect(s.getActive(root2)!.state.entry_route).toBeNull();
-  });
-
-  test("bindEntryRouteはdone/pausedにbindしない（live実証の欠測防止）", async () => {
-    const s = await import("./state");
-    const root = tmpRoot();
-    s.startGoal(root, "t", "s1");
-    // done＋null（completeはentry_routeを消さない）にbindしない
-    s.completeGoal(root);
-    expect(s.getActive(root)!.goal.status).toBe("done");
-    expect(s.bindEntryRoute(root, "advised", "r")).toBeNull();
-    expect(s.getActive(root)!.state.entry_route).toBeNull();
-    // pausedにもbindしない
-    const root2 = tmpRoot();
-    s.startGoal(root2, "t", "s1");
-    s.pauseGoal(root2);
-    expect(s.bindEntryRoute(root2, "advised", "r")).toBeNull();
-    expect(s.getActive(root2)!.state.entry_route).toBeNull();
-    // activeには従来通りbindする
-    const root3 = tmpRoot();
-    s.startGoal(root3, "t", "s1");
-    expect(s.bindEntryRoute(root3, "advised", "r")!.state.entry_route).toBe("advised");
-  });
-
-  test("escalateはlight/advised→fullのみ（designing巻き戻し＋escalated_at）", async () => {
-    const s = await import("./state");
-    const root = tmpRoot();
-    s.startGoal(root, "t", "s1");
-    expect(s.escalateEntryRoute(root)).toBeNull();
-    s.bindEntryRoute(root, "light");
-    s.setPhase(root, "implementing");
-    const r = s.escalateEntryRoute(root)!;
-    expect(r.state.entry_route).toBe("full");
-    expect(r.state.phase).toBe("designing");
-    expect(r.state.escalated_at).not.toBeNull();
-    expect(s.escalateEntryRoute(root)).toBeNull();
-    // oracleは昇格対象外
-    const root2 = tmpRoot();
-    s.startGoal(root2, "t", "s1");
-    s.bindEntryRoute(root2, "oracle");
-    expect(s.escalateEntryRoute(root2)).toBeNull();
-  });
-
-  test("normalizeEntryRoute: 新名・旧名・不正", async () => {
-    const s = await import("./state");
-    expect(s.normalizeEntryRoute("light")).toBe("light");
-    expect(s.normalizeEntryRoute("Advised")).toBe("advised");
-    expect(s.normalizeEntryRoute("B")).toBe("light");
-    expect(s.normalizeEntryRoute("c")).toBe("direct");
-    expect(s.normalizeEntryRoute("zzz")).toBeNull();
-    expect(s.normalizeEntryRoute(null)).toBeNull();
-  });
-});
-
-describe("light/advised designing巻き戻しのescalate強制", () => {
-  test("light未昇格の素の巻き戻しはescalate誘導エラー", async () => {
-    const s = await import("./state");
-    const { checkPhaseMove } = await import("./gate");
-    const root = tmpRoot();
-    s.startGoal(root, "t", "s1");
-    s.bindEntryRoute(root, "light");
-    s.setPhase(root, "implementing");
-    const err = checkPhaseMove(root, "designing");
-    expect(err).toContain("graphhopper_escalate");
-    // fullは素の巻き戻し可
-    const root2 = tmpRoot();
-    s.startGoal(root2, "t", "s1");
-    s.setPhase(root2, "implementing");
-    expect(checkPhaseMove(root2, "designing")).toBeNull();
-    // polish起点もlightはescalate強制
-    const root3 = tmpRoot();
-    s.startGoal(root3, "t", "s1");
-    s.bindEntryRoute(root3, "light");
-    s.setPhase(root3, "implementing");
-    s.setPhase(root3, "polish");
-    expect(checkPhaseMove(root3, "designing")).toContain("graphhopper_escalate");
-    // oracleは素の巻き戻し可（full相当）
-    const root4 = tmpRoot();
-    s.startGoal(root4, "t", "s1");
-    s.bindEntryRoute(root4, "oracle");
-    s.setPhase(root4, "implementing");
-    expect(checkPhaseMove(root4, "designing")).toBeNull();
-  });
-
-  test("escalateはpolishからも可（last_verifierリセット）", async () => {
-    const s = await import("./state");
-    const root = tmpRoot();
-    s.startGoal(root, "t", "s1");
-    s.bindEntryRoute(root, "light");
-    s.setPhase(root, "implementing");
-    s.setPhase(root, "polish");
-    s.setVerifierVerdict(root, {
-      level: "clean",
-      reason: "x",
-      target: null,
-      lens: ["general"],
-    });
-    expect(s.getActive(root)!.state.last_verifier).not.toBeNull();
-    const r = s.escalateEntryRoute(root)!;
-    expect(r.state.phase).toBe("designing");
-    expect(r.state.last_verifier).toBeNull();
-    expect(r.state.entry_route).toBe("full");
-  });
-});
-
-describe("昇格後critic必須＋stuck自動昇格", () => {
-  test("escalated後はcritic無しでimplementingに進めない", async () => {
-    const s = await import("./state");
-    const { checkPhaseMove } = await import("./gate");
-    const root = tmpRoot();
-    s.startGoal(root, "t", "s1");
-    fillCompliantDesign(root);
-    s.bindEntryRoute(root, "light");
-    s.setPhase(root, "implementing");
-    s.escalateEntryRoute(root);
-    expect(checkPhaseMove(root, "implementing")).toContain("critic_review");
-    s.setCriticVerdict(root, { level: "clean", reason: "ok" });
-    expect(checkPhaseMove(root, "implementing")).toBeNull();
-  });
-
-  test("autoEscalateOnStuckはlight/advised未昇格のみ昇格", async () => {
-    const s = await import("./state");
-    const g = await import("./gate");
-    const root = tmpRoot();
-    s.startGoal(root, "t", "s1");
-    expect(g.autoEscalateOnStuck(root)).toBeNull();
-    s.bindEntryRoute(root, "advised");
-    s.setPhase(root, "implementing");
-    expect(g.autoEscalateOnStuck(root)!.state.entry_route).toBe("full");
-    expect(g.autoEscalateOnStuck(root)).toBeNull();
-  });
-});
-
-describe("entry相談ゲート（advised/oracle）", () => {
-  test("advisedはadvisor相談なしでimplementingに進めない", async () => {
-    const s = await import("./state");
-    const { checkPhaseMove } = await import("./gate");
-    const root = tmpRoot();
-    s.startGoal(root, "t", "s1");
-    fillCompliantDesign(root);
-    s.bindEntryRoute(root, "advised");
-    expect(checkPhaseMove(root, "implementing")).toContain(
-      "graphhopper_consult_set",
-    );
-    s.setConsult(root, "advisor", { summary: "asked x, got y" });
-    expect(s.getActive(root)!.state.advisor_consult?.summary).toBe(
-      "asked x, got y",
-    );
-    expect(checkPhaseMove(root, "implementing")).toBeNull();
-  });
-
-  test("oracleはoracle相談が必要（advisor相談では不可）", async () => {
-    const s = await import("./state");
-    const { checkPhaseMove } = await import("./gate");
-    const root = tmpRoot();
-    s.startGoal(root, "t", "s1");
-    fillCompliantDesign(root);
-    s.bindEntryRoute(root, "oracle");
-    expect(checkPhaseMove(root, "implementing")).toContain(
-      "graphhopper_consult_set",
-    );
-    s.setConsult(root, "advisor", { summary: "wrong kind" });
-    expect(checkPhaseMove(root, "implementing")).toContain(
-      "graphhopper_consult_set",
-    );
-    s.setConsult(root, "oracle", { summary: "asked o, got p" });
-    expect(checkPhaseMove(root, "implementing")).toBeNull();
-  });
-
-  test("full/light/nullは相談なしで通る", async () => {
-    const s = await import("./state");
-    const { checkPhaseMove } = await import("./gate");
-    for (const route of ["full", "light"] as const) {
-      const root = tmpRoot();
-      s.startGoal(root, "t", "s1");
-      fillCompliantDesign(root);
-      s.bindEntryRoute(root, route);
-      expect(checkPhaseMove(root, "implementing")).toBeNull();
-    }
-    const rootNull = tmpRoot();
-    s.startGoal(rootNull, "t", "s1");
-    fillCompliantDesign(rootNull);
-    expect(checkPhaseMove(rootNull, "implementing")).toBeNull();
-  });
-
-  test("昇格後はcriticのみ（advisor相談不要）", async () => {
-    const s = await import("./state");
-    const { checkPhaseMove } = await import("./gate");
-    const root = tmpRoot();
-    s.startGoal(root, "t", "s1");
-    fillCompliantDesign(root);
-    s.bindEntryRoute(root, "advised");
-    s.setPhase(root, "implementing");
-    s.escalateEntryRoute(root);
-    // 相談ゲートではなくcritic gateが効く
-    expect(checkPhaseMove(root, "implementing")).toContain("critic_review");
-    s.setCriticVerdict(root, { level: "clean", reason: "ok" });
-    expect(checkPhaseMove(root, "implementing")).toBeNull();
-  });
-
-  test("pause→別goal→resumeで相談記録が漏れない／失われない", async () => {
-    const s = await import("./state");
-    const { checkPhaseMove } = await import("./gate");
-    const root = tmpRoot();
-    const g1 = s.startGoal(root, "first", "s1").goal;
-    s.bindEntryRoute(root, "advised");
-    s.setConsult(root, "advisor", { summary: "g1 consult" });
-    s.pauseGoal(root);
-    // 別goalが走る（stateは上書きされる）
-    s.startGoal(root, "second", "s2");
-    s.bindEntryRoute(root, "advised");
-    // g2は未相談→ゲートが効く（g1の記録を継承していない＝リークなし）
-    expect(checkPhaseMove(root, "implementing")).toContain(
-      "graphhopper_consult_set",
-    );
-    s.setConsult(root, "advisor", { summary: "g2 consult" });
-    s.pauseGoal(root);
-    // g1に戻す
-    const { readFileSync, writeFileSync } = await import("node:fs");
-    const { join } = await import("node:path");
-    const p = join(root, ".graphhopper", "goals.json");
-    const gj = JSON.parse(readFileSync(p, "utf8"));
-    gj.active = g1.id;
-    writeFileSync(p, JSON.stringify(gj));
-    const r = s.resumeGoal(root, "s1");
-    expect(r?.goal.id).toBe(g1.id);
-    // g1の記録が復帰（喪失なし・g2の記録で上書きなし）
-    expect(s.getActive(root)!.state.advisor_consult?.summary).toBe(
-      "g1 consult",
-    );
-  });
-});
-
 describe("初期脏れsnapshot（baseline誤認防止）", () => {
   test("effectiveDiffLines: 減算・floor・legacy", async () => {
     const s = await import("./state");
@@ -2538,11 +2168,12 @@ describe("初期脏れsnapshot（baseline誤認防止）", () => {
 });
 
 describe("goal_summary telemetry", () => {
-  test("集計規則: last-write・entry_routeのみfirst・rewinds・2round", () => {
+  test("集計規則: last-write・rewinds・2round", () => {
     const root = tmpRoot();
     const gid = "g-test";
     recordEvent(root, { type: "goal_start", goal: gid, title: "t" });
-    recordEvent(root, { type: "entry_route", goal: gid, route: "light", reason: "x" });
+    /* 旧形式の行（entry_route / escalated / critic_review_set）は読み飛ばされる */
+    recordEvent(root, { type: "entry_route", goal: gid, route: "light", reason: "x" } as never);
     recordEvent(root, { type: "router_check", goal: gid, diff_lines: 100, route: "advisor" });
     recordEvent(root, { type: "router_check", goal: gid, diff_lines: 500, route: "polish" });
     recordEvent(root, {
@@ -2554,15 +2185,14 @@ describe("goal_summary telemetry", () => {
     });
     recordEvent(root, { type: "phase", goal: gid, from: "polish", to: "implementing" });
     recordEvent(root, { type: "phase", goal: gid, from: "polish", to: "implementing" });
-    recordEvent(root, { type: "escalated", goal: gid, from: "light", at: "now" });
-    recordEvent(root, { type: "critic_review_set", goal: gid, level: "clean" });
+    recordEvent(root, { type: "escalated", goal: gid, from: "light", at: "now" } as never);
+    recordEvent(root, { type: "critic_review_set", goal: gid, level: "clean" } as never);
     recordEvent(root, { type: "attempt", goal: gid, ok: false, fail_streak: 2, note: "x" });
     recordEvent(root, { type: "eval_run", goal: gid, ok: true, fail_streak: 3 });
     const s = buildGoalSummary(root, gid, {
       score: 80,
       now: new Date(Date.parse(new Date().toISOString()) + 61000).toISOString(),
     });
-    expect(s.entry_route).toBe("light");
     expect(s.router_route).toBe("polish");
     expect(s.diff_lines).toBe(500);
     expect(s.lenses).toEqual(["requirement", "behavior", "progress"]);
@@ -2570,24 +2200,20 @@ describe("goal_summary telemetry", () => {
     expect(s.rewinds).toBe(2);
     expect(s.verifier_rounds).toBe(2);
     expect(s.max_fail_streak).toBe(3);
-    expect(s.escalated).toBe(true);
-    expect(s.critic_level).toBe("clean");
     expect(s.score).toBe(80);
     expect(s.duration_s).toBeGreaterThanOrEqual(0);
   });
 
-  test("欠測はnull（entry_route未記録はfull）・goal_start無しはduration null", () => {
+  test("欠測はnull・goal_start無しはduration null", () => {
     const root = tmpRoot();
     const gid = "g-missing";
     recordEvent(root, { type: "goal_complete", goal: gid, score: 100 });
     const s = buildGoalSummary(root, gid, { score: 100 });
-    expect(s.entry_route).toBe("full");
     expect(s.router_route).toBeNull();
     expect(s.verdict_level).toBeNull();
     expect(s.lenses).toEqual([]);
     expect(s.duration_s).toBeNull();
     expect(s.title).toBe("(unknown)");
-    expect(s.escalated).toBe(false);
   });
 
   test("2行1append＋buildTelemetryのbackfill再合成", () => {
@@ -2632,43 +2258,6 @@ describe("goal_summary telemetry", () => {
     expect(tele.length).toBe(1);
     // 修正前はクエリ時刻now基準で巨大値になった
     expect(tele[0]!.duration_s).toBe(3600);
-  });
-
-  test("旧A/B/C行はread時正規化（disk不変）", () => {
-    const root = tmpRoot();
-    mkdirSync(join(root, ".graphhopper"), { recursive: true });
-    writeFileSync(
-      join(root, ".graphhopper", "history.jsonl"),
-      [
-        JSON.stringify({ ts: "2026-01-01T00:00:00.000Z", type: "goal_start", goal: "g-leg", title: "l" }),
-        JSON.stringify({ ts: "2026-01-01T00:01:00.000Z", type: "entry_route", goal: "g-leg", route: "B" }),
-        JSON.stringify({ ts: "2026-01-01T00:02:00.000Z", type: "goal_complete", goal: "g-leg", score: 60 }),
-      ].join("\n") + "\n",
-    );
-    const tele = buildTelemetry(root);
-    expect(tele.length).toBe(1);
-    expect(tele[0]!.entry_route).toBe("light");
-    expect(tele[0]!.duration_s).toBe(120);
-  });
-
-  test("lineageのentry_routeは正規化済みfirst-seen（telemetry同型）", async () => {
-    const { buildLineage } = await import("./state");
-    const root = tmpRoot();
-    mkdirSync(join(root, ".graphhopper"), { recursive: true });
-    writeFileSync(
-      join(root, ".graphhopper", "history.jsonl"),
-      [
-        JSON.stringify({ ts: "2026-01-01T00:00:00.000Z", type: "goal_start", goal: "g-leg", title: "l" }),
-        JSON.stringify({ ts: "2026-01-01T00:01:00.000Z", type: "entry_route", goal: "g-leg", route: "B" }),
-        JSON.stringify({ ts: "2026-01-01T00:02:00.000Z", type: "entry_route", goal: "g-leg", route: "full" }),
-      ].join("\n") + "\n",
-    );
-    const lin = buildLineage(root);
-    expect(lin.goals.find((g) => g.id === "g-leg")?.entry_route).toBe("light");
-    // 欠測はnull
-    const root2 = tmpRoot();
-    const g2 = startGoal(root2, "t", "s").goal;
-    expect(buildLineage(root2).goals.find((g) => g.id === g2.id)?.entry_route).toBeNull();
   });
 
   test("goal_summaryはoutboxに投下される（watcherのreflect素材）", async () => {

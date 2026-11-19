@@ -53,32 +53,32 @@ describe("invoke 引数検証", () => {
   });
   test("不正model→エラー文字列", async () => {
     const out = await invoke(
-      { agent: "graphhopper-critic", model: "no-slash here", prompt: "hi", root: "/tmp" },
+      { agent: "graphhopper-librarian", model: "no-slash here", prompt: "hi", root: "/tmp" },
       okSpawn,
     );
     expect(out).toMatch("invalid model");
   });
   test("prompt超過→エラー文字列", async () => {
     const out = await invoke(
-      { agent: "graphhopper-critic", prompt: "x".repeat(PROMPT_MAX_CHARS + 1), root: "/tmp" },
+      { agent: "graphhopper-librarian", prompt: "x".repeat(PROMPT_MAX_CHARS + 1), root: "/tmp" },
       okSpawn,
     );
     expect(out).toMatch("prompt too long");
   });
   test("depth>=1→再帰拒否", async () => {
     process.env[DEPTH_ENV] = String(MAX_DEPTH);
-    const out = await invoke({ agent: "graphhopper-critic", prompt: "hi", root: "/tmp" }, okSpawn);
+    const out = await invoke({ agent: "graphhopper-librarian", prompt: "hi", root: "/tmp" }, okSpawn);
     expect(out).toMatch("nested");
   });
 });
 
 describe("buildArgs", () => {
   test("基本形（-- 境界・shell非経由の配列）", () => {
-    const a = buildArgs({ agent: "graphhopper-critic", model: "p/m", dir: "/r", title: "t", prompt: "hi" });
-    expect(a).toEqual(["run", "--standalone", "--model", "p/m", "--agent", "graphhopper-critic", "--title", "t", "--", "hi"]);
+    const a = buildArgs({ agent: "graphhopper-librarian", model: "p/m", dir: "/r", title: "t", prompt: "hi" });
+    expect(a).toEqual(["run", "--standalone", "--model", "p/m", "--agent", "graphhopper-librarian", "--title", "t", "--", "hi"]);
   });
   test("model省略時はflag自体付けない", () => {
-    const a = buildArgs({ agent: "graphhopper-critic", dir: "/r", title: "t", prompt: "hi" });
+    const a = buildArgs({ agent: "graphhopper-librarian", dir: "/r", title: "t", prompt: "hi" });
     expect(a.includes("--model")).toBe(false);
   });
   test("variant 付き model はそのまま --model に渡す", () => {
@@ -92,7 +92,7 @@ describe("buildArgs", () => {
     expect(a[a.indexOf("--model") + 1]).toBe("claude-oauth/claude-opus-5-5#xhigh");
   });
   test("先頭--modelのpromptもflag化されない", () => {
-    const a = buildArgs({ agent: "graphhopper-critic", dir: "/r", title: "t", prompt: "--model evil" });
+    const a = buildArgs({ agent: "graphhopper-librarian", dir: "/r", title: "t", prompt: "--model evil" });
     const sep = a.indexOf("--");
     expect(sep).toBeGreaterThan(-1);
     expect(a.slice(sep + 1)).toEqual(["--model evil"]);
@@ -103,24 +103,24 @@ describe("defaultTimeoutMs", () => {
   test("advisor / oracle だけ 240 秒（xhigh で 120 秒を超えうる）", () => {
     expect(defaultTimeoutMs("graphhopper-advisor")).toBe(240000);
     expect(defaultTimeoutMs("graphhopper-oracle")).toBe(240000);
-    expect(defaultTimeoutMs("graphhopper-critic")).toBe(120000);
+    expect(defaultTimeoutMs("graphhopper-librarian")).toBe(120000);
     expect(defaultTimeoutMs("graphhopper-verifier")).toBe(120000);
   });
 });
 
 describe("resolveModel", () => {
   test("引数優先", () => {
-    expect(resolveModel("/tmp/gh-nope", "graphhopper-critic", "p/m")).toBe("p/m");
+    expect(resolveModel("/tmp/gh-nope", "graphhopper-librarian", "p/m")).toBe("p/m");
   });
   test("config既定を読む", () => {
     const root = mkdtempSync(join(tmpdir(), "gh-invoke-"));
     mkdirSync(join(root, ".graphhopper"), { recursive: true });
     writeFileSync(
       join(root, ".graphhopper", "config.json"),
-      JSON.stringify({ agents: { "graphhopper-critic": "z/x" } }),
+      JSON.stringify({ agents: { "graphhopper-librarian": "z/x" } }),
       "utf8",
     );
-    expect(resolveModel(root, "graphhopper-critic")).toBe("z/x");
+    expect(resolveModel(root, "graphhopper-librarian")).toBe("z/x");
   });
 });
 
@@ -141,7 +141,7 @@ describe("invoke のモデル制限（config 駆動）", () => {
     const { invokeStructured } = await import("./invoke");
     await withGlobal({ model_deny: ["opencode-go/gpt-*"] }, async () => {
       const r = await invokeStructured(
-        { agent: "graphhopper-critic", model: "opencode-go/gpt-6-luna", prompt: "hi", root: "/tmp" },
+        { agent: "graphhopper-librarian", model: "opencode-go/gpt-6-luna", prompt: "hi", root: "/tmp" },
         okSpawn,
       );
       expect(r.output).toContain("denied by model_deny");
@@ -154,12 +154,12 @@ describe("invoke のモデル制限（config 駆動）", () => {
     const { invokeStructured } = await import("./invoke");
     await withGlobal(
       {
-        agents: { "graphhopper-critic": "opencode-go/kimi-k3.1-pro" },
+        agents: { "graphhopper-librarian": "opencode-go/kimi-k3.1-pro" },
         model_deny: ["opencode-go/kimi-*"],
       },
       async () => {
         const r = await invokeStructured(
-          { agent: "graphhopper-critic", prompt: "hi", root: "/tmp" },
+          { agent: "graphhopper-librarian", prompt: "hi", root: "/tmp" },
           okSpawn,
         );
         expect(r.output).toContain("denied by model_deny");
@@ -172,7 +172,7 @@ describe("invoke のモデル制限（config 駆動）", () => {
     const { invokeStructured } = await import("./invoke");
     await withGlobal({ model_allow: ["bedrock/*"] }, async () => {
       const r = await invokeStructured(
-        { agent: "graphhopper-critic", prompt: "hi", root: "/tmp" },
+        { agent: "graphhopper-librarian", prompt: "hi", root: "/tmp" },
         okSpawn,
       );
       expect(r.output).toContain("model unresolved");
@@ -184,7 +184,7 @@ describe("invoke のモデル制限（config 駆動）", () => {
     const { invokeStructured } = await import("./invoke");
     await withGlobal({ model_allow: ["opencode-go/*"] }, async () => {
       const r = await invokeStructured(
-        { agent: "graphhopper-critic", model: "opencode-go/deepseek-v4.1-flash", prompt: "hi", root: "/tmp" },
+        { agent: "graphhopper-librarian", model: "opencode-go/deepseek-v4.1-flash", prompt: "hi", root: "/tmp" },
         okSpawn,
       );
       expect(r.output).toContain("hello");
@@ -345,7 +345,7 @@ describe("invoke 並列安全（中断・heartbeat・ずらし）", () => {
     const { invokeStructured } = await import("./invoke");
     const t0 = Date.now();
     const r = await invokeStructured(
-      { agent: "graphhopper-critic", prompt: "hi", root: "/tmp", delayMs: 80 },
+      { agent: "graphhopper-librarian", prompt: "hi", root: "/tmp", delayMs: 80 },
       okSpawn,
     );
     expect(Date.now() - t0).toBeGreaterThanOrEqual(60);
@@ -367,7 +367,7 @@ describe("invoke 並列安全（中断・heartbeat・ずらし）", () => {
       return p as unknown as ChildProcess;
     }) as SpawnFn;
     const r = await invokeStructured(
-      { agent: "graphhopper-critic", prompt: "hi", root: "/tmp" },
+      { agent: "graphhopper-librarian", prompt: "hi", root: "/tmp" },
       spy,
       { signal: ac.signal },
     );
@@ -395,7 +395,7 @@ describe("invoke 子envのbearer除去", () => {
     }) as SpawnFn;
     try {
       const root = mkdtempSync(join(tmpdir(), "gh-invoke-bearer-"));
-      await invoke({ agent: "graphhopper-critic", prompt: "hi", root }, capture);
+      await invoke({ agent: "graphhopper-librarian", prompt: "hi", root }, capture);
       expect(seen).not.toBeNull();
       expect(seen!["AWS_BEARER_TOKEN_BEDROCK"]).toBeUndefined();
     } finally {

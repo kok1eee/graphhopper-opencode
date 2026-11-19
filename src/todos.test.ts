@@ -2,15 +2,11 @@ import { describe, expect, test } from "bun:test";
 import {
   addTodo,
   applyMark,
-  extractTaskSection,
   formatTodoChip,
   formatTodoList,
   isAllowedTransition,
   isTodoComplete,
   nextTodoId,
-  parseSeedTasks,
-  parseTaskLines,
-  seedMerge,
   todoGateError,
   todoProgress,
   type TodoStore,
@@ -23,81 +19,6 @@ function store(items: TodoStore["items"] = []): TodoStore {
 }
 
 describe("todo 純粋層", () => {
-  describe("parseTaskLines", () => {
-    test("チェックボックス行だけ抽出する", () => {
-      const r = parseTaskLines(
-        "# d\n\n- [x] done1\n- [ ] todo1\n- plain bullet\n-  [ ] indented\n",
-      );
-      expect(r).toEqual([
-        { text: "done1", done: true },
-        { text: "todo1", done: false },
-        { text: "indented", done: false },
-      ]);
-    });
-    test("テキストは200文字で打ち切る", () => {
-      const long = "x".repeat(300);
-      expect(parseTaskLines(`- [ ] ${long}`)[0]?.text.length).toBe(200);
-    });
-  });
-
-  describe("extractTaskSection / parseSeedTasks", () => {
-    const doc = [
-      "# design",
-      "",
-      "## 1. goal理解",
-      "",
-      "- [ ] 目標侧的チェック（タスク列外）",
-      "",
-      "## 4. 実装タスク列",
-      "",
-      "- [ ] T1 実装する",
-      "- [x] T2 済んだ",
-      "",
-      "## 受け入れ基準",
-      "",
-      "- [ ] A1 受け入れ条件（タスク列外）",
-    ].join("\n");
-
-    test("タスク列セクションだけを取り出す", () => {
-      const sec = extractTaskSection(doc);
-      expect(sec).toContain("T1 実装する");
-      expect(sec).not.toContain("目標侧的チェック");
-      expect(sec).not.toContain("A1 受け入れ条件");
-    });
-    test("seed はタスク列のチェックボックスだけ", () => {
-      expect(parseSeedTasks(doc)).toEqual([
-        { text: "T1 実装する", done: false },
-        { text: "T2 済んだ", done: true },
-      ]);
-    });
-    test("タスク列セクションが無ければ空", () => {
-      expect(parseSeedTasks("# d\n\n- [ ] x\n")).toEqual([]);
-      expect(extractTaskSection("# d\n\n- [ ] x\n")).toBe("");
-    });
-    test("見出しが「タスク列」でなくても「タスク」を含めば拾う（フォールバック）", () => {
-      const doc = [
-        "# design",
-        "",
-        "## 2. 現状",
-        "",
-        "- [ ] 目標側のチェック（別セクション）",
-        "",
-        "## 4. 実装タスク",
-        "",
-        "- [ ] T1 実装する",
-      ].join("\n");
-      expect(parseSeedTasks(doc)).toEqual([{ text: "T1 実装する", done: false }]);
-    });
-    test("scaffold のプレースホルダは seed 対象外", () => {
-      const scaffold = [
-        "## 4. 実装タスク列",
-        "",
-        "- [ ] T1（判断1）: （タスク）",
-      ].join("\n");
-      expect(parseSeedTasks(scaffold)).toEqual([]);
-    });
-  });
-
   describe("nextTodoId", () => {
     test("連番の最大+1", () => {
       expect(nextTodoId([])).toBe("t1");
@@ -107,66 +28,6 @@ describe("todo 純粋層", () => {
           { id: "t7", text: "b", status: "pending", updated_at: NOW },
         ]),
       ).toBe("t8");
-    });
-  });
-
-  describe("seedMerge", () => {
-    test("design.md のタスクが seed される", () => {
-      const r = seedMerge(
-        store(),
-        [
-          { text: "T1", done: false },
-          { text: "T2", done: false },
-        ],
-        NOW,
-      );
-      expect(r.added).toBe(2);
-      expect(r.store.items.map((i) => i.id)).toEqual(["t1", "t2"]);
-      expect(r.store.items.every((i) => i.status === "pending")).toBe(true);
-    });
-    test("design.md で [x] のタスクは completed で seed される", () => {
-      const r = seedMerge(store(), [{ text: "T1", done: true }], NOW);
-      expect(r.store.items[0]?.status).toBe("completed");
-    });
-    test("再 seed は既存タスクを消さず差分だけ足す（idempotent merge）", () => {
-      const first = seedMerge(
-        store(),
-        [
-          { text: "A", done: false },
-          { text: "B", done: false },
-        ],
-        NOW,
-      );
-      // A を完了させた状態で design.md に A/B/C が並ぶ
-      const marked = applyMark(first.store, "t1", "completed", { now: NOW });
-      const second = seedMerge(
-        marked.store,
-        [
-          { text: "A", done: false },
-          { text: "B", done: false },
-          { text: "C", done: false },
-        ],
-        NOW,
-      );
-      expect(second.added).toBe(1);
-      expect(second.store.items.map((i) => i.text)).toEqual(["A", "B", "C"]);
-      // 既存の id と status は保つ
-      expect(second.store.items[0]?.id).toBe("t1");
-      expect(second.store.items[0]?.status).toBe("completed");
-      expect(second.store.items[2]?.id).toBe("t3");
-    });
-    test("design.md 内で同文が複数あれば別 id を振る", () => {
-      const r = seedMerge(
-        store(),
-        [
-          { text: "同じ", done: false },
-          { text: "同じ", done: false },
-        ],
-        NOW,
-      );
-      expect(r.added).toBe(2);
-      expect(r.store.items.map((i) => i.id)).toEqual(["t1", "t2"]);
-      expect(r.duplicateTexts).toBe(1);
     });
   });
 

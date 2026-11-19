@@ -3,7 +3,7 @@
 verify は固定の lens を持たない。変更ごとに角度（疑うこと＋見る範囲）を選んで並列に走らせる。
 
 - 常設は `agreement`（合意・意図との照合）1 つ。ほかは verifier の専任の 1 回（選ぶ役）が、
-  角度の一覧（`src/angles.ts`）から選ぶ。選ぶ数（枠）は route と入口で決まる（昇格済み 4／light・advised 非昇格 1／polish 4／advisor・未判定 2。`agreement` は別で、この数に入らない）。
+  角度の一覧（`src/angles.ts`）から選ぶ。選ぶ数（枠）は難易度と変更の大きさで決まる（easy は 1／それ以外は `router_check` の route が polish なら 4、advisor か未判定なら 2。ここの advisor は小さい diff を指す route 名で、相談役の `graphhopper-advisor` とは別物。`agreement` は別で、この数に入らない）。
   選ぶ役が失敗したら既定の角度（wiring・test-efficacy・cleanup・behavior）で進め、本文に出る
 - メインは `add` で角度を足せる（枠の外。1 つの diff につき 2 個まで）。一覧に無い角度は `title`/`doubt` が必須
 - 前の diff で drift だった角度は次の diff へ持ち越され、`prior`（valid/invalid/unresolved）で前回の指摘の扱いを判定する。
@@ -23,7 +23,6 @@ polish/verify は **Code Mode で実行する**。`execute` の中で `tools.*` 
 ```js
 // recipe: start
 const r = await tools.graphhopper_router_check({});
-if (r.escalated) return `昇格して designing に戻った（design.md を肉付けし critic 1回）: ${r.next}`;
 if (r.simplify) {
   const s = await tools.graphhopper_diff_stash({});
   const proposal = await tools.graphhopper_invoke({
@@ -107,7 +106,7 @@ return { stop: "clean", summaries: v.summaries, completed };
 - `verifier_self_modified` の対象は、採点コード（`src/verify.ts` / `src/prompts.ts` / `src/angles.ts` / `src/verdict.ts`）と
   verifier の system prompt（agent md）、および凍結ファイルの欠落・不一致（改ざん）。
   `verify` では記録のみ（改ざんは除く。改ざんは verify を止める）、`complete` でゲート設定に従う
-- 凍結されていない旧 goal は従来どおり現行の基準で走る（fail-open）。前の形（v1）の凍結ファイルは hash だけ確かめ、`rubric_legacy` を記録する
+- 前の形（`v` 無し）の凍結ファイルは読まれない。欠落と同じ扱いで、上と同じく `verify` は `rubric_tampered` で止まる
 
 #### 何が自動で守られるか（散文で守らなくてよい）
 
@@ -179,10 +178,10 @@ return { stop: "clean", summaries: v.summaries, completed };
 #### 意図ログ（design g-mwebh9vl）
 
 goal 開始時の会話が `.graphhopper/plans/<goal>.intent.md` に `me:` / `assistant:` ラベル付きで
-保存される（plugin 経路のみ）。critic と agreement 角度はこれを読み、design や実装が
+保存される（plugin 経路のみ）。agreement 角度と advisor はこれを読み、決定記録や実装が
 ユーザーの意図からズレていないかを見る（`verify` が agreement にだけ path を渡す）。
 他の角度と実装 subagent には渡さない（決定を再審議して止まるため）。
-既知のキーはマスクするが best-effort で、会話は verifier/critic のモデル提供元に送られる。
+既知のキーはマスクするが best-effort で、会話は verifier/advisor のモデル提供元に送られる。
 コンパクション境界より前の履歴は取れないことがある。
 
 #### diff ゲート（design g-mwd3n5bo）
@@ -205,7 +204,7 @@ goal 中に書くファイル（`state.json`・`history.jsonl`・退避 diff・`
 
 - **diff 肥大は検証コスト3倍**: polish routeは複数の角度が差分（作業ファイル除く）を読む。748行級は1回で角度数×748行の
   コンテキスト消費。goalを小さく切って枠の少ない route に収めるのが最大の節約。
-  巻き戻しはさらに3倍するので、criticで初回品質を上げることも節約になる
+  巻き戻しはさらに3倍するので、designing で合意を固めて初回品質を上げることも節約になる
 - **drift は全件報告させる**（閾値カットしない。「重大なものだけ報告」のような保守的指示は
   過少報告を招く——`verify` の prompt は共通ルールを使うので、この原則は自動で入る）
 - CI は `bun scripts/gen-agents.ts --check-policy` で、commit 済みの

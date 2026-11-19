@@ -1,6 +1,6 @@
 /**
  * goal 開始時の会話から「意図ログ」を作る（design g-mwebh9vl）。
- * critic / agreement 角度だけに渡す生ログ。要約はしない。
+ * agreement 角度と advisor だけに渡す生ログ。要約はしない。
  * 注意: hooks の toLike とは目的が違う（あちらは tool part を残してループ検知に使う）。
  * この変換は text だけを拾い、内部注入と tool を落とす。
  */
@@ -12,6 +12,8 @@ export interface IntentMessage {
   text?: string;
   content?: { type?: string; text?: string }[];
   metadata?: Record<string, unknown>;
+  /** 作成時刻（ms）。designing 中の会話を分けるのに使う */
+  time?: { created?: number };
 }
 
 export interface IntentTurn {
@@ -103,7 +105,7 @@ function fitChars(
 
 /** status / start 応答に出す1行（文言の単一源泉） */
 export function formatIntentLine(path: string): string {
-  return `intent: ${path}（critic と agreement 角度に渡す）`;
+  return `intent: ${path}（goal 開始時の会話。designing 中の質問と答えは実装に進むときに後ろへ足される）`;
 }
 
 export interface RenderIntentOptions {
@@ -156,4 +158,42 @@ export function renderIntent(
       .join("\n\n") +
     "\n"
   );
+}
+
+/** 意図ログの後ろに足す節の見出し */
+export const DESIGNING_TURNS_HEADING = "## designing 中の会話";
+
+/**
+ * 意図ログの後ろに「designing 中の会話」を足した全文を返す（design g-mwmykjt4 判断3）。
+ * - goal の開始時刻（since、ms）より後に作られた発言だけを足す。開始時の部分は触らない
+ * - 既に節があれば、節だけを作り直す（designing に戻って進み直したとき）
+ * - 時刻が取れない・足す発言が無い・内容が変わらないときは null（何も書かない）
+ */
+export function appendDesigningTurns(
+  existing: string,
+  messages: IntentMessage[],
+  opts: { since: number; maxTurns?: number; maxChars?: number },
+): string | null {
+  if (!Number.isFinite(opts.since)) return null;
+  const later = (messages ?? []).filter((m) => {
+    const created = m?.time?.created;
+    return typeof created === "number" && Number.isFinite(created) && created > opts.since;
+  });
+  const turns = toIntentTurns(later);
+  if (turns.length === 0) return null;
+  const selected = selectTurns(turns, opts.maxTurns ?? INTENT_MAX_TURNS);
+  const fitted = fitChars(selected.kept, opts.maxChars ?? INTENT_MAX_CHARS);
+  if (fitted.kept.length === 0) return null;
+  const omitted = selected.omitted + fitted.omitted;
+
+  const marker = `\n${DESIGNING_TURNS_HEADING}\n`;
+  const at = existing.indexOf(marker);
+  const base = (at >= 0 ? existing.slice(0, at) : existing).trimEnd();
+  const next =
+    base +
+    `\n\n${DESIGNING_TURNS_HEADING}\n\n` +
+    (omitted > 0 ? `...(older messages omitted: ${omitted})\n\n` : "") +
+    fitted.kept.map((t) => `${t.role}: ${maskSecrets(t.text)}`).join("\n\n") +
+    "\n";
+  return next === existing ? null : next;
 }

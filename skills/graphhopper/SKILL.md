@@ -6,65 +6,38 @@ description: "designing→implementing→polishのgoal駆動ループ。Use when
 # graphhopper — designing/implementing/polish ループ
 
 graphhopper本体（Claude Code版）の3相グラフをopencodeに移植したもの。
-判断は「メイン + graphhopper-verifier(opus)」の2層で足りるという原則（council再発防止）を
-そのまま踏襲する。専用の designer は作らない。ただし設計段階の質チェックとして
-安価な `graphhopper-critic`（Luna 等）を designing で1回呼ぶ常設nodeを持つ
-（verifier が実装後の drift 検出、critic が実装前の計画検証という役割分担）。
+判断は「メイン + graphhopper-verifier」の2層で足りるという原則（council再発防止）を踏襲する。
+designing は**ユーザーとの質問と合意**の段階で、設計ドキュメントを書く段階ではない。
 
 ## どのnodeに何を振るか（typesafe流「need→手段」対応表）
 
 | Need | 手段 | 使い分け |
 |---|---|---|
-| 計画の敵対検証 | critic（designingで1回） | 要件漏れ・設計の穴・スコープ逸脱。質はここ |
 | 実装後のdrift検出 | verifier（角度を選んで並列） | 合意との照合＋変更ごとに選ぶ角度 |
-| 手詰まり打開 | oracle（escalate時、および oracle 入口の開始時） | 失敗文脈を渡して助言のみ受け取る |
-| 気軽な相談 | `graphhopper-advisor` | セカンドオピニオン・advised入口の相談・full の designing で判断の第二意見。stuck時はoracle（advisorで代替しない）。出力は非拘束。selector 判定は廃止（角度は verify が選ぶ） |
+| 手詰まり打開 | oracle（escalate時） | 失敗文脈を渡して助言のみ受け取る |
+| 気軽な相談 | `graphhopper-advisor`（任意） | 判断の第二意見。呼ぶかはメインが決める。stuck時はoracle（advisorで代替しない）。出力は非拘束 |
 | repo内事実収集 | researcher（read-only） | graft-first。判断を含めない |
 | repo外公式doc | librarian（read-only） | URL・引用付き。判断を含めない |
 | 大diff整理 | simplify（route=polishのみ） | 提案のみ。適用はメイン |
 
 独立した問いなら並列に投げ、メインが統合する。判断は増やさない（council再発防止）。
+相談（`graphhopper_invoke`）は履歴に `invoke` として自動で残る。記録用のツールは無い。
 
-**入口ごとの reviewing（designing → implementing）**:
-
-| 入口 | oracle | advisor | critic | 記録の扱い |
-|---|---|---|---|---|
-| full / 未判定 | - | 難易度で決める（下記） | 1回 | consult_set / critic_set とも任意 |
-| light | - | 省略 | 省略 | - |
-| advised | - | 1回 | 省略 | consult_set(kind: 'advisor') が**必須**（機械ゲート） |
-| oracle | 1回（開始時） | 難易度で決める（下記。oracle が扱わなかった判断について自信を問う） | 1回 | consult_set(kind: 'oracle') が**必須**（機械ゲート）。advisor・critic の記録は任意 |
-
-full / 未判定 / oracle の advisor は難易度で**分岐する**（裁量があるのは normal / 判定なしだけ。
-ここでの「未判定」は入口 route が未判定、「判定なし」は難易度が未判定を指す）。
-難易度は goal start の応答の `difficulty=` 行か、designing の案内文（easy は省略文・hard は呼ぶ文に
-なっている）で確認する。`difficulty=` 行が無ければ「判定なし」として扱う。
-
-**難易度がどこで決まるか**（route の入口判定とは別の呼び出し）:
+**難易度がどこで決まるか**:
 
 - d1 が **goal の題**を入力に判定する（goal start 時、最大 1.0 秒待つ）。
-- implementing へ移るときに design のタスク列からもう一度判定し、**hard と出たときだけ**引き上げる
-  （降格しない。cascade の昇格を伴うので下限は 0.7）。
-- 下限はラベル別: easy 0.9 / normal 0.4 / hard 0.6。easy を高くしているのは、easy が advisor の
-  省略に直結するため（誤 easy で第二意見を失うほうが、easy を出し損ねるより重い）。
-- 「判定なし」は 2 種類あり、どちらも**扱いは同じ**（下の normal と同じくメインが決める）:
-  (a) 判定できなかった（キーなし・時間切れ・d1 の失敗）、(b) 判定はしたが下限未満だった。
-  どちらなのかは `.graphhopper/decisions.jsonl` の `kind: "difficulty"` 行（`fallback` と `reason`）で分かる。
-- hard に引き上げたとき advisor をまだ呼んでいなければ、遷移の応答が advisor 1 回を求める。
-  そのときは **implementing のまま**（design.md はもう書き換えない）呼び、指摘は
-  `.graphhopper/plans/<goal-id>.log.md` に残して実装順に反映する。`consult_set` の記録は任意
-  （advised 入口と oracle 入口の oracle 相談だけが機械ゲート）。
-  timeout したら再試行せず、`advisor 省略(timeout)` を log に残して実装を続ける。
+- implementing へ移るときに、題と決定記録の「決めたこと」からもう一度判定し、**上がる方向だけ**反映する。
+  書き換わるのは次の 2 通りだけで、それ以外（下がる・同じ・判定できない）は何も変えない。
+  - easy の goal に normal と出た → normal にする
+  - easy・normal・判定なしの goal に hard と出た → hard にする（cascade の昇格を伴う）
 
-hard で advisor を呼んだときは、指摘を design に反映したうえで、`graphhopper_consult_set(kind: 'advisor', summary: ...)`
-に 1〜3 文残す（任意。省略しても遷移は止まらない）。
-
-**advisor の要否**（上の難易度に対する規則）:
-
-- **easy**: 省略する。`.graphhopper/plans/<goal-id>.log.md` に `advisor 省略(easy): …` を 1 行残す
-  （easy 規則が実際に効いているかを後から数えるため。省略の事実が消えると規則の要否を判断できない）。
-- **hard**: 1回呼ぶ。
-- **normal / 判定なし**: design を書いた後にメインが決める。基準は「捨てた代替案の理由に自信がない判断が 1 つでもあるか」。あれば 1 回呼び（呼び方は designing 節）、無ければ省略して `.graphhopper/plans/<goal-id>.log.md` に 1 行書く。書式は省略の経路が分かる形にする（`advisor 省略(normal): 判断2・4は実測で裏付けあり` / `advisor 省略(判定なし): …`。easy の書式は上の項目）。
-- **oracle 入口**: easy / hard は上のとおり。normal / 判定なしのときだけ、開始時の oracle 相談で結論が出た論点を除いて基準を当てる。
+  判定なしの goal に normal と出た場合は、書き換えない側に入る（判定なしは normal と同じ扱いのため）。
+- 下限はラベル別: easy 0.9 / normal 0.4 / hard 0.6（goal start 時）。implementing へ移るときの判定し直しだけ、
+  hard の下限を 0.7 に上げる。判定できない・下限未満は「判定なし」で、normal と同じ扱い
+  （判定し直しで「判定なし」になったときは、元の難易度のまま）。
+  「判定できない」と「下限未満」のどちらだったかは `.graphhopper/decisions.jsonl` の `kind: "difficulty"` 行で分かる。
+- 難易度が効く先は、cascade の昇格と、verify の角度の枠（easy は 1。それ以外は変更の大きさで 2 か 4）。
+  advisor を呼ぶかは難易度で縛らない（メインとユーザーの裁量）。
 
 phase 案内（次のアクションの全文）は system ではなく**会話の中**に届く。
 `<context key="graphhopper-phase">` が現在の phase と次のアクションで、新しい値が前の値を置き換える
@@ -73,16 +46,13 @@ phase 案内（次のアクションの全文）は system ではなく**会話�
 `次:` の形で同じ案内が出る（自動遷移では出ない）。案内が見当たらないときは `graphhopper_status` で
 確認する。同期に失敗したときは継続メッセージに全文が付く。
 
-`require_critic: true` にしたプロジェクトだけは、入口に関係なく critic_set の記録が必須になる（既定 false）。
-その場合は critic を省略する light / advised でも、呼ばなかった理由を `reason` に書いて記録する。
-記録を省く運用なら false のままにする。
 
 **opencode 2本立て**: `task()`/`subagent` は TUI からは呼べるが **`execute` のカタログには無い**。
 2.3.0 以降 `task()` はバックグラウンド（結果は後で届く）なので、判定を待って記録する経路
 （verifier）は `graphhopper_verify`（角度ごとに `opencode run` を待つ）か
 `graphhopper_invoke`（1件ずつ）を使う。**polish/verify の手順は Code Mode のレシピに固定済み**
-（refs/verifier.md）。設計レビュー（critic）・調査（researcher/librarian）・簡易な相談は
-`graphhopper_invoke` で同期実行できる（`task()` でもよいが、結果が届く前に `critic_set` /
+（refs/verifier.md）。調査（researcher/librarian）・簡易な相談（advisor）は
+`graphhopper_invoke` で同期実行できる（`task()` でもよいが、結果が届く前に
 `usability_set` を呼ばないこと）。
 agent→モデル束縛はセッション開始時に凍結されるため、(1)モデル割当を変えたら
 新規セッションで始める（resume・再起動では直らない）(2)最初の子でDB上のモデルを
@@ -116,6 +86,7 @@ cascade の切替先（baseline/escalate/quality 等）も deny で拒否され�
   `graphhopper_goal(action: "complete", force: true)`
 - agent が見つからない場合は `bun scripts/gen-agents.ts` を実行して再試行
   （`task` はセッション開始時にモデル束縛が凍結されるため invoke 推奨）
+
 **strong モード**（設計が重い goal を最初から強いモデルで回す）:
 - 費用: 全 phase で main が強いモデルになるためトークン費用は増える。設計が重い goal だけに使う
 - 指定: `graphhopper_goal(action: "start", title: "...", strong: true)` のみ。
@@ -136,11 +107,17 @@ cascade の切替先（baseline/escalate/quality 等）も deny で拒否され�
 - 通常昇格（difficulty/fail_streak）とは独立。strong は target のモデルだけを変え、
   `cascade.escalate` の設定は変えない
 goal 開始時の会話は `.graphhopper/plans/<goal>.intent.md` に `me:`/`assistant:` 付きで保存される。
-advisor・critic と agreement 角度はこれを読む（他の角度と実装 subagent には渡さない）。
+designing 中の質問と答えは、implementing に進むときに同じファイルの後ろ（`## designing 中の会話`）へ足される。
+この意図ログ（intent.md）を読むのは `graphhopper-advisor`（相談役の agent）と agreement 角度だけ（他の角度と実装 subagent には渡さない）。
+決定記録（`.graphhopper/plans/<goal>.md`）は別で、advisor も verifier の各角度も読む。
 verifier clean の後に差分を変えると `complete` は止まる（検証時点の diff の sha1 と照合）。
 再検証するか、人間の判断で `force: true`（`goal_complete` に `diff_gate: forced`）。
 
+
 ## フェーズ
+
+`route=polish` / `route=advisor` は `graphhopper_router_check` が diff の大きさで決める**検証の重さの名前**
+（polish=大きい diff / advisor=小さい diff）。`graphhopper-advisor`（相談役の agent）とは別物で、入口判定とも関係ない。
 
 ```
 designing → implementing → router_check → polish ─┬─ route=polish:  simplify → verifier（角度 1+4）
@@ -149,87 +126,56 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
                      drift target=implementing の巻き戻し
 ```
 
-### 入口トリアージ（decide・route full/light/direct/advised/oracle）
 
-フルループが大袈裟な作業に相応の重さで回す入口判定。**判定は plugin の hook が自動で走らせる**
+### 入口判定（goal か direct か）
+
+フルループが大袈裟な作業を弾く入口判定。**判定は plugin の hook が自動で走らせる**
 （メッセージ受付時に d1 を待ち、`## graphhopper 入口判定` で始まるメッセージとして会話に届く。
-受付の遅れを 1.5 秒までに抑えるため待ちは最大 1.5 秒で、間に合わなければ届かない＝
-**route が未判定**として扱う。これは難易度の「判定なし」とは別の事象で、難易度は goal start 時に
-題から判定する）。
-`LIQUID_API_KEY` が要る（無いと判定は走らない）:
+待ちは最大 1.5 秒で、間に合わなければ届かない）。`LIQUID_API_KEY` が要る（無いと判定は走らない）:
 
-- **自動判定が基本**: モデルが `graphhopper_decide` を呼ぶ必要はない。
-  判定結果は `.graphhopper/decisions.jsonl` に自動記録される
-  （route・confidence・rawChoice・レイテンシ。閾値較正の材料）
-- 判定結果（route が direct 以外）がモデルに渡される。モデルはそれに従って
-  `graphhopper_route_set(route, reason)` → `graphhopper_goal(action: "start")` へ進む。
-  **d1 の判定は参考値**。明らかに単一ファイルの小修正なら route_set をしない（ループを作らない）
-- **難易度は入口判定では聞かない**。goal start 時に題から別の呼び出しで判定し、
-  `.graphhopper/decisions.jsonl` に `kind: "difficulty"` で残る（`source` が goal-start / implementing）。
-  `route_set` の `difficulty` 引数は残っているが、**原則として渡さない**。渡すと pending に入り、
-  goal start の題からの判定が省かれる（自己申告は d1 の下限を通らない。easy は advisor の省略に
-  直結するので特に避ける）。入口判定では難易度を聞かないので比較対象は無い。
-  渡してよいのは「題だけでは内容が伝わらず（例: `進めて` だけ）、自分が実装内容を把握していて
-  d1 の判定が外れると分かっている」場合だけ。題を具体的に書き直せるなら、そちらを直して渡さない
-  （題から判定させるほうが安く、記録も残る）
-- 手動で判定し直したいときだけ `graphhopper_route(request)` → `graphhopper_decide(request)` →
-  `graphhopper_route_set(route, reason)`。手動の decide も同じログに記録される
-- **full=フル**（現行通り）/**light=軽量**（design の内容規約は full と同じ。判断は少なくてよいが1件以上、critic省略、verifier は枠が少ない）/
-  **direct=直行**（loopなし・goalを作らない。historyに1行のみ残る）/
-  **advised=軽量＋第二意見**（light相当＋implementing前にadvisor相談1回。lightはadvisor・critic省略）/
-  **oracle=多角**（full相当＋開始時にoracle相談1回。stuck時は同session継続）
-- parse失敗・範囲外・未記録は**fullに倒す**（fail-safe。state null＝full）。
-  旧A/B/Cも受理しfull/light/directに写像する
-- **昇格のみ可**（full→light禁止のラチェット）。stuck発火時は `graphhopper_escalate`、
-  `router_check` でlight/advised＋大diffなら**自動昇格**（designing巻き戻し＋肉付け＋critic1回＋角度の並列検証）。
-  stuck発火時もlight/advisedは自動昇格する（fullのstuckは従来通りoracle相談）。
-  昇格後はcritic記録なしにimplementingへ進めない（機械ゲート）
-- light適用条件（decide criteria）：単一関心・設計判断が少ない（1件以上。判断ゼロの作業は direct）・既存踏襲・テスト容易。
-  1つでも欠けたらfull。誤lightは昇格で回収する前提
+- 判定は 2 択: **goal**（ループを作る）/ **direct**（作らない。届かない）。旧 5 値は direct 以外すべて goal に寄せる
+- 届いたら `graphhopper_goal(action: "start", title: ...)` へ進む。**d1 の判定は参考値**。
+  明らかに単一ファイルの小修正なら goal を作らず直接対応してよい
+- 判定結果は `.graphhopper/decisions.jsonl` に自動記録される（route・confidence・rawChoice・レイテンシ）。
+  手動で判定し直したいときだけ `graphhopper_decide(request)`
+- 難易度は入口判定では聞かない。goal start 時に題から別の呼び出しで判定する（上の「難易度がどこで決まるか」）
 
 ### designing
 
-- `graphhopper_goal(action: "start", title: ...)` で開始すると
-  `.graphhopper/plans/<goal-id>.md` の骨格が自動生成される（scaffold）。
-  既存ファイルは壊さない
-- 骨格（goal理解／現状／設計判断／タスク列／棄却＋タスク行）を埋める。
-  **骨格不足だと `implementing` 遷移が機械拒否される**（構造のみ・質はcriticの領分）。
-  中身をゼロから書く必要は無い、scaffoldを埋めればよい
-- 骨格の「6. ユーザーの承認が要るもの」は必ず埋める（無ければ「なし（理由: …）」）。
-  基準はこの文書の「ユーザーの承認が要るもの」節。ここで書いた項目は implementing 中に
-  ユーザーへ確認する（design の時点で洗い出すことで、実装中の手戻りと無断の本番操作を防ぐ）
+designing は**質問して合意を取る段階**。自動継続は止まる（idle でも継続メッセージは積まれない）。
+
+- `graphhopper_goal(action: "start", title: ...)` で開始すると `.graphhopper/plans/<goal-id>.md` の
+  決定記録の雛形が自動生成される（既存ファイルは壊さない）。以降「決定記録」「design」はこのファイルを指す。
+  書き込みは素の edit / write でよい（designing 中に書けるのは `.graphhopper/plans/` 配下だけ）
+- まず調べられることは調べ（graft/CodeGraph・researcher・librarian）、そのうえで**ユーザーに質問する**。
+  質問は本文に書き、答えを待って**止まる**。1 回に聞くのは判断 1〜数件。選択肢と推奨を添える
+- 答えが出そろったら、決定記録の 3 つの見出しを埋め、**最終確認は取らず**
+  `graphhopper_phase(phase: "implementing")` を呼ぶ（自動では遷移しない）
+  - `## 決めたこと`: ユーザーと合意した内容（判断ごとに 1 項目）
+  - `## やらないこと`: この goal で変えないもの
+  - `## 完了の確かめ方`: 終わったと言える観測
+  - **3 見出しのどれかが無い・空だと implementing 遷移が機械拒否される**（見るのはそれだけ）。
+    「空でない」は、雛形の括弧書きの行を除いて 8 文字以上の行が 1 つあること。
+    やらないことが本当に無いなら「なし（確かめたこと: …）」のように、何を見て無いと判断したかを書く
+  - 本番変更・戻せない削除・push・キー操作など「ユーザーの承認が要るもの」（この文書の同名節）は「決めたこと」に書き、implementing 中にユーザーへ確認する
+- 判断に自信がなければ `graphhopper_invoke(agent: "graphhopper-advisor")` で第二意見を取ってよい（任意）。
+  prompt に決定記録と `.graphhopper/plans/<goal-id>.intent.md` の path を書き、「この 2 ファイルを Read してから答える」と明記する（要約して渡さない）
+- 要件の公式doc裏付けが必要なら `graphhopper_invoke(agent: "graphhopper-librarian")`
 - **このフェーズではsource編集（Edit/Write）が `tool.execute.before` hookで物理ブロックされる**
   （許可パスは `.graphhopper/plans/` 配下のみ、`.graphhopper/config.json` の `design_gate_allow` で変更可）
-- 書けたら **full / 未判定 / oracle 入口では advisor を呼ぶかを難易度で決める**（分岐は入口別の表の下）。
-  light は advisor も critic も省略。advised は advisor が必須（`graphhopper_consult_set` の記録も要る）。
-  呼ぶ場合は `graphhopper_invoke(agent: "graphhopper-advisor")` で**判断の第二意見を1回**取る。
-  design と `.graphhopper/plans/<goal-id>.intent.md` の path を渡し、会話を読ませる（要約して渡さない）。
-  別の選択肢・判断の妥当性が返る。反映後に呼び直さない。
-- 次に `graphhopper_invoke(agent: "graphhopper-critic")` で**設計を1回敵対レビュー**する
-  （要件漏れ・設計の穴・スコープ逸脱を検出。安価モデル = 常設nodeなので full / 未判定 / oracle 入口では必ず呼ぶ）。
-  呼び出しは `execute` の外から直接でよい（`execute` の中は polish のレシピだけ）
-- critic の指摘を design.md に反映してから `graphhopper_phase(phase: "implementing")`
-- 要件の公式doc裏付けが必要なら `graphhopper_invoke(agent: "graphhopper-librarian")` を使う
-  （researcherはコードベース事実収集に専念し、外部調査はlibrarianに委ねる）
-- critic を呼ぶこと自体は full / 未判定 / oracle 入口では必須（運用規則。light / advised は省略）。記録は
-  `require_critic: true` のプロジェクトでは **必須**（未記録だと implementing 遷移が機械拒否される。
-  既定 false）。それ以外は任意で `graphhopper_phase` の前提条件にはならない
-  （「critic を呼んだか」自体の機械チェックはしないので、記録も裁量）
-- **design.md はこのフェーズを抜けた後は不変になる**（`tool.execute.before` が
-  designing以外での該当パスへの書き込みを常にブロックする）。verifierがdrift検出の
-  アンカーとして読むため、実装に合わせて書き直せると「driftをdesign.md側の書き換えで
-  消せる」Goodhart's Lawの穴になる。決定の経緯・棄却した代替案・進捗は
-  `.graphhopper/plans/<goal-id>.log.md`（design.mdとは別物、追記専用・ハードゲート無し、
-  全phaseで自由に書ける）に持つ
+- **決定記録はこのフェーズを抜けた後は不変になる**。verifierが drift 検出のアンカーとして読むため、
+  実装に合わせて書き直せると「driftを記録側の書き換えで消せる」穴になる。決定の経緯・棄却した代替案・進捗は
+  `.graphhopper/plans/<goal-id>.log.md`（追記専用・ハードゲート無し、全phaseで自由に書ける）に持つ
+
 
 ### implementing
 
-- design.md のタスクを1つずつ実装する
+- 決定記録（`.graphhopper/plans/<goal-id>.md`）の「決めたこと」を実装する
 - **タスクの完了は `graphhopper_todo` で申告する**（`action: "done"` / 進行中は `"start"` /
   やらないと判断したものは `"cancel"`＋`reason` 必須 / 追加は `"add"` / 一覧は `"list"`）。
-  design.md の「実装タスク列」セクションが designing→implementing 遷移時に todo ストアへ seed される。
+  進捗タスクは任意の道具で、使うなら自分で `add` する（決定記録からは作られない）。
   **未完了タスク（pending / in_progress）が残ると polish へ遷移できない**（eval_cmd 通過でも同じ）。
-  完了が済んだら必ず `graphhopper_todo` を呼ぶこと
+  使うなら完了のたびに `graphhopper_todo` を呼ぶこと
 - goal中のsource編集は `graphhopper_hash` でsha1取得→ `graphhopper_edit`（hash検証付き）を使え。
   素のedit/writeはフォールバック。拒否（throw）はhash再取得の合図。複数ファイルは
   [refs/implementing.md](refs/implementing.md) の `hash` → `edit` レシピで1バッチにできる
@@ -247,8 +193,6 @@ designing → implementing → router_check → polish ─┬─ route=polish:  
 - simplify は route=polish のときだけの条件分岐 node（`router_check` の `simplify` が真）。
   agent は提案のみ、適用はメインが Read と edit で行う（interface・signature・新規依存は high 扱いで人間確認）
 - **第三者チェック（verifier）は省略できない**。`verifier_set` は results が空だと機械的に拒否する
-- `light`/`advised` で route=polish になると `router_check` が自動昇格し `escalated: true` を返す。
-  その場合レシピは打ち切られ、designing に戻る（design 肉付け＋critic 1回＋選ぶ角度 4 つ＋agreement）
 - ルール文書（`AGENTS.md` / `skills/**.md` / `src/agents.ts`）を変えた goal は、`tail` の前に
   usability を済ませる（指摘で文書を直すと差分が変わり、diff ゲートの再検証が要るため）
 
@@ -332,7 +276,7 @@ compaction時はd1 keep-listが自動注入される（要約落ち防止の制�
 - 戻せない削除（DB・バケット・ファイル）。先に dump や設定のバックアップを取る
 - push / merge（goal 完了時に commit まではしてよいが、push は指示があるまでしない）
 - API キーの発行・失効・ローテーション
-- implementing 以降に、承認済みの design の内容を変える必要が出たとき（designing 中の加筆・critic/verifier 指摘の反映は含まない）
+- implementing 以降に、承認済みの決定記録の内容を変える必要が出たとき（designing 中の加筆・verifier 指摘の反映は含まない）
 - `AGENTS.md`・`skills/**.md` の一括置換（同じ置換を複数箇所へ一度に適用すること。1 行ずつの修正なら不要）
 - 既定を超える fan-out の本数、または既定にないモデルへの格上げ
   （phase 連動の cascade 切替、verifier の角度の並列実行など定常の呼び出しは対象外）

@@ -45,7 +45,7 @@ export const VERIFIER_EFFICIENCY_RULE = [
 
 /**
  * 進捗タスク一覧（lens に渡す）。
- * design.md は planning 終端で immutable なので進捗の source of truth は
+ * 決定記録は designing 終端で不変なので進捗の source of truth は
  * .graphhopper/todos/<goalId>.json のほう。タスク 0 件なら空文字を返す。
  * ストアを読めなかった場合は空文字ではなく「読めなかった」を明示する
  * （タスク無しと区別.Fail-open にして進捗チェックを黙って消さない）。

@@ -15,11 +15,9 @@ import {
   shouldSwitchChild,
 } from "../../../src/cascade";
 import {
-  autoEscalateOnStuck,
   continuationText,
   designDocLockedRefusal,
   designGateRefusal,
-  ESCALATE_NEXT,
   isGateTargetTool,
   ORACLE_ASK,
   isIntentLogPath,
@@ -54,9 +52,9 @@ const SYSTEM_GUIDE = `## graphhopper（常駐）
 
 この環境には graphhopper プラグインが常駐している。複数ファイルにまたがる変更・設計判断を含む実装を依頼されたら、手を付ける前に graphhopper_goal(action: "start", title: ...) でループを開始する。単一ファイルの小修正・質問への回答・一回きりのコマンド実行程度なら、ループを作らず直接対応してよい。
 
-入口の route 判定（d1）はプラグインが自動実行し、結果は会話の中に「## graphhopper 入口判定」で始まるメッセージとして届くことがある（direct・判定不能・内部/子セッション/goal進行中は届かない）。届いたらその判定に従って graphhopper_route_set → graphhopper_goal(start) へ進む。判定は参考値で、明らかに単一ファイルの小修正なら直接対応してよい。
+入口の route 判定（d1）はプラグインが自動実行し、結果は会話の中に「## graphhopper 入口判定」で始まるメッセージとして届くことがある（direct・判定不能・内部/子セッション/goal進行中は届かない）。届いたらその判定に従って graphhopper_goal(start) へ進む。判定は参考値で、明らかに単一ファイルの小修正なら直接対応してよい。
 
-designing フェーズでは source ファイルの edit/write は物理的にブロックされる（書けるのは .graphhopper/plans/ 配下の design ドキュメントだけ）。まず design ドキュメントを書き、レビューを経てから implementing に遷移して実装する。
+designing フェーズでは source ファイルの edit/write は物理的にブロックされる（書けるのは .graphhopper/plans/ 配下の design ドキュメントだけ）。まずユーザーに質問して合意を取り（答えが出るまで自動継続は止まる）、決定記録（決めたこと／やらないこと／完了の確かめ方）を書いてから implementing に遷移して実装する。
 
 案内はこの文ではなく会話の中に届く:
 - \`<context key="graphhopper-phase">\`: 進行中 goal の phase と次のアクション。新しい値が前の値を置き換える（古い値は無効）。
@@ -808,6 +806,8 @@ async function onIdleBody(
   if (active.goal.status !== "active") return;
   if (active.state.phase === "done") return;
   if (active.state.session_id !== sessionID) return;
+  /* designing は質問して答えを待つ段階。自動継続・eval・待ちタイマーは動かさない（design g-mwmykjt4） */
+  if (active.state.phase === "designing") return;
   /* 前回このプロセスが積んだ継続が返ってきたので pending を戻す（bound セッションだけ） */
   {
     const g0 = active.state.guard;
@@ -1031,10 +1031,7 @@ async function onIdleBody(
       } else {
         const stuck = state.checkStuck(root);
         if (stuck.escalate && state.noteStuckNotified(root, stuck.reasons)) {
-          const esc = autoEscalateOnStuck(root);
-          stuckLine = esc
-            ? `stuck: ${stuck.reasons.join(", ")} → light/advised→full自動昇格（designingに巻き戻し）。${ESCALATE_NEXT}`
-            : `stuck: ${stuck.reasons.join(", ")} — ${ORACLE_ASK}`;
+          stuckLine = `stuck: ${stuck.reasons.join(", ")} — ${ORACLE_ASK}`;
         }
       }
       evalNote = [`eval_cmd FAILED (fail_streak=${r.fail_streak}): ${cmd}`, tail, stuckLine].filter(Boolean).join("\n");

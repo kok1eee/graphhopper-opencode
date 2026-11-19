@@ -1,6 +1,6 @@
 /**
  * graphhopper v2 plugin: ops tools (router_check/diff_stash/verifier_set/
- * critic_set/consult_set/hash/edit/discover_start/discover_tick/
+ * hash/edit/discover_start/discover_tick/
  * discover_clear/handoff)。
  * v1 src/index.ts の同名 tool execute 本体を v2 形に移植。
  * handoff の候補列挙は known-sessions sidecar を使う (H2。session.list は v2 plugin API に無い)。
@@ -8,7 +8,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { $ } from "bun";
 import {
-  effectivePhaseAction,
+  PHASE_ACTION,
   goalResumeContext,
   policyDocsChanged,
   readGraphhopperHashValue,
@@ -77,7 +77,7 @@ export function registerOpsTools(
   editor.add({
     name: "graphhopper_router_check",
     description:
-      "diffサイズを機械測定してrouteを決める（advisor=小diff / polish=大diff: simplify を先に実行。verifier の角度は graphhopper_verify が選ぶ）。implementing完了時に1回呼ぶ。返り値の angle_slots / simplify / escalated に従って refs/verifier.md のレシピを実行する（散文は読まなくてよい）。escalated=true ならその場でdesigningに巻き戻るので、レシピは打ち切る。self-graded完了防止のため、advisorでも第三者チェック（verifier）は省略できない",
+      "diffサイズを機械測定してrouteを決める（advisor=小diff / polish=大diff: simplify を先に実行。verifier の角度は graphhopper_verify が選ぶ）。implementing完了時に1回呼ぶ。返り値の angle_slots / simplify に従って refs/verifier.md のレシピを実行する（散文は読まなくてよい）。self-graded完了防止のため、advisorでも第三者チェック（verifier）は省略できない",
     input: S.obj({}, []),
     output: S.obj(
       {
@@ -86,12 +86,11 @@ export function registerOpsTools(
         threshold: S.num("route判定の閾値"),
         angle_slots: S.num("選ぶ役が選ぶ角度の枠の数（agreement は別。graphhopper_verify が計画を作る）"),
         simplify: S.bool("simplify を先に実行するか（route=polish のみ true）"),
-        escalated: S.bool("light/advised→full の自動昇格が起きたか（true なら designing に戻る）"),
         deep: S.bool("RISK_PATHS に触れたか（参考情報）"),
         deep_reason: S.optStr("deep=true の理由（触れたriskファイル）"),
         next: S.str("次にやること（1行）"),
       },
-      ["route", "diff_lines", "threshold", "angle_slots", "simplify", "escalated", "deep", "next"],
+      ["route", "diff_lines", "threshold", "angle_slots", "simplify", "deep", "next"],
     ),
     execute: async () => {
       const active = state.getActive(root);
@@ -102,26 +101,13 @@ export function registerOpsTools(
       const diffLines = state.effectiveDiffLines(measured, active.state.initial_diff_lines);
       const route: state.RouterRoute = diffLines > cfg.router_threshold_lines ? "polish" : "advisor";
       const recorded = await state.recordRouterCheckWithRisk($, root, baseline, diffLines, route);
-      const pre = state.getActive(root);
-      const willEscalate =
-        (pre?.state.entry_route === "light" || pre?.state.entry_route === "advised") &&
-        route === "polish";
       let next: string;
-      if (willEscalate) {
-        const { ESCALATE_NEXT } = await import("../../../src/gate");
-        state.escalateEntryRoute(root);
-        next = ESCALATE_NEXT;
-      } else if (route === "polish") {
+      if (route === "polish") {
         next = "refs/verifier.md の polish レシピ: diff_stash → simplify → 適用 → diag → diff_stash → verify → verifier_set";
       } else {
         next = "refs/verifier.md の advisor レシピ: diag → diff_stash → verify → verifier_set → phase → goal";
       }
-      const after = state.getActive(root);
-      const slots = angleSlots({
-        route,
-        entryRoute: after?.state.entry_route ?? null,
-        escalated: !!after?.state.escalated_at,
-      });
+      const slots = angleSlots({ route, difficulty: active.state.difficulty });
       const simplify = route === "polish";
       return structured(
         {
@@ -130,16 +116,13 @@ export function registerOpsTools(
           threshold: cfg.router_threshold_lines,
           angle_slots: slots,
           simplify,
-          escalated: willEscalate,
           deep: recorded.router.deep,
           ...(recorded.router.deep_reason ? { deep_reason: recorded.router.deep_reason } : {}),
           next,
         },
         [
           `route: ${route} (${diffLines} lines, threshold ${cfg.router_threshold_lines})`,
-          `angle_slots: ${slots}${simplify ? " / simplify: yes" : ""}${
-            willEscalate ? " / 自動昇格してdesigningに戻った（レシピ打ち切り）" : ""
-          }`,
+          `angle_slots: ${slots}${simplify ? " / simplify: yes" : ""}`,
         ].join("\n"),
       );
     },
@@ -323,46 +306,6 @@ export function registerOpsTools(
   });
 
   editor.add({
-    name: "graphhopper_critic_set",
-    description:
-      "designing終了前のdesign.md質レビュー結果（clean/drift）を記録する（opt-in、graphhopper_phaseの前提条件にはしない）。graphhopper-criticを呼んだかどうかに関わらず記録できる——self-graded防止は行わない",
-    input: S.obj(
-      {
-        level: S.enumOf(["clean", "drift"]),
-        reason: S.str("critic reviewの結果の根拠、またはcriticを呼ばなかった判断理由を1〜3文で"),
-        model: S.optStr("レビューを実行したモデル（省略時はconfig既定で補完。成績表の帰属に使う）"),
-      },
-      ["level", "reason"],
-    ),
-    execute: async (input: unknown) => {
-      const args = input as { level: "clean" | "drift"; reason: string; model?: string };
-      const result = state.setCriticVerdict(root, { level: args.level, reason: args.reason, model: args.model });
-      return text(`critic review recorded: ${args.level}. phase: ${result.phase}`);
-    },
-  });
-
-  editor.add({
-    name: "graphhopper_consult_set",
-    description:
-      "entry相談の記録。kind=advisorはadvised入口の第二意見、kind=oracleはoracle入口の開始時相談。相談自体はgraphhopper_invoke(agent: 'graphhopper-advisor' または 'graphhopper-oracle')で別途行い、ここでは記録のみする（実在は検証しない）。designing→implementingの機械ゲートの入力になる",
-    input: S.obj(
-      {
-        kind: S.enumOf(["advisor", "oracle"]),
-        summary: S.str("相談の要旨（1〜3文。何を聞いて何を得たか）"),
-        model: S.optStr("相談を実行したモデル（省略時はconfig agents表からkind別に補完）"),
-      },
-      ["kind", "summary"],
-    ),
-    execute: async (input: unknown) => {
-      const args = input as { kind: "advisor" | "oracle"; summary: string; model?: string };
-      const active = state.getActive(root);
-      if (!active) return text("error: no active goal");
-      state.setConsult(root, args.kind, { summary: args.summary, model: args.model });
-      return text(`consult recorded: ${args.kind}`);
-    },
-  });
-
-  editor.add({
     name: "graphhopper_diag",
     description:
       "型・lint 診断を1回実行し .graphhopper/tmp/diag-<goal>.txt に保存して path を返す（verifier の添付証拠。実行するのは eval_cmd のみ）。status=failed/timeout なら verifier を呼ばずに止まる（直すものがある証拠）。unset（eval_cmd 未設定）でもファイルは作り verifier は走る（診断の不在を clean の根拠にしない）。diff_stash の直前に呼ぶ",
@@ -490,7 +433,6 @@ export function registerOpsTools(
               "採点基準を戻すか、新しい goal でやり直してください（verify に force は無い）",
           );
         }
-        if (rs.legacy) state.recordEvent(root, { type: "rubric_legacy", goal: goalId });
         if (rs.changed) state.recordEvent(root, { type: "rubric_changed", goal: goalId });
         if (rs.selfModified) {
           state.recordEvent(root, {
@@ -503,8 +445,7 @@ export function registerOpsTools(
       }
       const slots = angleSlots({
         route: active.state.router.route,
-        entryRoute: active.state.entry_route,
-        escalated: !!active.state.escalated_at,
+        difficulty: active.state.difficulty,
       });
 
       // 前提: diag と diff_stash が同じ差分に対して済んでいること
@@ -1007,7 +948,7 @@ export function registerOpsTools(
               ? `メモとのズレ（state を正とする）: ${drift.map((d) => `${d.key} memo=${d.memo || "-"} live=${d.live}`).join(" / ")}`
               : "メモと state は一致（ズレなし）",
             "",
-            `次のアクション: ${a2 ? effectivePhaseAction(a2.state.phase, a2.state.entry_route, a2.state.difficulty) : "-"}`,
+            `次のアクション: ${a2 ? PHASE_ACTION[a2.state.phase] : "-"}`,
             "",
             "続行せよ。design は designing 終了後は不変（変更は .log.md に追記）。",
           ].join("\n"),
@@ -1201,7 +1142,7 @@ export function registerOpsTools(
       "別モデルでsubagent相当を実行する。opencode run をspawnし stdout を返す。入れ子禁止・prompt上限12000文字・timeout既定120s（advisor/oracleは240s）・上限300s。並列fan-out可。delayMsで起動ずらし可（429 herd回避）",
     input: S.obj(
       {
-        agent: S.str("graphhopper-* agent名（例: graphhopper-critic）"),
+        agent: S.str("graphhopper-* agent名（例: graphhopper-advisor）"),
         model: S.optStr("provider/model形式。省略時はconfig既定。configのmodel_allow/model_denyで拒否される場合がある"),
         prompt: S.str("lens指示＋渡し物全文（12000文字まで）"),
         timeoutMs: S.num("タイムアウトms（既定120000。advisor/oracle は 240000・上限300000）"),
@@ -1230,6 +1171,21 @@ export function registerOpsTools(
         undefined,
         { signal },
       );
+      const act = state.getActive(root);
+      if (act) {
+        try {
+          state.recordEvent(root, {
+            type: "invoke",
+            goal: act.goal.id,
+            agent: a.agent,
+            model: a.model ?? null,
+            timed_out: !!r.timedOut,
+            cancelled: !!r.cancelled,
+          });
+        } catch {
+          // 履歴の失敗で相談結果を失わない
+        }
+      }
       const flags = [
         r.timedOut ? "timedOut" : null,
         r.cancelled ? "cancelled" : null,

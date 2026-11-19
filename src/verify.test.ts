@@ -252,14 +252,13 @@ describe("凍結の新しい形（design g-mwmqmg6b 判断6）", () => {
     expect(rubricStatus(root, id).tampered).toBe(true);
   });
 
-  test("前の形（v 無し）は hash が合えば改ざんにならず legacy", () => {
+  test("前の形（v 無し）の凍結は読まれない（凍結なしと同じ）", () => {
     const root = tmpRoot();
     const id = goal(root);
     snapshotRubric(root, id);
     rewrite(root, id, (r) => delete r["v"]);
-    const st = rubricStatus(root, id);
-    expect(st.legacy).toBe(true);
-    expect(st.tampered).toBe(false);
+    expect(loadRubric(root, id)).toBeNull();
+    expect(rubricStatus(root, id).frozen).toBe(false);
   });
 
   test("角度の文面は凍結に入らず、prompt には現行の文面が出る", () => {

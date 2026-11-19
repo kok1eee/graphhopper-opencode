@@ -19,7 +19,7 @@ import type { DriftTarget, VerdictLevel, VerifierLens } from "./state";
 /** 採点基準（lens の固定部分＋出力契約）の凍結（design g-mwmnvx3x 判断1）。
  *
  * goal 開始時の文面で判定する。採点される差分が採点基準を書き換えられないようにする
- * （design.md の不変性と同じ理屈）。動的部分（phase・todo・path）は凍結しない。
+ * （決定記録の不変性と同じ理屈）。動的部分（phase・todo・path）は凍結しない。
  *
  * 限界: このファイルと state.json は goal 自身も書けるので tamper-evident であって
  * tamper-proof ではない。完全に防ぐには基準を repo 外に置く必要がある。 */
@@ -126,13 +126,13 @@ export function loadRubric(root: string, goalId: string): RubricSnapshot | null 
     if (!existsSync(path)) return null;
     const raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
     const r = raw as Partial<RubricSnapshot> | null;
-    if (!r || r.goal_id !== goalId) return null;
+    if (!r || r.goal_id !== goalId || r.v !== 2) return null;
     if (typeof r.hash !== "string" || typeof r.contract !== "string") return null;
     const st = r.static as Record<string, string[]> | undefined;
     if (!st || typeof st !== "object") return null;
     return {
       goal_id: goalId,
-      ...(r.v === 2 ? { v: 2 } : {}),
+      v: 2,
       frozen_at: String(r.frozen_at ?? ""),
       static: st,
       contract: r.contract,
@@ -150,8 +150,6 @@ export interface RubricStatus {
   frozen: boolean;
   /** 凍結ファイルが消えた・内容が hash と合わない */
   tampered: boolean;
-  /** 前の形（v 無し）の凍結。hash だけ確かめ、採点基準は現行を使う（次の goal で削除） */
-  legacy?: boolean;
   /** 固定部分が現行と違う（goal が基準を直した） */
   changed: boolean;
   /** 採点コードか verifier agent md が現行と違う */
@@ -180,17 +178,6 @@ export function rubricStatus(
   const contentHash = hashRubric(snap.static, snap.contract);
   const tampered =
     contentHash !== snap.hash || (!!expectedHash && expectedHash !== snap.hash);
-  if (snap.v !== 2) {
-    return {
-      frozen: true,
-      tampered,
-      legacy: true,
-      changed: false,
-      selfModified: false,
-      codeChanged: false,
-      agentChanged: false,
-    };
-  }
   const codeChanged = !tampered && snap.code_hash !== rubricCodeHash();
   const agentChanged =
     !tampered && snap.agent_hash !== null && snap.agent_hash !== rubricAgentHash();

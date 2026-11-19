@@ -13,88 +13,25 @@ import { dirname, isAbsolute, join } from "node:path";
 import { applySingleEdit, decodeUtf8Strict, sha1Hex, verifyHash } from "./hashedit";
 import { PONYTAIL_RULES } from "./ponytail-rules";
 import * as state from "./state";
-import { parseTaskLines, todoGateError, todoStoreError } from "./todos";
+import { checkDecisionRecord } from "./record";
+import { todoGateError, todoStoreError } from "./todos";
 
-/* designing の案内は 3 つに分ける（前半＋advisor節＋後半）。
- * advisor節だけを入口・難易度で差し替える（design g-mwj6481n 判断1・2）。
- * PHASE_ACTION.designing は「難易度未判定＝メインが決める」版と一致させる。 */
-const DESIGN_FRONT =
-  "goalを理解し、設計判断・実装タスク列を .graphhopper/plans/<goal-id>.md に書く。source編集はここではブロックされる。";
-
-/** advisor の呼び方（ASK / HARD で共通） */
-const ADVISOR_HOWTO =
-  "graphhopper_invoke(agent: 'graphhopper-advisor') に design と .graphhopper/plans/<goal-id>.intent.md（無ければ design だけ）の path を渡し、" +
-  "判断の第二意見を1回求める（要約せず会話を読ませる。反映後に呼び直さない。記録は graphhopper_consult_set で任意）。";
-
-const DESIGN_ADVISOR_ASK =
-  "書けたら advisor を呼ぶかを決める: 捨てた代替案の理由に自信がない判断が 1 つでもあれば " +
-  ADVISOR_HOWTO +
-  "無ければ省略し、.graphhopper/plans/<goal-id>.log.md に「advisor 省略: 検討した判断と根拠」を1行書く" +
-  "（oracle 入口では、oracle が扱わなかった判断について自信を問う）。";
-
-const DESIGN_ADVISOR_HARD = `difficulty=hard なので ${ADVISOR_HOWTO}`;
-
-const DESIGN_ADVISOR_EASY = "difficulty=easy なので advisor は省略する（graphhopper_consult_set の記録も不要）。";
-
-/** hard に上がった（または hard のまま）ことを示す先頭行。案内文と tools-core の
- * 完了報告で同じ文面を使う（design g-mwkfisl7 判断1。二重定義を避ける）。 */
-export function formatHardUpgradeHead(
-  changed: boolean,
-  from: state.Difficulty | null,
-): string {
-  return changed
-    ? `difficulty: ${from ?? "unknown"} → hard（タスク列の判定。cascade を昇格）`
-    : "difficulty=hard のまま（start の判定。再判定はしない）";
-}
-
-/** hard で advisor が未実施のときに、implementing 遷移で 1 回だけ促す文。
- * 難易度を引き上げた場合（changed）と、start から hard だった場合で先頭行だけ変える
- * （design g-mwkfisl7 判断1。文面はここに集約する）。 */
-export function formatAdvisorRequiredForHard(opts: {
-  changed: boolean;
-  from?: state.Difficulty | null;
-}): string {
-  const head = formatHardUpgradeHead(opts.changed, opts.from ?? null);
-  return [
-    head,
-    "advisor をまだ呼んでいない。実装に入る前に graphhopper_invoke(agent: 'graphhopper-advisor') を 1 回呼び、",
-    "指摘は .graphhopper/plans/<goal-id>.log.md に残す（design.md は designing を抜けたので書き換えない）。",
-  ].join("\n");
-}
-
-const DESIGN_BACK =
-  "次に graphhopper_invoke(agent: 'graphhopper-critic') で設計を1回敵対レビューし、指摘を design.md に反映してから " +
-  "graphhopper_phase(phase: 'implementing') へ（任意で graphhopper_critic_set に結果を記録できる。" +
-  "phase遷移の前提条件になるのは config が require_critic: true のプロジェクトだけ）。" +
-  "design.md はこのフェーズを抜けた後は不変になる（verifierのdrift検出アンカーのため）" +
-  "——決定の経緯・棄却した代替案・進捗はここで固めず、実装中は .graphhopper/plans/<goal-id>.log.md に追記すること";
-
-/** designing の案内を入口route・難易度から組み立てる。light/advised は advisor節を空にし、
- * 差分は effectivePhaseAction の注記だけで明示する（単一源泉則）。 */
-function designingAction(
-  entryRoute: state.EntryRoute | null,
-  difficulty: state.Difficulty | null,
-): string {
-  const advisor =
-    entryRoute === "light" || entryRoute === "advised"
-      ? ""
-      : difficulty === "easy"
-        ? DESIGN_ADVISOR_EASY
-        : difficulty === "hard"
-          ? DESIGN_ADVISOR_HARD
-          : DESIGN_ADVISOR_ASK;
-  return `${DESIGN_FRONT}${advisor}${DESIGN_BACK}`;
-}
+const DESIGNING_ACTION =
+  "ユーザーと合意を取る（grilling）。決める項目ごとに、推奨を添えた質問を本文に書き、答えを待つ（designing の間は自動継続が止まる）。" +
+  "答えが出そろったら .graphhopper/plans/<goal-id>.md を「決めたこと／やらないこと／完了の確かめ方」の3見出しで埋め、" +
+  "最終確認なしで graphhopper_phase(phase: 'implementing') へ進む。source編集はここではブロックされる。" +
+  "判断に自信がなければ graphhopper_invoke(agent: 'graphhopper-advisor') に会話の path を渡して第二意見を取ってよい（任意）。" +
+  "この文書は designing を抜けると不変になる（verifierのdrift検出アンカー）。経緯・進捗は .graphhopper/plans/<goal-id>.log.md に追記する。";
 
 /* フェーズごとの次のアクション指示文（tool 応答・注入文の単一源泉）。
  * plugin entry（index.ts）には置けない（loaderが非関数exportでload失敗するため）。
  * 内容を変えたら tool 応答と注入文の両方に反映される。 */
 export const PHASE_ACTION: Record<state.Phase, string> = {
-  designing: designingAction(null, null),
+  designing: DESIGNING_ACTION,
   implementing:
-    "design.md のタスクを実装する。進捗タスク（.graphhopper/todos/）は graphhopper_todo で完了・cancel を申告する（全タスクが completed か cancelled でないと polish へ進めない）。goal中のsource編集は graphhopper_edit（hash検証付き）を使え、素のedit/writeはフォールバック。まず graphhopper_set_eval(cmd) で合否を機械判定できるコマンド（テスト/lint/typecheck）を1度設定せよ。設定後はターン終了ごとに自動実行され、passならpolishへ自動遷移、failならfail_streakが機械カウントされ、escalateが返ったら graphhopper_invoke(agent: 'graphhopper-oracle') に相談する。eval_cmdが無い（機械判定できない）場合のみ graphhopper_attempt(ok, note) の自己申告にフォールバックする。外部公式doc裏付けが必要なら graphhopper_invoke(agent: 'graphhopper-librarian') を使える",
+    "決定記録の「決めたこと」を実装する。長い作業のときは graphhopper_todo(add) で残り作業を置ける（任意）。置いた分は polish の前に done か cancel で閉じる（未完了が残ると polish へ進めない）。goal中のsource編集は graphhopper_edit（hash検証付き）を使え、素のedit/writeはフォールバック。まず graphhopper_set_eval(cmd) で合否を機械判定できるコマンド（テスト/lint/typecheck）を1度設定せよ。設定後はターン終了ごとに自動実行され、passならpolishへ自動遷移、failならfail_streakが機械カウントされ、stuck通知が来たら graphhopper_invoke(agent: 'graphhopper-oracle') に相談する。eval_cmdが無い（機械判定できない）場合のみ graphhopper_attempt(ok, note) の自己申告にフォールバックする。外部公式doc裏付けが必要なら graphhopper_invoke(agent: 'graphhopper-librarian') を使える",
   polish:
-    "Code Mode のレシピを実行する: skills/graphhopper/refs/verifier.md の recipe: start → recipe: tail を上から順に execute に貼る（advisorは1バッチ、polishは start→simplify適用→tail の2バッチ）。simplify は route=polish のときだけ（router_check の simplify）。適用はメインが Read と edit で行い、critical は挙動不変・局所のみ自動、high は人間確認、medium/note は報告のみ。順序は diag → diff_stash → verify（graphhopper_verify が指紋3つを照合する）。第三者チェック（verifier）は省略不可、level/target の集約は verifier_set が機械で行う。escalated=true ならレシピは打ち切られ designing に戻る",
+    "Code Mode のレシピを実行する: skills/graphhopper/refs/verifier.md の recipe: start → recipe: tail を上から順に execute に貼る（advisorは1バッチ、polishは start→simplify適用→tail の2バッチ）。simplify は route=polish のときだけ（router_check の simplify）。適用はメインが Read と edit で行い、critical は挙動不変・局所のみ自動、high は人間確認、medium/note は報告のみ。順序は diag → diff_stash → verify（graphhopper_verify が指紋3つを照合する）。第三者チェック（verifier）は省略不可、level/target の集約は verifier_set が機械で行う",
   done: "完了済み。graphhopper_goal(action: 'complete') を確認",
 };
 
@@ -103,83 +40,20 @@ export const PHASE_ACTION: Record<state.Phase, string> = {
  * （design g-mwj6481n 判断4）。done は continuation 自体が発火しない（idle ハンドラが
  * phase==="done" で早期return）ため実質未使用だが、Record の型完全性のために残す。 */
 export const PHASE_ACTION_SHORT: Record<state.Phase, string> = {
-  designing: "設計ドキュメントを書き、レビュー後にimplementingへ（advisorは難易度次第）",
-  implementing: "design.mdのタスクを実装し、eval_cmdを設定。タスク完了はgraphhopper_todoで申告",
+  designing: "ユーザーに質問して合意を取り、決定記録を書いてimplementingへ",
+  implementing: "決定記録の「決めたこと」を実装し、eval_cmdを設定。足した進捗タスクの完了はgraphhopper_todoで申告",
   polish: "router_checkのrouteに従いsimplify/verifierを実行",
   done: "goalをcompleteする",
 };
 
-/* decide toolの5択criteriaは decision.ts DECISION_ROUTE_CRITERIA に一本化
+/* decide toolの2択criteriaは decision.ts DECISION_ROUTE_CRITERIA に一本化
  *（旧JEV_ROUTE_PROMPTの判定基準を移植）。gate.tsにはLLM用promptを残さない */
-
-/* jev出力の厳密parse。未知値・非JSON・空はfullに倒す（fail-safe＝重い側）。
- * 旧A/B/C（bare・JSON内）も受理しfull/light/directに写像する。
- * 未呼び出し（null）はstate側でnull＝fullとして扱う */
-export function parseEntryRoute(text: string | null | undefined): {
-  route: state.EntryRoute;
-  reason: string;
-} {
-  if (typeof text !== "string" || text.trim().length === 0) {
-    return { route: "full", reason: "未呼び出し→full" };
-  }
-  // bare入力（route_setのschemaが素の値を受け付けるため先に照合。旧A/B/C互換）
-  const normalized = state.normalizeEntryRoute(text);
-  if (normalized) {
-    return { route: normalized, reason: "判定（bare）" };
-  }
-  const m = text.match(/\{[^{}]*"route"\s*:\s*"([A-Za-z]+)"[^{}]*\}/);
-  const parsed = state.normalizeEntryRoute(m?.[1]);
-  if (parsed) {
-    return { route: parsed, reason: "判定" };
-  }
-  return { route: "full", reason: "parse失敗→full" };
-}
-
-/* route別phase指示（effective route）。light/advisedはcritic省略・verifier×1の注記を付与。
- * oracleは開始時相談の注記を付与。designing は difficulty で advisor 節が変わる（判断1・2）。
- * phase案内（instructions.entry）・tool応答の単一源泉 */
-export function effectivePhaseAction(
-  phase: state.Phase,
-  entryRoute: state.EntryRoute | null,
-  difficulty: state.Difficulty | null = null,
-): string {
-  const base =
-    phase === "designing" ? designingAction(entryRoute, difficulty) : PHASE_ACTION[phase];
-  if (entryRoute === "light" || entryRoute === "advised") {
-    const advisor =
-      entryRoute === "advised"
-        ? "implementing前にgraphhopper_invoke(agent: 'graphhopper-advisor')で相談1回し、graphhopper_consult_set(kind: 'advisor')で記録（機械ゲート）。"
-        : "";
-    // light は advisor も critic も省略。advised は advisor が機械ゲートなので critic だけ省略
-    const reviewers = entryRoute === "light" ? "advisor・critic省略、" : "critic省略、";
-    const note =
-      `（entry_route=${entryRoute}軽量: designingは内容規約（判断の理由・代替案・反証条件、§5 触らないもの、§2 の file:line 証拠、§4 のタスク紐付け）を満たすこと。${reviewers}` +
-      `verifierは選ぶ役が選んだ角度（枠は少なめ）。${advisor}` +
-      (entryRoute === "advised"
-        ? "advisor相談の記録（graphhopper_consult_set）だけは必須（機械ゲート）。criticは呼ばない。"
-        : "") +
-      "require_critic: true のプロジェクトだけは、criticを呼ばなかった理由を graphhopper_critic_set に記録する。" +
-      "詰まったらgraphhopper_escalateでfullへ昇格）";
-    // 単一源泉則: light/advised designing も designingAction を基にし、差分は例外条項で明示する
-    return `${base}${note}`;
-  }
-  if (entryRoute === "oracle") {
-    return (
-      `${base}（entry_route=oracle多角: 開始時にgraphhopper_invoke(agent: 'graphhopper-oracle')で` +
-      "相談1回し、graphhopper_consult_set(kind: 'oracle')で記録（機械ゲート）。" +
-      "その後の設計レビューは base のとおり（graphhopper-advisor を呼ぶかは難易度と上の基準で決め、" +
-      "oracle が扱わなかった判断について自信を問う。advisor・critic の記録は任意で、critic_set が必須になるのは require_critic: true のときだけ）。" +
-      "oracle に再度相談するときは graphhopper-oracle を invoke し、前回のやり取りを prompt に要約して渡す）"
-    );
-  }
-  return base;
-}
 
 /** 現在の goal の phase 案内（instructions.entry の値）。design g-mwj6481n 判断4。
  *
  * - 対象は「active・phase が done 以外・そのセッションに bind 済み」のときだけ。それ以外は null
  *   （呼び出し側は remove する）。
- * - 中身は goal の題と id・phase・effectivePhaseAction の全文。implementing では
+ * - 中身は goal の題と id・phase・PHASE_ACTION の全文。implementing では
  *   PONYTAIL_RULES を後ろに付ける。
  * - 同じ phase の間は値が変わらない（fail_streak・notes・タスク件数を入れない）。
  *   変わると毎回全文が再送される（判断4）。 */
@@ -193,14 +67,10 @@ export function phaseGuideText(active: state.ActiveLoop | null, sessionID: strin
     "",
     `goal: "${active.goal.title}" (${active.goal.id}) / phase: ${active.state.phase}（新しい案内が来たらこちらが正）`,
     "",
-    effectivePhaseAction(active.state.phase, active.state.entry_route, active.state.difficulty),
+    PHASE_ACTION[active.state.phase],
   ].join("\n");
   return active.state.phase === "implementing" ? `${head}\n\n${PONYTAIL_RULES}` : head;
 }
-
-/* 昇格後の次アクション定型文（pluginの昇格系3箇所の単一源泉） */
-export const ESCALATE_NEXT =
-  "次: design.mdを肉付けし、捨てた代替案の理由に自信が無い判断があるか（difficulty=hard か）を見て必要なら graphhopper_invoke(agent: 'graphhopper-advisor') で第二意見を取り、graphhopper_invoke(agent: 'graphhopper-critic')で1回レビューしてから implementing へ。verify は角度を選んで並列に走る（graphhopper_verify）。";
 
 /* stuck 時に oracle へ相談させる定型文（idle eval・attempt・stuck 検知の単一源泉）。
  * 相談は同期の graphhopper_invoke で行う（task() だと同じターンで助言を受け取れない）。 */
@@ -208,21 +78,6 @@ export const ORACLE_ASK =
   "graphhopper_invoke(agent: 'graphhopper-oracle') に相談せよ。これまでの失敗試行（何を試して何が起きたか）を prompt に渡すこと。";
 
 /* （旧buildJevPromptは削除。入口判定は decision.ts のdecideRouteに移管） */
-
-/* stuck発火時のlight/advised自動昇格（designの二本立てトリガーの片方。もう片方はrouter_check）。
- * entry light/advised＋未昇格のときのみescalateEntryRouteし結果を返す。full/昇格済み/direct/oracle/nullはnull */
-export function autoEscalateOnStuck(root: string): state.ActiveLoop | null {
-  const active = state.getActive(root);
-  if (
-    !active ||
-    (active.state.entry_route !== "light" &&
-      active.state.entry_route !== "advised") ||
-    active.state.escalated_at
-  ) {
-    return null;
-  }
-  return state.escalateEntryRoute(root);
-}
 
 /* design gate・信号A計数の対象tool（D2a/D2b）。before/after両hookで共有する
  * 単一の真実源。3名のいずれかが漏れると新tool経由でgate/stuck検知が
@@ -474,241 +329,12 @@ export function designDocLockedRefusal(
 export const EVAL_MANAGED_NOTE =
   "（note: eval_cmd設定中のためfail系はeval側でも計数される。evalかattemptのどちらかに寄せ、二重計上に注意せよ）";
 
-/* design doc構造検証（exit gate用）。骨格の有無だけ見て質は見ない。
- * 質の厳格化は「薄く書いて回避する」自己判断エロージョンを再生産するため。
- * 既存docの見出し実態に合わせた寛容マッチ。欠落キー一覧を返す（空=通過） */
-const REQUIRED_SECTIONS: { key: string; match: RegExp }[] = [
-  { key: "goal理解", match: /goal理解|^##\s*goal\b/i },
-  { key: "現状", match: /現状|背景/ },
-  { key: "設計判断", match: /設計判断|決定事項/ },
-  { key: "タスク列", match: /タスク/ },
-  { key: "スコープ外", match: /触らない|スコープ外|非対象|棄却/ },
-];
-
-const TASK_LINE = /^\s*-\s*(\[[ x]\])?\s*\S/m;
-
-export interface DesignTask {
-  text: string;
-  done: boolean;
-}
-
-export interface DesignProgress {
-  total: number;
-  done: number;
-  items: DesignTask[];
-}
-
-/* design.md のタスク列抽出（progress素材）。チェックボックス行のみ。
- * 素朴な行パースであり、ネスト・改行またぎは対象外。読取専用。
- * 行の解釈は src/todos.ts の parseTaskLines に集約（進捗ストアと同じ解釈を使う） */
-export function extractTasks(root: string, goalId: string): DesignProgress {
-  let raw: string;
-  try {
-    raw = decodeUtf8Strict(readFileSync(state.planPath(root, goalId)));
-  } catch {
-    return { total: 0, done: 0, items: [] };
-  }
-  const items = parseTaskLines(raw).map((t) => ({ text: t.text, done: t.done }));
-  return { total: items.length, done: items.filter((i) => i.done).length, items };
-}
-
-/** 骨格検査の本体（生テキストを受ける）。checkPhaseMove が1回だけ読んだ raw を共用するため分離 */
-function checkDesignDocFromRaw(raw: string): string[] {
-  const headers = raw
-    .split("\n")
-    .filter((l) => l.startsWith("##"))
-    .join("\n");
-  const missing = REQUIRED_SECTIONS.filter((s) => !s.match.test(headers)).map(
-    (s) => s.key,
-  );
-  if (!TASK_LINE.test(raw)) missing.push("タスク行（- ...）");
-  return missing;
-}
-
-/** 骨格検査（ファイルから読む薄いラッパ）。読めなければ「無い」を返す */
-export function checkDesignDoc(root: string, goalId: string): string[] {
-  const raw = readDesignRaw(root, goalId);
-  return raw === null ? ["design doc自体が無い"] : checkDesignDocFromRaw(raw);
-}
-
-/* ───────── design doc 規約（内容）─────────
- * 骨格（checkDesignDoc）とは別レイヤー。構造で判定できる規約だけを見る:
- * 判断の4点セット（理由/代替案/反証条件）、§5 触らないものの非空、
- * §2 の file:line 証拠2箇所、§4 タスクの判断番号紐付けと判断網羅。
- * 意味の判定（仕様書化していないか等）は critic の領分であり、ここでは見ない。 */
-
-/** 規約の単一源泉（テストもここを参照する） */
-export const DESIGN_RULES = {
-  /** 判断の4点セット（「決定」は項目自体なので語では見ない） */
-  reason: /理由|なぜ|棄却理由/,
-  alternative: /代替案|代替|他案/,
-  falsify: /反証条件|反証|崩れる条件|失敗条件/,
-  /** 免除マーカー: タスクを持たない判断（「今回入れない」等）に付ける */
-  exempt: /[（(]タスク不要[）)]/,
-  /** 免除マーカーの案内文（エラーメッセージ用） */
-  exemptLabel: "（タスク不要）",
-  /** §2 の証拠アンカー（file:line） */
-  evidence: /[A-Za-z0-9_./-]+\.(?:ts|tsx|js|jsx|mjs|cjs|md|json|toml|ya?ml|sh):\d+/g,
-  evidenceMin: 2,
-  /** 実質内容の最小文字数（プレースホルダ判定の閾値。3文字でラベルだけ/括弧だけを弾く） */
-  minContent: 3,
-  /** §5「触らないもの」の最小文字数（設計判断4: 8文字以上の実質行を要求） */
-  scopeMinContent: 8,
-} as const;
-
-const SECTION_HEADING = /^##\s+(.*)$/;
-const JUDGMENT_LINE = /^(\d+)\.\s+\S/;
-/** タスク行。先頭空白を許す（seed 側 src/todos.ts の parseTaskLines と揃える） */
-const TASK_ITEM_LINE = /^\s*-\s*\[[ x]\]\s+\S/;
-const TASK_REF = /判断\s*(\d+(?:\s*[,、]\s*\d+)*)/;
-const PLACEHOLDER = /^[（(].*[）)]$/;
-const TABLE_SEP = /^\|?[\s:|-]+$/;
-const TABLE_HEAD = /^\|\s*(対象|項目|内容|スコープ)/;
-
-/** 節の本文（見出しの次の行から、次の `##` まで）。無ければ null */
-function sectionBody(raw: string, match: RegExp): string[] | null {
-  // CRLF の doc でも見出しが一致するよう \r を落として分割する
-  const lines = raw.split(/\r?\n/);
-  const i = lines.findIndex((l) => {
-    const m = SECTION_HEADING.exec(l);
-    return m !== null && match.test(m[1]);
-  });
-  if (i === -1) return null;
-  const out: string[] = [];
-  for (const l of lines.slice(i + 1)) {
-    if (SECTION_HEADING.test(l)) break;
-    out.push(l);
-  }
-  return out;
-}
-
-/** 行から記号・ラベル・括弧内プレースホルダを除いた実質文字列。
- * ラベルは「行頭〜最初のコロン」を丸ごと落とす（代替案/理由/反証条件などの語自体を
- * 内容と誤認しないため。ラベルだけの行は 0 文字になる） */
-function substantive(line: string): string {
-  let s = line.trim();
-  s = s.replace(/^[-*]\s+/, "").replace(/^\d+\.\s+/, "");
-  s = s.replace(/^[*_`#\s]+/, "");
-  s = s.replace(/^[^:：]{1,16}[:：]\s*/, "");
-  s = s.replace(/[*_`]/g, "");
-  s = s.replace(/[（(][^）)]*[）)]/g, "");
-  return s.replace(/\s/g, "");
-}
-
-/** 語が「実質行」として現れるか（プレースホルダだけの行は数えない） */
-function hasSubstantive(lines: string[], label: RegExp): boolean {
-  return lines.some(
-    (l) => label.test(l) && substantive(l).length >= DESIGN_RULES.minContent,
-  );
-}
-
-/** §5 触らないものが実質空か（プレースホルダ・表ヘッダ・区切りだけ） */
-function isEmptyScope(lines: string[]): boolean {
-  return !lines.some((l) => {
-    const t = l.trim();
-    if (!t) return false;
-    if (TABLE_SEP.test(t) || TABLE_HEAD.test(t)) return false;
-    // ここでラベル（行頭〜最初のコロン）を落とさない: §5 は「型定義: 変更なし」のように
-    // ラベル自体が情報であり、落とすと正当な行が 8 文字未満になって誤って空判定になる
-    const body = t.replace(/^[-*]\s+/, "");
-    if (PLACEHOLDER.test(body)) return false;
-    return body.replace(/\s/g, "").length >= DESIGN_RULES.scopeMinContent;
-  });
-}
-
-/** 判断ブロック（番号付き項目の行から、次の項目の手前まで） */
-function judgmentBlocks(lines: string[]): { num: number; lines: string[] }[] {
-  const out: { num: number; lines: string[] }[] = [];
-  lines.forEach((l, i) => {
-    const m = JUDGMENT_LINE.exec(l);
-    if (!m) return;
-    const block = [l];
-    for (const n of lines.slice(i + 1)) {
-      if (JUDGMENT_LINE.test(n)) break;
-      block.push(n);
-    }
-    out.push({ num: Number(m[1]), lines: block });
-  });
-  return out;
-}
-
-/** design doc の生テキスト（読めなければ null） */
 function readDesignRaw(root: string, goalId: string): string | null {
   try {
     return decodeUtf8Strict(readFileSync(state.planPath(root, goalId)));
   } catch {
     return null;
   }
-}
-
-/** design doc の規約検査。空配列なら適合。違反は「何をどこに足すか」を返す */
-export function checkDesignContent(raw: string): string[] {
-  const problems: string[] = [];
-
-  // §3: 判断の4点セット（決定＝項目自体、理由・代替案・反証条件を語で見る）
-  const judges = judgmentBlocks(sectionBody(raw, /設計判断|決定事項/) ?? []);
-  if (judges.length === 0) {
-    problems.push("§3 設計判断に番号付きの判断が無い（1. **決定**: … の形で書く）");
-  }
-  for (const j of judges) {
-    if (!hasSubstantive(j.lines, DESIGN_RULES.reason)) {
-      problems.push(`設計判断${j.num} に「理由」が無い（§3 に「理由: …」を足す）`);
-    }
-    if (!hasSubstantive(j.lines, DESIGN_RULES.alternative)) {
-      problems.push(`設計判断${j.num} に「代替案」が無い（§3 に「代替案: …」を足す）`);
-    }
-    if (!hasSubstantive(j.lines, DESIGN_RULES.falsify)) {
-      problems.push(`設計判断${j.num} に「反証条件」が無い（§3 に「反証条件: …」を足す）`);
-    }
-  }
-
-  // §2: file:line の証拠（出現回数で数える）
-  const current = sectionBody(raw, /現状|背景/);
-  // プレースホルダ（例示）行は証拠に数えない。テンプレの `src/foo.ts:123` が
-  // そのまま 1 件として数えられると、実質 1 箇所でも通ってしまう
-  const evidenceLines = (current ?? []).filter(
-    (l) => !PLACEHOLDER.test(l.trim().replace(/^[-*]\s+/, "")),
-  );
-  const evidenceCount = (evidenceLines.join("\n").match(DESIGN_RULES.evidence) ?? []).length;
-  if (evidenceCount < DESIGN_RULES.evidenceMin) {
-    problems.push(
-      `§2 現状に file:line の証拠が${DESIGN_RULES.evidenceMin}箇所未満（現在${evidenceCount}）。` +
-        "`src/foo.ts:123` の形で根拠を付ける",
-    );
-  }
-
-  // §4: タスク行の判断番号紐付け（走査は §4 内のみ。§3 の箇条書きをタスクと誤認しない）
-  const tasks = sectionBody(raw, /タスク/) ?? [];
-  const refs = new Set<number>();
-  for (const l of tasks) {
-    if (!TASK_ITEM_LINE.test(l)) continue;
-    const m = TASK_REF.exec(l);
-    if (!m) {
-      problems.push(
-        `タスク行に判断番号が無い（§4 の「${l.trim().slice(0, 20)}…」に「（判断N）」を足す）`,
-      );
-      continue;
-    }
-    for (const n of m[1].split(/[,、]/)) refs.add(Number(n.trim()));
-  }
-
-  // §4: 判断の網羅（免除マーカー付きの判断は除く）
-  for (const j of judges) {
-    if (j.lines.some((l) => DESIGN_RULES.exempt.test(l))) continue;
-    if (!refs.has(j.num)) {
-      problems.push(
-        `設計判断${j.num} に対応するタスクが無い（§4 に「（判断${j.num}）」を付けたタスクを足すか、判断に「${DESIGN_RULES.exemptLabel}」を付ける）`,
-      );
-    }
-  }
-
-  // §5: 触らないものの非空
-  const scope = sectionBody(raw, /触らない|スコープ外|非対象|棄却/);
-  if (scope === null || isEmptyScope(scope)) {
-    problems.push("§5 触らないもの（スコープ外）が空（この goal で変えないものを具体的に書く）");
-  }
-
-  return problems;
 }
 
 /* phase遷移前の機械チェック（hook と tool の両 caller で共有）。
@@ -726,91 +352,13 @@ export function checkPhaseMove(
       `doneへは graphhopper_goal(complete) のみ（verifier cleanガード付き）。`
     );
   }
-  if (
-    to === "implementing" &&
-    active.state.phase === "designing" &&
-    state.readConfig(root).require_critic &&
-    !active.state.critic_review
-  ) {
-    return (
-      "error: require_critic=true のため designing→implementing には critic_review 記録が必要。" +
-      "graphhopper_critic_set で記録してから遷移せよ（opt-in運用なら config で require_critic=false）。"
-    );
-  }
-  // light/advisedのdesigning巻き戻しはescalate経路に限定（escalated_at無しの素の巻き戻しだと
-  // ratchet（critic1回＋fan-out×3前提）が成立しない。full/oracleの巻き戻しは許可）
-  if (
-    to === "designing" &&
-    (active.state.phase === "implementing" || active.state.phase === "polish") &&
-    (active.state.entry_route === "light" ||
-      active.state.entry_route === "advised") &&
-    !active.state.escalated_at
-  ) {
-    return (
-      "error: entry_route=light/advised の designing巻き戻しは graphhopper_escalate を使え" +
-      "（素の phase 遷移では escalated_at が立たず昇格条件が成立しない）。"
-    );
-  }
-  // 昇格後はcritic1回が必須（escalateの実効条件。proseだけだと素通りするため機械化。
-  // legacy（escalated_at null）・fullには影響なし）
-  if (
-    to === "implementing" &&
-    active.state.phase === "designing" &&
-    active.state.escalated_at &&
-    !active.state.critic_review
-  ) {
-    return (
-      "error: light/advised→full昇格後は designing→implementing に critic_review 記録が必要。" +
-      "graphhopper_invoke(agent: 'graphhopper-critic')で肉付けdesignを1回レビューし、graphhopper_critic_set で記録してから遷移せよ。"
-    );
-  }
-  // entry相談ゲート（D/E実効化。proseだけだと素通りするため機械化。
-  // 昇格済みはfull扱い＝critic gateのみ。legacy（entry_route null）・full/lightには影響なし）
-  if (
-    to === "implementing" &&
-    active.state.phase === "designing" &&
-    !active.state.escalated_at &&
-    active.state.entry_route === "advised" &&
-    !active.state.advisor_consult
-  ) {
-    return (
-      "error: entry_route=advised の designing→implementing には advisor相談の記録が必要。" +
-      "graphhopper_invoke(agent: 'graphhopper-advisor')で相談1回し、graphhopper_consult_set(kind: 'advisor')で記録してから遷移せよ。"
-    );
-  }
-  if (
-    to === "implementing" &&
-    active.state.phase === "designing" &&
-    !active.state.escalated_at &&
-    active.state.entry_route === "oracle" &&
-    !active.state.oracle_consult
-  ) {
-    return (
-      "error: entry_route=oracle の designing→implementing には oracle相談の記録が必要。" +
-      "graphhopper_invoke(agent: 'graphhopper-oracle')で相談1回し、graphhopper_consult_set(kind: 'oracle')で記録してから遷移せよ。"
-    );
-  }
-  // scaffoldが自動生成するため、骨格不足で失敗するのは骨格を削った場合のみ。
-  // route による内容規約の特別扱いはしない（light/advised も同じ規約。規模差は判断の数で吸収する）
   if (to === "implementing" && active.state.phase === "designing") {
-    // design.md は1回だけ読む（骨格と内容で同じ raw を使う。途中で変わると判定が割れる）
-    const designRaw = readDesignRaw(root, active.goal.id);
-    const missing =
-      designRaw === null ? ["design doc自体が無い"] : checkDesignDocFromRaw(designRaw);
-    if (missing.length > 0) {
+    const problems = checkDecisionRecord(readDesignRaw(root, active.goal.id));
+    if (problems.length > 0) {
       return (
-        `error: design.md の骨格不足（${missing.join("・")}）。` +
-        `scaffold（.graphhopper/plans/${active.goal.id}.md）を埋めてから遷移せよ。` +
-        `質の指摘はcriticの領分であり、このゲートは骨格の有無だけを見る。`
-      );
-    }
-    // 内容規約（全 route）。構造で判定できる規約だけを見る。
-    const violations = checkDesignContent(designRaw ?? "");
-    if (violations.length > 0) {
-      return (
-        `error: design.md が規約に違反（${violations.length}件）。\n- ` +
-        violations.join("\n- ") +
-        "\n修正してから implementing へ遷移せよ（意味の指摘は critic の領分で、このゲートは構造規約だけを見る）。"
+        `error: 決定記録（.graphhopper/plans/${active.goal.id}.md）が検査を通らない。\n- ` +
+        problems.join("\n- ") +
+        "\n3つの見出しを埋めてから implementing へ遷移せよ（検査は見出しと空でないことだけ）。"
       );
     }
   }
@@ -828,19 +376,7 @@ export function checkPhaseMove(
       });
       return `error: ${storeErr}`;
     }
-    // ストアが空なら移行救済として design.md から seed する（design 判断2）
-    const store =
-      loaded.store.items.length === 0
-        ? state.ensureTodos(root, active.goal.id, { warn: true })
-        : loaded.store;
-    // design.md が「あるが読めない」場合は進捗が不明なので fail-closed
-    if (store.items.length === 0 && state.planReadState(root, active.goal.id) === "unreadable") {
-      return (
-        "error: design.md を読み込めません（不正なエンコーディングの可能性）。" +
-        "進捗を機械的に強制できないため polish への遷移を拒否します（fail-closed）"
-      );
-    }
-    const err = todoGateError(store);
+    const err = todoGateError(loaded.store);
     if (err) return `error: ${err}`;
   }
   return null;
@@ -923,7 +459,7 @@ export function goalResumeContext(
   return [
     `- goal: "${goal.title}" (${goal.id}) [${goal.status}]`,
     `- phase: ${s.phase}`,
-    `- 次のアクション: ${effectivePhaseAction(s.phase, s.entry_route, s.difficulty)}`,
+    `- 次のアクション: ${PHASE_ACTION[s.phase]}`,
     s.notes ? `- notes: ${s.notes}` : null,
     s.eval_cmd ? `- eval_cmd: ${s.eval_cmd}` : null,
     progress ? `- ${progress}` : null,
@@ -932,7 +468,7 @@ export function goalResumeContext(
     s.last_verifier ? `- last_verifier: ${s.last_verifier.level} (${s.last_verifier.reason})` : null,
     `- design doc: .graphhopper/plans/${goal.id}.md（designing終了後は不変）`,
     s.intent_path
-      ? `- intent log: ${s.intent_path}（goal開始時の会話。critic/agreement 角度用）`
+      ? `- intent log: ${s.intent_path}（goal開始時の会話と designing 中の質問と答え。agreement 角度と advisor 用）`
       : null,
     state.planLogExists(root, goal.id)
       ? `- log: .graphhopper/plans/${goal.id}.log.md（決定の経緯・棄却した代替案）`

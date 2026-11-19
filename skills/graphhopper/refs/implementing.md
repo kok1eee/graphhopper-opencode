@@ -46,15 +46,15 @@
   - `failed` が返ったら applied の範囲だけ効いている。原因（hash 不一致＝別の変更が入った／
     oldString が複数一致）を直して残りを再実行する
   - `reason` が `no active goal` のときは、goal 外の作業なのでそのファイルだけ素の edit に落としてよい
-- **進捗タスクの完了申告（`graphhopper_todo`）**: design.md の「実装タスク列」セクションが
-  designing→implementing 遷移時に todo ストア（`.graphhopper/todos/<goalId>.json`）へ seed される。
+- **進捗タスクの完了申告（`graphhopper_todo`）**: 進捗タスクは任意の道具。使うなら
+  `action: "add"` で自分で足す（決定記録からは作られない。保存先は `.graphhopper/todos/<goalId>.json`）。
   タスクを1つ終えるたびに `graphhopper_todo(action: "done", id: "tN")` で申告する。
   進行中は `action: "start"`、やらないと判断したものは `action: "cancel"` ＋`reason` 必須、
-  実装中に増えたものは `action: "add"`、一覧は `action: "list"`。
-  **未完了タスク（pending / in_progress）が1件でも残ると polish へ遷移できない**
+  一覧は `action: "list"`。
+  **足したタスクに未完了（pending / in_progress）が1件でも残ると polish へ遷移できない**
   （eval_cmd が pass しても同じ。ゲート拒否メッセージに残りタスクが列挙される）。
-  したがって「全タスク実施したら router_check を呼ぶ」の**前に**、
-  全タスクを completed か cancelled にしておくこと
+  タスクを足したなら、polish へ進む**前に**全部を completed か cancelled にしておくこと
+  （1 件も足していなければ、この手順は要らない）
 - **実装試行のたびに `graphhopper_attempt(ok, note)` を呼ぶ**（成否をコード側で機械カウントする）。
   ただし **eval_cmd設定中はattemptを呼ばない**（idle evalが自動記録するため二重計数になる。
   手動の進捗メモが必要ならnoteに残す）。eval未設定時のみ自己申告フォールバックとして使う

@@ -1,22 +1,17 @@
 /**
- * graphhopper v2 plugin: core loop tools (goal/status/phase/route/decide/
- * route_set/escalate/set_eval/attempt)。
+ * graphhopper v2 plugin: core loop tools (goal/status/phase/decide/
+ * set_eval/attempt)。
  * v1 src/index.ts の同名 tool execute 本体を v2 形 (JSON Schema＋{content}) に移植。
  */
 import { $ } from "bun";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import {
-  autoEscalateOnStuck,
   checkPhaseMove,
-  effectivePhaseAction,
-  ESCALATE_NEXT,
+  PHASE_ACTION,
   EVAL_MANAGED_NOTE,
-  formatAdvisorRequiredForHard,
-  formatHardUpgradeHead,
   formatUsabilityLine,
   ORACLE_ASK,
-  parseEntryRoute,
   policyDocsChanged,
   usabilityGateRefusal,
 } from "../../../src/gate";
@@ -29,50 +24,41 @@ import {
 } from "../../../src/decision";
 import { finishCascade, maybeRequestCheckpoint, syncCascade } from "./cascade";
 import { judgeGoalDifficulty } from "../../../src/entry-decide";
-import { formatIntentLine, renderIntent } from "../../../src/intent";
+import { appendDesigningTurns, formatIntentLine, renderIntent } from "../../../src/intent";
 import { catalogPolicyWarning } from "../../../src/bake";
 import * as state from "../../../src/state";
 import { clearWaitTimer, noteSession, S, text, type Gh } from "./shared";
 import { checkBuiltinGoal } from "../../../src/goal-conflict";
-import { parseSeedTasks } from "../../../src/todos";
-import { rubricAgentHash, rubricCodeHash, rubricStatus, snapshotRubric } from "../../../src/verify";
+import { recordSection } from "../../../src/record";
+import { rubricStatus, snapshotRubric } from "../../../src/verify";
 
 type Ctx = { sessionID: string };
 
+const DIFFICULTY_RANK: Record<state.Difficulty, number> = { easy: 0, normal: 1, hard: 2 };
+
 /**
- * implementing 遷移の難易度再判定（design g-mwjsd3om 判断6）。
- * design のタスク列を入力に hard だけを判定し、hard なら state を上げる（降格しない）。
- * design.md は designing を抜けると不変なので、結果は応答と log に残す。
- * 上限 2 秒。判定できない・hard でないなら何もしない（null を返す）。
- *
- * start から hard だった goal は再判定をスキップするが、advisor 未実施なら案内は返す
- * （判断6が塞ぎたかった穴の残り。design g-mwkfisl7 判断1）。
+ * implementing 遷移の難易度の判定し直し（design g-mwmykjt4 判断6）。
+ * 題と決定記録の「決めたこと」を入力に判定し、上がる方向だけ反映する
+ * （easy→normal、easy・normal・判定なし→hard。下げない。判定なしは normal 扱いなので normal へは動かさない）。
+ * 上限 2 秒。判定できない・上がらないなら何もしない（null を返す）。
  */
 async function upgradeDifficultyFromDesign(
   gh: Gh,
   active: state.ActiveLoop,
 ): Promise<string | null> {
   const root = gh.root;
-  const wasHard = active.state.difficulty === "hard";
-  if (wasHard) {
-    /* 再判定はしない（hard より上は無い）。第二意見だけ未実施なら促す */
-    return active.state.advisor_consult
-      ? null
-      : formatAdvisorRequiredForHard({ changed: false });
-  }
-  let tasks: { text: string }[] = [];
+  const from = active.state.difficulty;
+  if (from === "hard") return null;
+  let decided: string[] = [];
   try {
-    tasks = parseSeedTasks(readFileSync(state.planPath(root, active.goal.id), "utf8"));
+    decided = (recordSection(readFileSync(state.planPath(root, active.goal.id), "utf8"), "決めたこと") ?? [])
+      .map((l) => l.trim())
+      .filter(Boolean);
   } catch {
-    return null; // design が無い・読めない goal は対象外
+    return null;
   }
-  if (tasks.length === 0) return null;
-  const input = [
-    active.goal.title,
-    "",
-    `実装タスク（${tasks.length}件）:`,
-    ...tasks.map((t) => `- ${t.text.slice(0, 160)}`),
-  ]
+  if (decided.length === 0) return null;
+  const input = [active.goal.title, "", "決めたこと:", ...decided.map((l) => l.slice(0, 200))]
     .join("\n")
     .slice(0, 3000);
   let r: Awaited<ReturnType<typeof decideDifficulty>>;
@@ -82,29 +68,25 @@ async function upgradeDifficultyFromDesign(
       sessionID: active.state.session_id ?? null,
       source: "implementing",
       timeoutMs: 2_000,
-      // 昇格はモデル切替を伴うので、start の 0.6 より精度を優先する
       floors: { ...DIFFICULTY_CONFIDENCE_FLOOR, hard: 0.7 },
     });
   } catch {
-    // 判定の失敗で遷移を止めない。この後の state 書き込みと案内は try の外に置く
     return null;
   }
-  if (r.difficulty !== "hard") return null;
-  /* ここから先は判定結果に対する副作用。catch に巻き込むと、difficulty は hard に
-   * 保存済みなのに advisor の案内が消える（判断6が塞ぎたかった穴） */
-  state.setDifficulty(root, "hard");
+  const to = r.difficulty;
+  if (!to) return null;
+  /* 判定なし（null）は normal と同じ扱い。normal へ書き換えても何も変わらないので hard だけ反映する */
+  if (DIFFICULTY_RANK[to] <= (from ? DIFFICULTY_RANK[from] : DIFFICULTY_RANK.normal)) return null;
+  state.setDifficulty(root, to);
   state.recordEvent(root, {
     type: "difficulty_upgraded",
     goal: active.goal.id,
-    from: active.state.difficulty,
-    to: "hard",
+    from,
+    to,
     confidence: r.confidence,
-    source: "design-tasks",
+    source: "decided",
   });
-  if (active.state.advisor_consult) {
-    return formatHardUpgradeHead(true, active.state.difficulty);
-  }
-  return formatAdvisorRequiredForHard({ changed: true, from: active.state.difficulty });
+  return `difficulty: ${from ?? "unknown"} → ${to}（決めたことの判定${to === "hard" ? "。cascade を昇格" : ""}）`;
 }
 
 function sess(gh: Gh, context: Ctx): string {
@@ -181,14 +163,9 @@ export function registerCoreTools(
               `error: goal "${active.goal.title}" is already active. complete or pause it first.`,
             );
           }
-          /* 難易度は題から判定する（design g-mwjsd3om 判断4）。pending（route_set でメインが
-           * 明示した値）があればそれを優先し、判定は走らせない。d1 を使えない環境では
-           * judgeGoalDifficulty が待たずに null を返す。上限 1.0 秒。 */
-          const pendingDifficulty = state.readPendingRoute(root)?.difficulty ?? null;
-          const judged =
-            pendingDifficulty === null
-              ? await judgeGoalDifficulty(root, sessionID || null, args.title)
-              : null;
+          /* 難易度は題から判定する。d1 を使えない環境では judgeGoalDifficulty が
+           * 待たずに null を返す。上限 1.0 秒。 */
+          const judged = await judgeGoalDifficulty(root, sessionID || null, args.title);
           const a = state.startGoal(root, args.title, sessionID, {
             strong: args.strong === true,
             difficulty: judged,
@@ -262,10 +239,6 @@ export function registerCoreTools(
             cascadeBase && cfg.cascade.enabled
               ? `${cascadeBase}（注: 判定nodeは cascade.agents.quality の子セッションだけ昇格モデルに切替）`
               : cascadeBase;
-          const consumed =
-            started.state.entry_route !== null && started.state.entry_route !== undefined
-              ? `pending entry_route=${started.state.entry_route} を消費`
-              : "pending無し→full（未判定・legacy）扱い";
           const strongNote = args.strong
             ? cfg.cascade.enabled
               ? "strong: on（goal の間は cascade.strong→expert→escalate）"
@@ -282,7 +255,7 @@ export function registerCoreTools(
               }`
             : "baseline: 取得できず（差分ゲートは fail-open・未 commit があると実効 diff が漏れうる）";
           return text(
-            `goal started: "${started.goal.title}" (${started.goal.id})\n${consumed}${started.state.difficulty ? ` / difficulty=${started.state.difficulty}` : ""}\nphase: designing${cascadeNote ? `\n${cascadeNote}` : ""}${strongNote ? `\n${strongNote}` : ""}${intentNote ? `\n${intentNote}` : ""}\n${baselineNote}${rubricNote ? `\n${rubricNote}` : ""}\n次: ${effectivePhaseAction("designing", started.state.entry_route, started.state.difficulty)}`,
+            `goal started: "${started.goal.title}" (${started.goal.id})\n${started.state.difficulty ? `difficulty=${started.state.difficulty}\n` : ""}phase: designing${cascadeNote ? `\n${cascadeNote}` : ""}${strongNote ? `\n${strongNote}` : ""}${intentNote ? `\n${intentNote}` : ""}\n${baselineNote}${rubricNote ? `\n${rubricNote}` : ""}\n次: ${PHASE_ACTION["designing"]}`,
           );
         }
         case "pause": {
@@ -314,7 +287,7 @@ export function registerCoreTools(
             : null;
           return text(
             a
-              ? `resumed: "${a.goal.title}" | phase: ${a.state.phase}${args.force ? " (forced)" : ""}${cascadeNote ? `\n${cascadeNote}` : ""}${policyNote ? `\n${policyNote}` : ""}\n次: ${effectivePhaseAction(a.state.phase, a.state.entry_route, a.state.difficulty)}`
+              ? `resumed: "${a.goal.title}" | phase: ${a.state.phase}${args.force ? " (forced)" : ""}${cascadeNote ? `\n${cascadeNote}` : ""}${policyNote ? `\n${policyNote}` : ""}\n次: ${PHASE_ACTION[a.state.phase]}`
               : "no active goal",
           );
         }
@@ -457,7 +430,7 @@ export function registerCoreTools(
 
   editor.add({
     name: "graphhopper_status",
-    description: "graphhopper の現在状態（goal・フェーズ・router・verifier・critic_review）を表示する",
+    description: "graphhopper の現在状態（goal・フェーズ・router・verifier）を表示する",
     input: S.obj({}, []),
     execute: async () => {
       const a = state.getActive(root);
@@ -477,7 +450,6 @@ export function registerCoreTools(
           `goal: "${a.goal.title}" (${a.goal.id}) [${a.goal.status}]`,
           `phase: ${a.state.phase}`,
           `session: ${a.state.session_id ?? "unbound"}`,
-          `entry_route: ${a.state.entry_route ?? "full（未判定・legacy）"}${a.state.escalated_at ? `（${a.state.escalated_at}にlight/advised→full昇格）` : ""}`,
           ...(a.state.strong_mode ? ["strong: on（cascade.strong→expert→escalate）"] : []),
           a.state.router.route
             ? `router: route=${a.state.router.route} diff_lines=${a.state.router.diff_lines} checked_at=${a.state.router.checked_at}${a.state.router.deep ? ` deep (${a.state.router.deep_reason})` : ""}`
@@ -498,15 +470,6 @@ export function registerCoreTools(
           `gates: ${Object.entries(a.state.gate_modes ?? state.readGateModes(root).modes)
             .map(([k, v2]) => `${k}=${v2}`)
             .join(" ")}${a.state.gate_modes ? "（開始時に凍結）" : "（未凍結・config の現在値）"}`,
-          a.state.critic_review
-            ? `critic_review: level=${a.state.critic_review.level} reason=${a.state.critic_review.reason}`
-            : "critic_review: (none, opt-in)",
-          a.state.advisor_consult
-            ? `advisor_consult: ${a.state.advisor_consult.summary.slice(0, 100)}`
-            : "advisor_consult: (none)",
-          a.state.oracle_consult
-            ? `oracle_consult: ${a.state.oracle_consult.summary.slice(0, 100)}`
-            : "oracle_consult: (none)",
           `fail_streak: ${a.state.fail_streak}`,
           state.todoSummaryLine(root, a.goal.id),
           a.state.cascade
@@ -548,16 +511,34 @@ export function registerCoreTools(
       if (!mv.ok) return text(`error: ${mv.error ?? "遷移に失敗"}`);
       let a = mv.active;
       if (!a) return text("error: no active goal or invalid phase");
-      /* designing → implementing のときだけ、design のタスク列から hard を再判定する。
+      /* designing → implementing のときだけ、題と決定記録の「決めたこと」から難易度を判定し直す（上がる方向だけ）。
        * difficulty を上げてから syncCascade を呼ぶ（escalate_on: ["hard"] を効かせる） */
-      const upgrade =
-        before?.state.phase === "designing" && a.state.phase === "implementing"
-          ? await upgradeDifficultyFromDesign(gh, a)
-          : null;
+      const entering = before?.state.phase === "designing" && a.state.phase === "implementing";
+      const upgrade = entering ? await upgradeDifficultyFromDesign(gh, a) : null;
       if (upgrade) a = state.getActive(root) ?? a;
+      if (entering && a.state.intent_path) {
+        try {
+          const sid = a.state.session_id;
+          if (sid && existsSync(a.state.intent_path)) {
+            const msgs = (await gh.ctx.session.context({ sessionID: sid })) as unknown as Parameters<
+              typeof appendDesigningTurns
+            >[1];
+            const next = appendDesigningTurns(readFileSync(a.state.intent_path, "utf8"), msgs ?? [], {
+              since: Date.parse(a.goal.created_at),
+            });
+            if (next) {
+              const tmp = `${a.state.intent_path}.tmp`;
+              writeFileSync(tmp, next, "utf8");
+              renameSync(tmp, a.state.intent_path);
+            }
+          }
+        } catch (err) {
+          console.warn(`graphhopper: designing 中の会話の追記に失敗: ${String(err)}`);
+        }
+      }
       const cascadeNote = await syncCascade(gh);
       return text(
-        `phase -> ${a.state.phase}${upgrade ? `\n${upgrade}` : ""}${cascadeNote ? `\n${cascadeNote}` : ""}\n次: ${effectivePhaseAction(a.state.phase, a.state.entry_route, a.state.difficulty)}`,
+        `phase -> ${a.state.phase}${upgrade ? `\n${upgrade}` : ""}${cascadeNote ? `\n${cascadeNote}` : ""}\n次: ${PHASE_ACTION[a.state.phase]}`,
       );
     },
   });
@@ -565,7 +546,7 @@ export function registerCoreTools(
   editor.add({
     name: "graphhopper_todo",
     description:
-      "進捗タスクの操作。list=一覧 / start=進行中 / done=完了 / cancel=やらない（reason必須） / add=追加 / reopen=cancelの誤操作から復帰。implementing→polish の遷移は未完了タスクが残ると拒否される",
+      "進捗タスクの操作（任意の道具。タスクは add で自分で足す。決定記録からは作られない）。list=一覧 / start=進行中 / done=完了 / cancel=やらない（reason必須） / add=追加 / reopen=cancelの誤操作から復帰。implementing→polish の遷移は未完了タスクが残ると拒否される",
     input: S.obj(
       {
         action: S.enumOf(["list", "start", "done", "cancel", "add", "reopen"]),
@@ -590,27 +571,6 @@ export function registerCoreTools(
   });
 
   editor.add({
-    name: "graphhopper_route",
-    description: "入口トリアージの入口（判定は通常hookが自動で走らせる。これは手動再判定用）。やる内容を渡すと graphhopper_decide の呼び出し手順を返す（判定本体はdecide tool。LLM agentは使わない）",
-    input: S.obj({ request: S.str("これからやる内容のテキスト（decideの判定入力）") }, ["request"]),
-    execute: async (input: unknown) => {
-      const args = input as { request: string };
-      return text(
-        [
-          "## 入口トリアージ手順（手動再判定）",
-          "0. 通常の入口判定はhookが自動実行済み。下の判定は手動での再判定。",
-          "1. graphhopper_decide(request) を呼ぶ（d1 decision-modelがroute＋confidenceを返す。stateは書かない）:",
-          "",
-          args.request,
-          "",
-          "2. 返却routeを graphhopper_route_set(route, reason) で記録する。",
-          "3. full/light/advised/oracleなら graphhopper_goal(start)（pending routeが消費される）。directならloopなしで直接対応する。",
-        ].join("\n"),
-      );
-    },
-  });
-
-  editor.add({
     name: "graphhopper_decide",
     description: "d1 decision-modelで入口routeを判定する（jev置換。通常の入口判定はhookが自動実行する。これは手動用）。requestを渡すとroute＋confidenceを返す。stateは書かない",
     input: S.obj({ request: S.str("これからやる内容のテキスト") }, ["request"]),
@@ -628,66 +588,6 @@ export function registerCoreTools(
           formatDecisionNextStep(r),
         ].join("\n"),
       );
-    },
-  });
-
-  editor.add({
-    name: "graphhopper_route_set",
-    description:
-      "decide判定の記録。不正・空はfullに倒す（fail-safe）。full/light/advised/oracleは次回goal start時に消費されるpendingに置く。directはhistoryに1行残すのみ（goalを作らない）",
-    input: S.obj(
-      {
-        route: S.str("decide返却のroute（full/light/direct/advised/oracle。旧A/B/Cも受理。大文字小文字不問。不正値はfullに倒す）"),
-        reason: S.optStr("判定理由の要旨（任意）"),
-        difficulty: S.enumOf(["easy", "normal", "hard"], "decide返却のdifficulty（任意。goal start時にカスケード判定へ渡る）"),
-      },
-      ["route"],
-    ),
-    execute: async (input: unknown) => {
-      const args = input as { route: string; reason?: string; difficulty?: string };
-      const parsed = parseEntryRoute(args.route);
-      const difficulty =
-        args.difficulty === "easy" || args.difficulty === "normal" || args.difficulty === "hard"
-          ? args.difficulty
-          : null;
-      const reason = args.reason ?? parsed.reason;
-      if (parsed.route === "direct") {
-        const active = state.getActive(root);
-        state.recordEvent(root, {
-          type: "entry_route",
-          ...(active?.goal.id ? { goal: active.goal.id } : {}),
-          route: "direct",
-          reason,
-        });
-        return text("entry_route=direct を記録（historyのみ）。loopなしで直接対応せよ。goalは作らない。");
-      }
-      state.writePendingRoute(root, parsed.route, reason, difficulty);
-      const bound = state.bindEntryRoute(root, parsed.route, reason, difficulty);
-      if (bound) state.clearPendingRoute(root);
-      return text(
-        [
-          `pending entry_route=${parsed.route} を記録（${reason}）。`,
-          bound
-            ? `active goal（${bound.goal.id}）にもbindした（pendingは消去）。`
-            : "次: graphhopper_goal(start) で消費される。",
-        ].join("\n"),
-      );
-    },
-  });
-
-  editor.add({
-    name: "graphhopper_escalate",
-    description:
-      "light/advised→full昇格（ラチェット）。entry_route=light/advisedのときのみ有効。phaseをdesigningに戻しdesign肉付け＋critic1回＋verifier fan-outに格上げする。full→light・未設定・direct/oracleは拒否",
-    input: S.obj({}, []),
-    execute: async () => {
-      const from = state.getActive(root)?.state.entry_route;
-      const r = state.escalateEntryRoute(root);
-      if (!r)
-        return text(
-          "error: 昇格不可（active goalなし、または entry_route=light/advised ではない）。full→light引き下げ・direct/oracle・未設定からの昇格は禁止",
-        );
-      return text([`escalated: ${from} -> full（designingに巻き戻し）。`, ESCALATE_NEXT].join("\n"));
     },
   });
 
@@ -766,20 +666,6 @@ export function registerCoreTools(
       }
       const stuck = state.checkStuck(root);
       if (stuck.escalate && state.noteStuckNotified(root, stuck.reasons)) {
-        const esc = autoEscalateOnStuck(root);
-        if (esc) {
-          return text(
-            [
-              `attempt recorded: fail (fail_streak=${r.fail_streak})`,
-              `stuck: ${stuck.reasons.join(", ")} → light/advised→full自動昇格（designingに巻き戻し）。`,
-              ESCALATE_NEXT,
-              managed,
-              cascadeNote,
-            ]
-              .filter(Boolean)
-              .join("\n"),
-          );
-        }
         return text(
           [
             `attempt recorded: fail (fail_streak=${r.fail_streak})`,
