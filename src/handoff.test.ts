@@ -99,6 +99,36 @@ describe("renderHandoff", () => {
     expect(renderHandoff(root())).toBeNull();
   });
 
+  test("添え書き・要約・履歴の秘密は伏せる（state 由来の欄はそのまま）", () => {
+    const r = root();
+    withGoal(r, "sk-abcdefgh12345 を含む題");
+    const out = renderHandoff(r, {
+      note: "鍵は sk-abcdefgh12345 と Bearer abcdefgh12345678",
+      summary: { text: "token AKIA1234567890ABCD を使った", model: "m", at: "t", reason: "auto" },
+    })!;
+    expect(out).not.toContain("sk-abcdefgh12345");
+    expect(out).toContain("sk-***");
+    expect(out).not.toContain("Bearer abcdefgh12345678");
+    expect(out).not.toContain("AKIA1234567890ABCD");
+    expect(out).toContain("g-");
+  });
+
+  test("未検証の注意書きと、phase ごとの使う道具を出す", () => {
+    const r = root();
+    withGoal(r);
+    const d = renderHandoff(r)!;
+    expect(d).toContain("未検証を含む");
+    expect(d).toContain("## 使う道具");
+    expect(d).toContain("graphhopper_phase");
+  });
+
+  test("session メモにも未検証の注意書きと使う道具が入る", () => {
+    const out = renderHandoff(root(), { note: "削除の続き" })!;
+    expect(out).toContain("未検証を含む");
+    expect(out).toContain("## 使う道具");
+    expect(out).toContain("graphhopper_goal");
+  });
+
   test("kind 欠落の旧メモは goal 扱いで読める", () => {
     const r = root();
     const id = withGoal(r);

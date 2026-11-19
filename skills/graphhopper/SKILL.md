@@ -222,11 +222,20 @@ designing は**質問して合意を取る段階**。自動継続は止まる（
 **compact より確実**（state から機械生成するので要約の劣化が無い）。
 
 - `graphhopper_handoff()`（= `action: "write"`）: `.graphhopper/HANDOFF.md` に
-  goal・phase・次アクション・未完了タスク・レビュー結果・VCS 状態を書き出し、goal を pause + unbind する
-  （旧セッションの自動継続が止まる）。goal が無い/done ならエラー。
+  goal・phase・次アクション・未完了タスク・レビュー結果・参照ファイル・VCS 状態・使う道具を書き出し、
+  goal を pause + unbind する（旧セッションの自動継続が止まる）。goal が無い/done なら session メモ。
+- **事実と主張を分ける**: state から機械生成した欄（状態・タスク・レビュー・参照ファイル・VCS 状態・
+  使う道具）は事実。
+  添え書き（`note`）と会話の要約は書き手の主張で、未検証を含む。メモ本文にもその旨を書く。
+- **秘密は既知の形だけ伏せる**: `sk-`・`AKIA`・`Bearer` などを、元の接頭辞＋`***` に置換する
+  （例: `sk-***`・`AKIA***`・`Bearer ***`。完全な検出ではないので、それ以外の形式は伏せられない。
+  鍵らしき値を `note` に書かない）。
+- **使う道具**: 次に使うツール（phase に応じたもの）と、手順書の path（`SKILL.md`。polish は
+  `refs/verifier.md`）を出す。session メモでは goal を立て直す道具を出す。
 - 新しい会話では plugin が「handoff メモがある」と自動で案内する。案内に従い
   `graphhopper_handoff(action: "load")` を呼ぶと、メモの goal を検証したうえで resume し、
-  メモと state のズレ（phase・タスク・history 件数など）を報告する。**正は常に state**。
+  メモと state のズレ（phase・タスク・history 件数など）を報告する。**正は常に state**
+  （session メモは resume せず本文を見せるだけ。下の「goal が無くても書ける」を参照）。
 - `action: "list"` は送信候補の列挙、`action: "send"`（`session_id` 指定）は従来の直接送信、
   `action: "clear"` はメモ削除。`session_id` を渡した場合は send 扱い。
 - 注意: `.graphhopper/` が gitignore されていない repo では、メモが commit に乗り得る（write 時に警告が出る）。
