@@ -77,6 +77,50 @@ describe("scanDiff", () => {
   });
 });
 
+/* 実際の退避 diff は jj の人間向け形式（`Modified regular file …` と `旧 新: 内容`）。
+ * ここを取りこぼすと、チェックが全件沈黙する（g-mwn8aif6 の検証で発覚）。 */
+const JJ_DIFF = `Modified regular file src/plugin-tools.test.ts:
+    ...          json: async () => ({ answers: { difficulty: { choice, confidence } } }),
+1662 1662:     });
+1667     :     const started = Date.now();
+    1670:     const calls = 0;
+1676     :     expect(Date.now() - started).toBeLessThan(500);
+Added regular file skills/graphhopper/refs/foo.md:
+    1: # 追加
+`;
+
+describe("jj 形式の diff", () => {
+  test("ファイルと変更行を取り、文脈行と省略行は無視する", () => {
+    const scan = scanDiff(JJ_DIFF);
+    expect(scan.paths).toEqual(["src/plugin-tools.test.ts", "skills/graphhopper/refs/foo.md"]);
+    expect(scan.lines).toContain("-    const started = Date.now();");
+    expect(scan.lines).toContain("+    const calls = 0;");
+    expect(scan.lines.some((l) => l.includes("});"))).toBe(false);
+    expect(scan.lines.some((l) => l.includes("..."))).toBe(false);
+  });
+
+  test("jj 形式でもトリガが発火する", () => {
+    const checks = parseChecks(
+      [
+        "### timing-test",
+        "- when-line: `^[+-].*Date\\.now\\(\\)`",
+        "- doubt: 時間に依存していないか",
+        "### docs-stale",
+        "- when-path: skills/graphhopper/",
+        "- doubt: 消した概念の残骸",
+      ].join("\n"),
+    );
+    const hit = matchChecks(JJ_DIFF, checks).map((c) => c.id);
+    expect(hit).toContain("timing-test");
+    expect(hit).toContain("docs-stale");
+  });
+
+  test("rename は移動先の path を使う", () => {
+    const scan = scanDiff("Renamed regular file src/a.ts => src/b.ts:\n    1: x\n");
+    expect(scan.paths).toEqual(["src/b.ts"]);
+  });
+});
+
 describe("matchChecks", () => {
   const checks = parseChecks(MD);
 

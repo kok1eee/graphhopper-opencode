@@ -99,21 +99,40 @@ export interface DiffScan {
 export function scanDiff(diff: string): DiffScan {
   const files: DiffFile[] = [];
   let current: DiffFile | null = null;
+  const add = (path: string): DiffFile => {
+    const file: DiffFile = { path, lines: [] };
+    files.push(file);
+    return file;
+  };
   for (const line of diff.split("\n")) {
-    const head = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
-    if (head) {
-      current = { path: head[2], lines: [] };
-      files.push(current);
+    /* git 形式: diff --git a/x b/x */
+    const git = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
+    if (git) {
+      current = add(git[2]);
+      continue;
+    }
+    /* jj 形式: Modified regular file path:（rename は "old => new"） */
+    const jj = /^(?:Added|Modified|Removed|Copied|Renamed) (?:regular |)(?:file|symlink) (.+?):$/.exec(line);
+    if (jj) {
+      const raw = jj[1];
+      const arrow = raw.lastIndexOf(" => ");
+      current = add(arrow >= 0 ? raw.slice(arrow + 4) : raw);
       continue;
     }
     if (/^(---|\+\+\+)\s/.test(line)) continue;
-    if (!line.startsWith("+") && !line.startsWith("-")) continue;
-    if (!current) {
-      /* ヘッダの無い diff 断片は 1 つの仮ファイルに入れる */
-      current = { path: "", lines: [] };
-      files.push(current);
+    /* git 形式の変更行 */
+    if (line.startsWith("+") || line.startsWith("-")) {
+      current ??= add("");
+      current.lines.push(line);
+      continue;
     }
-    current.lines.push(line);
+    /* jj 形式の変更行: "1667     : 内容"（左が旧行番号、右が新行番号。片方だけなら追加/削除） */
+    const jjLine = /^(\d*)\s+(\d*): (.*)$/.exec(line);
+    if (jjLine && current) {
+      const [, oldNo, newNo, content] = jjLine;
+      if (oldNo === "" && newNo !== "") current.lines.push(`+${content}`);
+      else if (oldNo !== "" && newNo === "") current.lines.push(`-${content}`);
+    }
   }
   return { files, paths: files.map((f) => f.path), lines: files.flatMap((f) => f.lines) };
 }
