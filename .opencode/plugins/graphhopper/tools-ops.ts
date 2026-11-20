@@ -487,6 +487,15 @@ export function registerOpsTools(
       const signal = (context as { signal?: AbortSignal } | undefined)?.signal;
       const notes: string[] = [];
 
+      /* 角度も角度選びも回収しない。急がせて出した判定を clean の根拠にしない（design g-mwonzg9x）。
+       * 無応答のやり直しは効く（最初から走り直すので判定の質は落ちない） */
+      const invokeVerifier = (a: { prompt: string; timeoutMs: number; delayMs?: number }) =>
+        invokeStructured(
+          { agent: "graphhopper-verifier", model: args.model, root, ...a },
+          undefined,
+          { signal, salvage: false },
+        );
+
       const runAngle = async (
         entry: PlanEntry,
         i: number,
@@ -494,15 +503,12 @@ export function registerOpsTools(
         extra: { priorPath?: string | null; findingsPath?: string | null },
       ): Promise<LensRun> => {
         const prompt = buildAnglePrompt(root, goalId, entry, { ...paths, ...extra });
-        const r = await invokeStructured(
-          { agent: "graphhopper-verifier", model: args.model, prompt, root, timeoutMs, delayMs: delay * i },
-          undefined,
-          { signal },
-        );
+        const r = await invokeVerifier({ prompt, timeoutMs, delayMs: delay * i });
         const lens = entry.id;
         const broken = (reason: string): LensRun => ({ lens, body: r.output, reason });
         if (r.cancelled) return broken("invoke がキャンセルされた");
         if (r.timedOut) return broken(`timeout（${(r.elapsedMs / 1000).toFixed(1)}s / 上限 ${(timeoutMs / 1000).toFixed(0)}s）`);
+        if (r.idleTimedOut) return broken("最初の出力が来ないまま打ち切った（やり直しも無応答）");
         if (r.fallbackWarning) return broken("agent が既定にフォールバックした（判定を採用できない）");
         const failed = invokeFailure(r.output);
         if (failed) return broken(failed);
@@ -556,25 +562,19 @@ export function registerOpsTools(
         plan = initialPlan(current, carried);
         results = [];
         if (remainingSlots(plan, slots) > 0) {
-          const sel = await invokeStructured(
-            {
-              agent: "graphhopper-verifier",
-              model: args.model,
-              prompt: buildSelectorPrompt({
-                designPath: paths.designPath,
-                diffPath: paths.diffPath,
-                slots: remainingSlots(plan, slots),
-                taken: plan.entries.map((e) => e.id),
-              }),
-              root,
-              timeoutMs: SELECTOR_TIMEOUT_MS,
-            },
-            undefined,
-            { signal },
-          );
+          const sel = await invokeVerifier({
+            prompt: buildSelectorPrompt({
+              designPath: paths.designPath,
+              diffPath: paths.diffPath,
+              slots: remainingSlots(plan, slots),
+              taken: plan.entries.map((e) => e.id),
+            }),
+            timeoutMs: SELECTOR_TIMEOUT_MS,
+          });
           let reason = "";
           if (sel.cancelled) reason = "invoke がキャンセルされた";
           else if (sel.timedOut) reason = `timeout (${SELECTOR_TIMEOUT_MS}ms)`;
+          else if (sel.idleTimedOut) reason = "最初の出力が来ないまま打ち切った";
           else if (sel.fallbackWarning) reason = "agent が既定にフォールバックした";
           else reason = invokeFailure(sel.output) ?? "";
           let picked = false;
@@ -1170,7 +1170,7 @@ export function registerOpsTools(
   editor.add({
     name: "graphhopper_invoke",
     description:
-      "別モデルでsubagent相当を実行する。opencode run をspawnし stdout を返す。入れ子禁止・prompt上限12000文字・timeout既定120s（advisor/oracleは240s）・上限600s。依頼文の先頭に持ち時間と「渡された範囲だけ読み時間内に答える」を自動で足す。並列fan-out可。delayMsで起動ずらし可（429 herd回避）",
+      "別モデルでsubagent相当を実行する。opencode run をspawnし stdout を返す。入れ子禁止・prompt上限12000文字・timeout既定120s（advisor/oracleは240s・simplifyは300s）・上限600s。依頼文の先頭に持ち時間と「渡された範囲だけ読み時間内に答える」を自動で足す。最初の出力が来ないまま45秒（advisor/oracleは90秒）たつと別モデルで1回だけやり直す。時間切れになったら同じセッションに続きを頼んで答えを回収する（+最大90s）。並列fan-out可。delayMsで起動ずらし可（429 herd回避）",
     input: S.obj(
       {
         agent: S.str("graphhopper-* agent名（例: graphhopper-advisor）"),
@@ -1212,6 +1212,8 @@ export function registerOpsTools(
             model: a.model ?? null,
             timed_out: !!r.timedOut,
             cancelled: !!r.cancelled,
+            salvage: !!r.salvaged,
+            restart: !!r.restarted,
             elapsed_ms: r.elapsedMs,
           });
         } catch {
@@ -1221,8 +1223,10 @@ export function registerOpsTools(
       const elapsedS = (r.elapsedMs / 1000).toFixed(1);
       const flags = [
         /* 時間切れは経過秒数も返す（上限の見直しと較正のため） */
-        r.timedOut ? `timedOut ${elapsedS}s` : null,
+        r.timedOut ? `timedOut ${elapsedS}s${r.salvaged ? "（回収）" : ""}` : null,
         r.cancelled ? `cancelled ${elapsedS}s` : null,
+        r.idleTimedOut ? `無応答で打ち切り ${elapsedS}s` : null,
+        r.restarted ? "無応答で1回やり直した" : null,
         r.fallbackWarning ? "fallbackWarning" : null,
       ].filter(Boolean);
       return text(flags.length ? `${r.output}\n[invoke: ${flags.join(", ")}]` : r.output);

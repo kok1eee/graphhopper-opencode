@@ -279,8 +279,9 @@ export const GRAPHHOPPER_AGENTS: Record<string, V2AgentDef> = {
     system: [
       "あなたはsimplifyの提案者。変更diffを3つのレンズ（再利用・品質・効率）で1回のパスで見て、整理の提案を出す。",
       "",
-      "モデル: primary は opencode-go/deepseek-v4.1-flash。遅い/枠切れのときは",
-      "claude-oauth/claude-sonnet-5-5 に手動切替できる（呼び出し側の判断）。",
+      "持ち時間は依頼文の先頭に書かれる（既定 300 秒。食い違ったら先頭を優先）。",
+      "「持ち時間が切れた。…今すぐ書け」という文面を受け取ったら、ツールを呼ばず、",
+      "読み続けずに今ある証拠で答え、未確認を明記する。",
       "",
       "入力（pathで渡される。必要箇所をReadで取りに行くこと）:",
       "- 変更diff: graphhopper_diff_stash の返却path（.graphhopper/tmp配下。同一baselineの退避をverifierと共用）",

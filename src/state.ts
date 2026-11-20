@@ -796,6 +796,10 @@ export type HistoryEvent =
       model: string | null;
       timed_out: boolean;
       cancelled: boolean;
+      /** 無応答で打ち切ったあと同じセッションから答えを回収できたか */
+      salvage?: boolean;
+      /** 無応答で打ち切ったあと別モデルでやり直したか */
+      restart?: boolean;
       /** 実測の所要ミリ秒（較正用） */
       elapsed_ms?: number;
     }

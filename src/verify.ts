@@ -312,7 +312,7 @@ export function parseSeverity(v: unknown): SeverityCounts | undefined {
  * fail() は出力の先頭に、runChild は末尾に付ける。 */
 const INVOKE_ERROR_HEAD = /^error: /;
 const INVOKE_ERROR_TAIL =
-  /\nerror: (?:invoke cancelled by client|invoke timeout after|opencode run exited with code)/;
+  /\nerror: (?:invoke cancelled by client|invoke timeout after|invoke gave no output for|opencode run exited with code)/;
 
 /** verifier の出力が「invoke 失敗」か。失敗なら判定不能の理由を返す（throwしない） */
 export function invokeFailure(output: string): string | null {

@@ -4,12 +4,13 @@
  * (v2 run に --dir は無い。対象dirはspawn cwdで運ぶ)
  * throwしない（エラーは文字列返却。呼び出し側は本文の error: 行で判定する）。
  */
+import { randomBytes } from "node:crypto";
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { execSync } from "node:child_process";
 import { resolve } from "node:path";
 import { GRAPHHOPPER_AGENTS } from "./agents";
 import { checkModelAllowed } from "./model-policy";
-import { readConfig } from "./state";
+import { getActive, readConfig, type GraphhopperConfig } from "./state";
 
 export const PROMPT_MAX_CHARS = 12000;
 export const STDOUT_MAX_CHARS = 30000;
@@ -21,11 +22,38 @@ export const JUDGEMENT_AGENT_TIMEOUT_MS = 240000;
 
 /** invoke の既定 timeout。advisor / oracle だけ長く取る */
 export function defaultTimeoutMs(agent: string): number {
+  if (agent === "graphhopper-advisor" || agent === "graphhopper-oracle") return JUDGEMENT_AGENT_TIMEOUT_MS;
+  if (agent === "graphhopper-simplify") return SIMPLIFY_TIMEOUT_MS;
+  return DEFAULT_TIMEOUT_MS;
+}
+
+/** 最初の出力を待つ上限。判断ノードだけ倍にする */
+export function defaultFirstOutputMs(agent: string): number {
   return agent === "graphhopper-advisor" || agent === "graphhopper-oracle"
-    ? JUDGEMENT_AGENT_TIMEOUT_MS
-    : DEFAULT_TIMEOUT_MS;
+    ? FIRST_OUTPUT_JUDGEMENT_MS
+    : FIRST_OUTPUT_MS;
+}
+
+/** 子セッションの ID を先に決める（時間切れのあと同じセッションに続きを頼むため） */
+export function newSessionID(): string {
+  return `ses_${randomBytes(12).toString("hex")}`;
 }
 export const KILL_GRACE_MS = 5000;
+/** 子が最初の出力を返すまでの上限。超えたら打ち切って 1 回だけやり直す。
+ * 実測（gh-invoke 309 回）: 45 秒超は 2 回・60 秒超は 0 回。時間切れになった回は
+ * 最初の応答が 55 秒で、以降も毎回 24〜62 秒待たされた。 */
+export const FIRST_OUTPUT_MS = 45000;
+/** 判断ノード（advisor / oracle）は xhigh で最初の応答が遅いので倍取る */
+export const FIRST_OUTPUT_JUDGEMENT_MS = 90000;
+/** 時間切れのあと、同じセッションに続きを頼んで答えを回収する持ち時間（本体の外に足す） */
+export const SALVAGE_TIMEOUT_MS = 90000;
+/** simplify の既定 timeout。成功した 10 回の最長が 273 秒で、120 秒では足りない */
+export const SIMPLIFY_TIMEOUT_MS = 300000;
+/** 時間切れのあと、同じセッションへ送る回収の依頼文 */
+export const SALVAGE_PROMPT = [
+  "持ち時間が切れた。これ以上ツールを呼ばず、ここまでに読んだ内容だけで依頼への答えを今すぐ書け。",
+  "確かめられなかった点は「未確認」と明記する。",
+].join("\n");
 /** fan-out thundering herd回避用の起動ずらし上限。並列既定は維持しopt-inで使う */
 export const MAX_DELAY_MS = 60000;
 /** 子プロセス生存中のheartbeat間隔（無出力の長時間実行を「固まり」と誤認しないための通知間隔） */
@@ -114,19 +142,51 @@ export type { ModelCheck, ModelPolicy } from "./model-policy";
  * （共有サーバ）に生成を委譲するため、timeout で CLI のプロセスグループを kill しても
  * **サーバ側で生成が続き課金だけが残る**（300秒killの63秒後に子セッションが完走した）。
  * private server を子プロセス内に立てれば group kill で生成も止まる。 */
-export function buildArgs(a: { agent: string; model?: string; dir: string; title: string; prompt: string }): string[] {
+export function buildArgs(a: {
+  agent: string;
+  model?: string;
+  dir: string;
+  title: string;
+  prompt: string;
+  /** 先に決めた子セッション ID。無ければ新規作成される（--session は無い ID を作る） */
+  sessionID?: string;
+}): string[] {
   void a.dir;
   const args = ["run", "--standalone"];
   if (a.model) args.push("--model", a.model);
+  if (a.sessionID) args.push("--session", a.sessionID);
   args.push("--agent", a.agent, "--title", a.title, "--", a.prompt);
   return args;
 }
 
-/** モデル解決: 引数 → config既定 → 未指定（子の既定。継承とは呼ばない）。 */
+/** モデル解決: 引数 → 昇格時の表 → config既定 → 未指定（子の既定。継承とは呼ばない）。
+ * 昇格時の表（cascade.agents.quality）は、進行中の goal があり、apply=always か
+ * goal が昇格済みのときだけ使う（hooks の task() 経路と同じ条件）。 */
 export function resolveModel(root: string, agent: string, model?: string): string | undefined {
   if (model) return model;
   const cfg = readConfig(root);
+  const quality = cfg.cascade.enabled ? cfg.cascade.agents.quality[agent] : undefined;
+  const active = quality ? getActive(root) : null;
+  if (quality && active) {
+    const level = active.state.cascade?.level ?? null;
+    if (cfg.cascade.agents.apply === "always" || level === "escalated") return quality;
+  }
   return cfg.agents[agent];
+}
+
+/** 無応答で打ち切ったあとのやり直し・回収に使う代替モデル。替えられなければ現在のモデル。
+ * モデルを明示指定した呼び出しと、model_allow / model_deny で拒否される候補は替えない。 */
+export function alternativeModel(input: {
+  cfg: GraphhopperConfig;
+  agent: string;
+  current?: string;
+  explicit: boolean;
+}): string | undefined {
+  if (input.explicit || !input.cfg.cascade.enabled) return input.current;
+  const cand = input.cfg.cascade.agents.quality[input.agent] ?? input.cfg.cascade.escalate;
+  if (!cand || cand === input.current) return input.current;
+  const allowed = checkModelAllowed(cand, { allow: input.cfg.model_allow, deny: input.cfg.model_deny });
+  return allowed.ok ? cand : input.current;
 }
 
 function truncate(s: string, max: number): string {
@@ -141,6 +201,14 @@ export interface InvokeResult {
   fallbackWarning: boolean;
   /** clientキャンセルでkillしたか（並列fan-outの取り消し漏れ防止） */
   cancelled: boolean;
+  /** 最初の出力が来ないまま打ち切ったか */
+  idleTimedOut?: boolean;
+  /** 子が答えを返せなかったか（kill された・非0終了）。本文の文字列ではなくこれで判定する */
+  failed?: boolean;
+  /** 無応答で打ち切ったあと、別モデルで 1 回やり直したか */
+  restarted?: boolean;
+  /** 時間切れのあと、同じセッションから答えを回収できたか */
+  salvaged?: boolean;
 }
 
 export interface RunChildOpts {
@@ -152,6 +220,8 @@ export interface RunChildOpts {
   /** heartbeat間隔ms（onTick呼び出し。0以下で無効） */
   heartbeatMs?: number;
   onTick?: (elapsedMs: number) => void;
+  /** 最初の出力を待つ上限ms（0以下で無効）。超えたら idleTimedOut で kill する */
+  firstOutputMs?: number;
   /** SIGTERM後のSIGKILLまでの猶予ms（既定KILL_GRACE_MS。テスト用に短縮可） */
   killGraceMs?: number;
 }
@@ -179,11 +249,14 @@ export function runChild(
      * （abort → SIGTERM → 子が exit 143 を返す経路があり、引数渡しでは取りこぼす） */
     let timedOut = false;
     let cancelled = false;
+    let idleTimedOut = false;
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
     let graceTimer: ReturnType<typeof setTimeout> | null = null;
     const finish = (): void => {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      if (idleTimer) clearTimeout(idleTimer);
       if (graceTimer) clearTimeout(graceTimer);
       if (beat) clearInterval(beat);
       opts.signal?.removeEventListener("abort", onAbort);
@@ -194,6 +267,8 @@ export function runChild(
       const errTail = stderr.split("\n").slice(-20).join("\n").trim();
       if (cancelled) {
         output += `\nerror: invoke cancelled by client (killed after ${elapsedS}s)`;
+      } else if (idleTimedOut) {
+        output += `\nerror: invoke gave no output for ${((opts.firstOutputMs ?? 0) / 1000).toFixed(0)}s (killed; no first output)`;
       } else if (timedOut) {
         output += `\nerror: invoke timeout after ${elapsedS}s (limit ${(opts.timeoutMs / 1000).toFixed(0)}s; killed)`;
         // timeout時も子のstderr末尾を添付する（何に時間を食ったかの切り分け用。空なら省略）
@@ -204,13 +279,21 @@ export function runChild(
       if (fallbackWarning) {
         output += `\nwarning: agent fell back to default (read-only not enforced by agent def)`;
       }
-      resolvePromise({ output, timedOut, elapsedMs, fallbackWarning, cancelled });
+      const failed = cancelled || idleTimedOut || timedOut || code !== 0;
+      resolvePromise({ output, timedOut, elapsedMs, fallbackWarning, cancelled, idleTimedOut, failed });
     };
     let code: number | null = 0;
+    // 最初の出力が来たら「無応答」の見張りを外す（stderr の「> 役 · モデル」も出力とみなす）
+    const sawOutput = (): void => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = null;
+    };
     child.stdout?.on("data", (c: Buffer) => {
+      sawOutput();
       stdout += c.toString("utf8");
     });
     child.stderr?.on("data", (c: Buffer) => {
+      sawOutput();
       stderr += c.toString("utf8");
     });
     child.on("error", () => finish());
@@ -230,7 +313,22 @@ export function runChild(
       }
     };
     const graceMs = opts.killGraceMs ?? KILL_GRACE_MS;
+    if (opts.firstOutputMs && opts.firstOutputMs > 0) {
+      idleTimer = setTimeout(() => {
+        idleTimer = null;
+        if (timedOut || cancelled) return;
+        idleTimedOut = true;
+        killGroup("SIGTERM");
+        graceTimer = setTimeout(() => {
+          killGroup("SIGKILL");
+          finish();
+        }, graceMs);
+      }, opts.firstOutputMs);
+    }
     const timer = setTimeout(() => {
+      // 無応答で打ち切り中なら、そちらの印を優先する（やり直しの判定に使う）
+      if (idleTimedOut) return;
+      sawOutput();
       timedOut = true;
       killGroup("SIGTERM");
       graceTimer = setTimeout(() => {
@@ -240,6 +338,7 @@ export function runChild(
     }, opts.timeoutMs);
     // 中断伝播: clientキャンセルで即kill（取り消し後も裏で回り続ける事故を防ぐ）
     const onAbort = (): void => {
+      sawOutput();
       cancelled = true;
       killGroup("SIGTERM");
       setTimeout(() => {
@@ -294,10 +393,87 @@ export interface InvokeOpts {
   signal?: AbortSignal;
   heartbeatMs?: number;
   onTick?: (elapsedMs: number) => void;
+  /** 時間切れのあと同じセッションから答えを回収するか（既定 true。verify の角度は false） */
+  salvage?: boolean;
+  /** 回収の持ち時間ms（テスト用に短縮可） */
+  salvageTimeoutMs?: number;
+  /** 最初の出力を待つ上限ms（テスト用に短縮可。既定は役ごとの defaultFirstOutputMs） */
+  firstOutputMs?: number;
+  /** 子セッションIDの採番（テスト用に固定可） */
+  nextSessionID?: () => string;
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+export interface RunOnceOpts {
+  model?: string;
+  sessionID: string;
+  timeoutMs: number;
+  /** 依頼文（省略時は元の prompt）。回収のときだけ差し替える */
+  prompt?: string;
+}
+
+/**
+ * 1 回の実行と、その後の回復（design g-mwonzg9x）。
+ * - 最初の出力が来ないまま打ち切られたら、新しいセッションで 1 回だけ別モデルでやり直す
+ * - 時間切れなら、同じセッションに「今ある材料で答えよ」と送って答えを回収する
+ * 実行そのものは run に差し替えられる（単体テストはここを偽物にする）。
+ */
+export async function runWithRecovery(input: {
+  run: (o: RunOnceOpts) => Promise<InvokeResult>;
+  model?: string;
+  sessionID: string;
+  timeoutMs: number;
+  /** やり直しと回収に使う代替モデル（同じなら不要） */
+  altModel?: string;
+  salvage: boolean;
+  salvageTimeoutMs: number;
+  nextSessionID: () => string;
+}): Promise<InvokeResult> {
+  const run = input.run;
+  const retryModel = input.altModel ?? input.model;
+  let sessionID = input.sessionID;
+  let r = await run({ model: input.model, sessionID, timeoutMs: input.timeoutMs });
+  let restarted = false;
+  if (r.idleTimedOut && !r.cancelled) {
+    restarted = true;
+    sessionID = input.nextSessionID();
+    // 残りの持ち時間だけ与える（無応答で捨てた分を二重に取らない）
+    const remaining = Math.max(MIN_TIMEOUT_MS, input.timeoutMs - r.elapsedMs);
+    const second = await run({ model: retryModel, sessionID, timeoutMs: remaining });
+    r = { ...second, elapsedMs: r.elapsedMs + second.elapsedMs };
+  }
+  // 中身を `opencode session export <ID>` で見られるよう、打ち切った子の ID を添える
+  const withSession = (x: InvokeResult, note: string): InvokeResult => ({
+    ...x,
+    restarted,
+    output: `${x.output}\n[invoke: ${note}session: ${sessionID}]`,
+  });
+  if (r.cancelled || (!r.timedOut && !r.idleTimedOut)) return { ...r, restarted };
+  // やり直しも無応答なら、時間切れを待たずに返す（回収する中身が無い）
+  if (r.idleTimedOut || !input.salvage || input.salvageTimeoutMs <= 0) return withSession(r, "");
+  const salv = await run({
+    model: retryModel,
+    sessionID,
+    timeoutMs: input.salvageTimeoutMs,
+    prompt: SALVAGE_PROMPT,
+  });
+  const elapsedMs = r.elapsedMs + salv.elapsedMs;
+  if (salv.failed || salv.timedOut || salv.cancelled || salv.idleTimedOut || salv.output.trim() === "") {
+    return withSession({ ...r, elapsedMs }, "時間切れのあとの回収も失敗した。");
+  }
+  return withSession(
+    {
+      ...r,
+      salvaged: true,
+      elapsedMs,
+      fallbackWarning: r.fallbackWarning || salv.fallbackWarning,
+      output: salv.output,
+    },
+    "時間切れのあと、同じセッションから回収した（読めた範囲だけ・未確認を含む）。",
+  );
 }
 
 /** invoke の構造化版（tool の output 用）。判定は runChild の機械値を使う。 */
@@ -371,13 +547,6 @@ export async function invokeStructured(
     MAX_TIMEOUT_MS,
     Math.max(MIN_TIMEOUT_MS, args.timeoutMs ?? defaultTimeoutMs(args.agent)),
   );
-  const argv = buildArgs({
-    agent: args.agent,
-    model,
-    dir: root,
-    title: "gh-invoke",
-    prompt: withTimeBudget(args.prompt, timeoutMs),
-  });
   const childEnv: NodeJS.ProcessEnv = { ...process.env, [DEPTH_ENV]: String(depth + 1) };
   // 壊れたbearerの混入防止: AWS_BEARER_TOKEN_BEDROCK は全認証手段より優先されるため、
   // 陳腐な値がsession envにあるとSSOプロファイルがshadowされてBedrock系が全滅する
@@ -404,24 +573,38 @@ export async function invokeStructured(
       cancelled: true,
     };
   }
-  const r = await runChild(
-    binary,
-    argv,
-    {
-      timeoutMs,
-      cwd: root,
-      childEnv,
-      signal: invokeOpts.signal,
-      heartbeatMs: invokeOpts.heartbeatMs,
-      onTick: invokeOpts.onTick,
-    },
-    spawnFn,
-  );
-  return {
-    output: r.output,
-    timedOut: r.timedOut,
-    elapsedMs: r.elapsedMs,
-    fallbackWarning: r.fallbackWarning,
-    cancelled: r.cancelled,
-  };
+  const firstOutputMs = invokeOpts.firstOutputMs ?? defaultFirstOutputMs(args.agent);
+  const runOnce = (o: RunOnceOpts): Promise<InvokeResult> =>
+    runChild(
+      binary,
+      buildArgs({
+        agent: args.agent,
+        model: o.model,
+        dir: root,
+        title: "gh-invoke",
+        prompt: withTimeBudget(o.prompt ?? args.prompt, o.timeoutMs),
+        sessionID: o.sessionID,
+      }),
+      {
+        timeoutMs: o.timeoutMs,
+        // 回収（prompt 差し替え）は持ち時間 90 秒だけで縛る。無応答の見張りは最初の実行とやり直しだけ
+        firstOutputMs: o.prompt === undefined ? firstOutputMs : 0,
+        cwd: root,
+        childEnv,
+        signal: invokeOpts.signal,
+        heartbeatMs: invokeOpts.heartbeatMs,
+        onTick: invokeOpts.onTick,
+      },
+      spawnFn,
+    );
+  return runWithRecovery({
+    run: runOnce,
+    model,
+    sessionID: (invokeOpts.nextSessionID ?? newSessionID)(),
+    timeoutMs,
+    altModel: alternativeModel({ cfg, agent: args.agent, current: model, explicit: !!args.model }),
+    salvage: invokeOpts.salvage ?? true,
+    salvageTimeoutMs: invokeOpts.salvageTimeoutMs ?? SALVAGE_TIMEOUT_MS,
+    nextSessionID: invokeOpts.nextSessionID ?? newSessionID,
+  });
 }

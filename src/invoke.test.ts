@@ -9,18 +9,30 @@ import {
   ANGLE_TIMEOUT_MS,
   DEFAULT_TIMEOUT_MS,
   DEPTH_ENV,
+  FIRST_OUTPUT_JUDGEMENT_MS,
+  FIRST_OUTPUT_MS,
   MAX_DEPTH,
   MAX_TIMEOUT_MS,
   PROMPT_MAX_CHARS,
+  SALVAGE_PROMPT,
+  SALVAGE_TIMEOUT_MS,
+  SIMPLIFY_TIMEOUT_MS,
   STDOUT_MAX_CHARS,
+  alternativeModel,
   buildArgs,
+  defaultFirstOutputMs,
   defaultTimeoutMs,
   invoke,
+  newSessionID,
   resolveModel,
   runChild,
+  runWithRecovery,
   withTimeBudget,
+  type InvokeResult,
+  type RunOnceOpts,
   type SpawnFn,
 } from "./invoke";
+import { readConfig, setCascade, startGoal } from "./state";
 
 interface FakeProc extends EventEmitter {
   pid: number;
@@ -44,6 +56,39 @@ function fakeSpawn(behavior: (p: FakeProc) => void): SpawnFn {
 const okSpawn: SpawnFn = fakeSpawn((p) => {
   p.stdout.emit("data", Buffer.from("hello", "utf8"));
   p.emit("exit", 0);
+});
+
+/** GRAPHHOPPER_CONFIG を一時ファイルへ向ける（実ユーザー設定を読まない） */
+function withGlobal(json: object, fn: () => Promise<void>): Promise<void> {
+  const prev = process.env.GRAPHHOPPER_CONFIG;
+  const path = join(mkdtempSync(join(tmpdir(), "gh-invoke-cfg-")), "global.json");
+  writeFileSync(path, JSON.stringify(json), "utf8");
+  process.env.GRAPHHOPPER_CONFIG = path;
+  return fn().finally(() => {
+    if (prev === undefined) delete process.env.GRAPHHOPPER_CONFIG;
+    else process.env.GRAPHHOPPER_CONFIG = prev;
+  });
+}
+
+/** 呼ばれた順に結果を返す偽の run（回復ループの単体テスト用） */
+function fakeRun(results: InvokeResult[]): { run: (o: RunOnceOpts) => Promise<InvokeResult>; calls: RunOnceOpts[] } {
+  const calls: RunOnceOpts[] = [];
+  const run = (o: RunOnceOpts): Promise<InvokeResult> => {
+    calls.push(o);
+    const r = results[Math.min(calls.length - 1, results.length - 1)];
+    if (!r) throw new Error("fakeRun: 結果が足りない");
+    return Promise.resolve(r);
+  };
+  return { run, calls };
+}
+
+const ok = (output: string, extra: Partial<InvokeResult> = {}): InvokeResult => ({
+  output,
+  timedOut: false,
+  elapsedMs: 1000,
+  fallbackWarning: false,
+  cancelled: false,
+  ...extra,
 });
 
 afterEach(() => {
@@ -111,6 +156,13 @@ describe("buildArgs", () => {
     });
     expect(a[a.indexOf("--model") + 1]).toBe("claude-oauth/claude-opus-5-5#xhigh");
   });
+  test("先に決めたセッションIDを --session で渡す（無ければ flag を付けない）", () => {
+    const a = buildArgs({ agent: "graphhopper-simplify", dir: "/r", title: "t", prompt: "hi", sessionID: "ses_x1" });
+    expect(a[a.indexOf("--session") + 1]).toBe("ses_x1");
+    expect(a.slice(a.indexOf("--"), a.indexOf("--") + 1)).toEqual(["--"]);
+    const b = buildArgs({ agent: "graphhopper-simplify", dir: "/r", title: "t", prompt: "hi" });
+    expect(b.includes("--session")).toBe(false);
+  });
   test("先頭--modelのpromptもflag化されない", () => {
     const a = buildArgs({ agent: "graphhopper-librarian", dir: "/r", title: "t", prompt: "--model evil" });
     const sep = a.indexOf("--");
@@ -125,6 +177,26 @@ describe("defaultTimeoutMs", () => {
     expect(defaultTimeoutMs("graphhopper-oracle")).toBe(240000);
     expect(defaultTimeoutMs("graphhopper-librarian")).toBe(120000);
     expect(defaultTimeoutMs("graphhopper-verifier")).toBe(120000);
+  });
+  test("simplify だけ 300 秒（成功 10 回の最長が 273 秒）", () => {
+    expect(defaultTimeoutMs("graphhopper-simplify")).toBe(SIMPLIFY_TIMEOUT_MS);
+    expect(defaultTimeoutMs("graphhopper-simplify")).toBe(300000);
+  });
+  test("最初の出力を待つ上限は判断ノードだけ 90 秒", () => {
+    expect(defaultFirstOutputMs("graphhopper-librarian")).toBe(FIRST_OUTPUT_MS);
+    expect(defaultFirstOutputMs("graphhopper-simplify")).toBe(FIRST_OUTPUT_MS);
+    expect(defaultFirstOutputMs("graphhopper-advisor")).toBe(FIRST_OUTPUT_JUDGEMENT_MS);
+    expect(defaultFirstOutputMs("graphhopper-oracle")).toBe(FIRST_OUTPUT_JUDGEMENT_MS);
+    expect(FIRST_OUTPUT_MS).toBe(45000);
+    expect(FIRST_OUTPUT_JUDGEMENT_MS).toBe(90000);
+  });
+  test("回収の持ち時間は 90 秒", () => {
+    expect(SALVAGE_TIMEOUT_MS).toBe(90000);
+  });
+  test("セッションIDは ses_ で始まる 27 文字・毎回違う", () => {
+    const a = newSessionID();
+    expect(a).toMatch(/^ses_[0-9a-f]{24}$/);
+    expect(newSessionID()).not.toBe(a);
   });
 });
 
@@ -145,18 +217,6 @@ describe("resolveModel", () => {
 });
 
 describe("invoke のモデル制限（config 駆動）", () => {
-  /** GRAPHHOPPER_CONFIG を一時ファイルへ向ける（実ユーザー設定を読まない） */
-  function withGlobal(json: object, fn: () => Promise<void>): Promise<void> {
-    const prev = process.env.GRAPHHOPPER_CONFIG;
-    const path = join(mkdtempSync(join(tmpdir(), "gh-invoke-cfg-")), "global.json");
-    writeFileSync(path, JSON.stringify(json), "utf8");
-    process.env.GRAPHHOPPER_CONFIG = path;
-    return fn().finally(() => {
-      if (prev === undefined) delete process.env.GRAPHHOPPER_CONFIG;
-      else process.env.GRAPHHOPPER_CONFIG = prev;
-    });
-  }
-
   test("引数の deny 一致を拒否（source: arg）", async () => {
     const { invokeStructured } = await import("./invoke");
     await withGlobal({ model_deny: ["opencode-go/gpt-*"] }, async () => {
@@ -209,6 +269,97 @@ describe("invoke のモデル制限（config 駆動）", () => {
       );
       expect(r.output).toContain("hello");
     });
+  });
+});
+
+describe("resolveModel の昇格時の表（cascade.agents.quality）", () => {
+  const tmpRoot = (): string => mkdtempSync(join(tmpdir(), "gh-invoke-cascade-"));
+  const cfg = (apply: "always" | "escalated") => ({
+    agents: { "graphhopper-simplify": "opencode-go/deepseek-v4.1-flash" },
+    cascade: {
+      enabled: true,
+      escalate: "claude-oauth/claude-sonnet-5-5",
+      agents: { apply, quality: { "graphhopper-simplify": "claude-oauth/claude-sonnet-5-5" } },
+    },
+  });
+
+  test("進行中の goal が無ければ昇格時の表を使わない（引数 > config の割当）", async () => {
+    const root = tmpRoot();
+    await withGlobal(cfg("always"), async () => {
+      expect(resolveModel(root, "graphhopper-simplify")).toBe("opencode-go/deepseek-v4.1-flash");
+      expect(resolveModel(root, "graphhopper-simplify", "p/m")).toBe("p/m");
+    });
+  });
+
+  test("apply=always なら goal の段に関係なく表のモデル", async () => {
+    const root = tmpRoot();
+    startGoal(root, "t", "ses_x");
+    await withGlobal(cfg("always"), async () => {
+      expect(resolveModel(root, "graphhopper-simplify")).toBe("claude-oauth/claude-sonnet-5-5");
+    });
+  });
+
+  test("apply=escalated は goal が昇格済みのときだけ表のモデル", async () => {
+    const root = tmpRoot();
+    startGoal(root, "t", "ses_x");
+    await withGlobal(cfg("escalated"), async () => {
+      expect(resolveModel(root, "graphhopper-simplify")).toBe("opencode-go/deepseek-v4.1-flash");
+      setCascade(root, { level: "escalated", reason: "hard", model: null, restore: null, children: [], at: new Date().toISOString() });
+      expect(resolveModel(root, "graphhopper-simplify")).toBe("claude-oauth/claude-sonnet-5-5");
+    });
+  });
+
+  test("表に無い役は config の割当のまま", async () => {
+    const root = tmpRoot();
+    startGoal(root, "t", "ses_x");
+    await withGlobal(cfg("always"), async () => {
+      expect(resolveModel(root, "graphhopper-librarian")).toBeUndefined();
+    });
+  });
+});
+
+describe("alternativeModel（やり直し・回収に使う代替モデル）", () => {
+  const tmpRoot = (): string => mkdtempSync(join(tmpdir(), "gh-invoke-alt-"));
+
+  test("モデル明示の呼び出しは替えない", async () => {
+    const root = tmpRoot();
+    await withGlobal({ cascade: { enabled: true, escalate: "claude-oauth/claude-sonnet-5-5" } }, async () => {
+      const alt = alternativeModel({ cfg: readConfig(root), agent: "graphhopper-simplify", current: "p/m", explicit: true });
+      expect(alt).toBe("p/m");
+    });
+  });
+
+  test("表のモデル → 無ければ escalate。cascade 無効なら現在のまま", async () => {
+    const root = tmpRoot();
+    await withGlobal(
+      { cascade: { enabled: true, escalate: "claude-oauth/claude-sonnet-5-5" } },
+      async () => {
+        expect(
+          alternativeModel({ cfg: readConfig(root), agent: "graphhopper-simplify", current: "p/m", explicit: false }),
+        ).toBe("claude-oauth/claude-sonnet-5-5");
+      },
+    );
+    await withGlobal({ cascade: { enabled: false, escalate: "claude-oauth/claude-sonnet-5-5" } }, async () => {
+      expect(
+        alternativeModel({ cfg: readConfig(root), agent: "graphhopper-simplify", current: "p/m", explicit: false }),
+      ).toBe("p/m");
+    });
+  });
+
+  test("現在と同じ・model_deny 一致なら替えない", async () => {
+    const root = tmpRoot();
+    const same = "claude-oauth/claude-sonnet-5-5";
+    await withGlobal({ cascade: { enabled: true, escalate: same } }, async () => {
+      expect(alternativeModel({ cfg: readConfig(root), agent: "x", current: same, explicit: false })).toBe(same);
+    });
+    await withGlobal(
+      { cascade: { enabled: true, escalate: same }, model_deny: ["claude-oauth/*"] },
+      async () => {
+        expect(
+          alternativeModel({ cfg: readConfig(root), agent: "x", current: "opencode-go/deepseek-v4.1-flash", explicit: false }),
+        ).toBe("opencode-go/deepseek-v4.1-flash");
+      },
+    );
   });
 });
 
@@ -475,4 +626,295 @@ describe("invoke 子envのbearer除去", () => {
       delete process.env["AWS_BEARER_TOKEN_BEDROCK"];
     }
   });
+});
+
+describe("runChild: 最初の出力を待つ上限（無応答の打ち切り）", () => {
+  /** SIGTERM で exit を返す偽プロセス（group kill の代わり） */
+  function killableSpawn(onStart?: (p: FakeProc) => void): SpawnFn {
+    return ((_cmd: string, _args: string[], _opts: unknown) => {
+      const p = new EventEmitter() as FakeProc;
+      p.pid = 888888;
+      p.killCalled = [];
+      p.stdout = new EventEmitter();
+      p.stderr = new EventEmitter();
+      (p as unknown as { kill: (s: string) => boolean }).kill = (s: string) => {
+        p.killCalled.push(s);
+        setTimeout(() => p.emit("exit", null), 0);
+        return true;
+      };
+      onStart?.(p);
+      return p as unknown as ChildProcess;
+    }) as SpawnFn;
+  }
+
+  test("出力が来ないまま上限を超えると idleTimedOut で打ち切る", async () => {
+    const r = await runChild(
+      "opencode",
+      ["run"],
+      { timeoutMs: 5000, firstOutputMs: 100, cwd: "/tmp", childEnv: {} },
+      killableSpawn(),
+    );
+    expect(r.idleTimedOut).toBe(true);
+    expect(r.timedOut).toBe(false);
+    expect(r.output).toMatch("no output for 0s");
+    expect(r.failed).toBe(true);
+  }, 15000);
+
+  test("持ち時間が先に切れたら timedOut だけが立つ（無応答の印と重ならない）", async () => {
+    const r = await runChild(
+      "opencode",
+      ["run"],
+      { timeoutMs: 50, firstOutputMs: 60, killGraceMs: 200, cwd: "/tmp", childEnv: {} },
+      killableSpawn(),
+    );
+    expect(r.timedOut).toBe(true);
+    expect(r.idleTimedOut).toBe(false);
+  }, 15000);
+
+  test("stderr の1行目でも打ち切らない（応答が始まっていれば待つ）", async () => {
+    const spawn = killableSpawn((p) => {
+      setTimeout(() => {
+        p.stderr.emit("data", Buffer.from("> graphhopper-simplify · deepseek-v4.1-flash\n", "utf8"));
+        setTimeout(() => {
+          p.stdout.emit("data", Buffer.from("answer", "utf8"));
+          p.emit("exit", 0);
+        }, 600);
+      }, 20);
+    });
+    const r = await runChild("opencode", ["run"], { timeoutMs: 5000, firstOutputMs: 400, cwd: "/tmp", childEnv: {} }, spawn);
+    expect(r.idleTimedOut).toBe(false);
+    expect(r.output).toBe("answer");
+  }, 15000);
+});
+
+describe("runWithRecovery: 無応答のやり直しと時間切れの回収", () => {
+  const base = {
+    sessionID: "ses_first",
+    timeoutMs: 120000,
+    altModel: "claude-oauth/claude-sonnet-5-5",
+    salvage: true,
+    salvageTimeoutMs: SALVAGE_TIMEOUT_MS,
+    nextSessionID: () => "ses_second",
+  };
+
+  test("無応答なら新しいセッションで別モデルに1回だけやり直す（残りの持ち時間）", async () => {
+    const { run, calls } = fakeRun([
+      ok("error: invoke gave no output for 45s (killed; no first output)", { idleTimedOut: true, elapsedMs: 45000 }),
+      ok("second answer", { elapsedMs: 20000 }),
+    ]);
+    const r = await runWithRecovery({ ...base, run, model: "opencode-go/deepseek-v4.1-flash" });
+    expect(calls.length).toBe(2);
+    expect(calls[1].sessionID).toBe("ses_second");
+    expect(calls[1].model).toBe("claude-oauth/claude-sonnet-5-5");
+    expect(calls[1].timeoutMs).toBe(75000);
+    expect(r.restarted).toBe(true);
+    expect(r.salvaged).toBeFalsy();
+    expect(r.output).toBe("second answer");
+  });
+
+  test("やり直しも無応答なら、回収に進まずエラーで返す（セッションIDつき）", async () => {
+    const { run, calls } = fakeRun([
+      ok("no output", { idleTimedOut: true, elapsedMs: 45000 }),
+      ok("no output again", { idleTimedOut: true, elapsedMs: 10000 }),
+    ]);
+    const r = await runWithRecovery({ ...base, run });
+    expect(calls.length).toBe(2);
+    expect(r.output).toContain("no output again");
+    expect(r.output).toContain("session: ses_second");
+    expect(r.salvaged).toBeFalsy();
+  });
+
+  test("時間切れなら同じセッションに続きを頼み、答えを回収して印を付ける", async () => {
+    const { run, calls } = fakeRun([
+      ok("partial\nerror: invoke timeout after 120.0s (limit 120s; killed)", { timedOut: true, elapsedMs: 120000 }),
+      ok("回収した答え", { elapsedMs: 30000 }),
+    ]);
+    const r = await runWithRecovery({ ...base, run });
+    expect(calls.length).toBe(2);
+    expect(calls[1].sessionID).toBe("ses_first");
+    expect(calls[1].model).toBe("claude-oauth/claude-sonnet-5-5");
+    expect(calls[1].timeoutMs).toBe(SALVAGE_TIMEOUT_MS);
+    expect(calls[1].prompt).toBe(SALVAGE_PROMPT);
+    expect(r.salvaged).toBe(true);
+    expect(r.timedOut).toBe(true);
+    expect(r.elapsedMs).toBe(150000);
+    expect(r.output).toContain("回収した答え");
+    expect(r.output).toContain("[invoke: 時間切れのあと、同じセッションから回収した");
+    expect(r.output).toContain("session: ses_first");
+  });
+
+  test("回収した答えの本文に error: 行があっても失敗にしない（機械値で判定）", async () => {
+    const { run } = fakeRun([
+      ok("error: invoke timeout after 120.0s", { timedOut: true, failed: true, elapsedMs: 120000 }),
+      ok("指摘:\nerror: を握り潰している src/a.ts:1", { elapsedMs: 30000 }),
+    ]);
+    const r = await runWithRecovery({ ...base, run });
+    expect(r.salvaged).toBe(true);
+    expect(r.output).toContain("握り潰している");
+  });
+
+  test("回収が非0終了なら失敗（答えとして使わせない）", async () => {
+    const { run } = fakeRun([
+      ok("error: invoke timeout after 120.0s", { timedOut: true, failed: true, elapsedMs: 120000 }),
+      ok("途中\nerror: opencode run exited with code 1", { failed: true, elapsedMs: 5000 }),
+    ]);
+    const r = await runWithRecovery({ ...base, run });
+    expect(r.salvaged).toBeFalsy();
+    expect(r.timedOut).toBe(true);
+    expect(r.output).toContain("回収も失敗した");
+  });
+
+  test("回収も時間切れなら「回収も失敗した」と出す（答えとしては使わせない）", async () => {
+    const { run } = fakeRun([
+      ok("error: invoke timeout after 120.0s", { timedOut: true, elapsedMs: 120000 }),
+      ok("error: invoke timeout after 90.0s", { timedOut: true, elapsedMs: 90000 }),
+    ]);
+    const r = await runWithRecovery({ ...base, run });
+    expect(r.salvaged).toBeFalsy();
+    expect(r.output).toContain("回収も失敗した");
+    expect(r.output).not.toContain("error: invoke timeout after 90.0s");
+  });
+
+  test("回収を切っていれば spawn は 1 回だけ（verify の角度）", async () => {
+    const { run, calls } = fakeRun([ok("error: invoke timeout after 120.0s", { timedOut: true, elapsedMs: 120000 })]);
+    const r = await runWithRecovery({ ...base, run, salvage: false });
+    expect(calls.length).toBe(1);
+    expect(r.salvaged).toBeFalsy();
+    expect(r.output).toContain("session: ses_first");
+  });
+
+  test("やり直しのあと時間切れなら、やり直したセッションから回収する", async () => {
+    const { run, calls } = fakeRun([
+      ok("no output", { idleTimedOut: true, failed: true, elapsedMs: 45000 }),
+      ok("error: invoke timeout after 75.0s", { timedOut: true, failed: true, elapsedMs: 75000 }),
+      ok("回収した答え", { elapsedMs: 20000 }),
+    ]);
+    const r = await runWithRecovery({ ...base, run, model: "opencode-go/deepseek-v4.1-flash" });
+    expect(calls.length).toBe(3);
+    expect(calls[2].sessionID).toBe("ses_second");
+    expect(calls[2].prompt).toBe(SALVAGE_PROMPT);
+    expect(r.restarted).toBe(true);
+    expect(r.salvaged).toBe(true);
+    expect(r.elapsedMs).toBe(140000);
+  });
+
+  test("やり直しのあとの回収も失敗したら、やり直した印を残して時間切れで返す", async () => {
+    const { run, calls } = fakeRun([
+      ok("no output", { idleTimedOut: true, failed: true, elapsedMs: 45000 }),
+      ok("error: invoke timeout after 75.0s", { timedOut: true, failed: true, elapsedMs: 75000 }),
+      ok("", { failed: true, elapsedMs: 1000 }),
+    ]);
+    const r = await runWithRecovery({ ...base, run });
+    expect(calls.length).toBe(3);
+    expect(r.restarted).toBe(true);
+    expect(r.timedOut).toBe(true);
+    expect(r.salvaged).toBeFalsy();
+    expect(r.output).toContain("回収も失敗した");
+  });
+
+  test("キャンセルではやり直しも回収もしない", async () => {
+    const { run, calls } = fakeRun([ok("error: invoke cancelled by client", { cancelled: true, elapsedMs: 3000 })]);
+    const r = await runWithRecovery({ ...base, run });
+    expect(calls.length).toBe(1);
+    expect(r.cancelled).toBe(true);
+  });
+
+  test("時間切れでなければ回収しない", async () => {
+    const { run, calls } = fakeRun([ok("fine")]);
+    const r = await runWithRecovery({ ...base, run });
+    expect(calls.length).toBe(1);
+    expect(r.salvaged).toBeFalsy();
+  });
+});
+
+describe("invokeStructured: 無応答のやり直しの配線", () => {
+  /** 呼ばれるたびに argv を記録する。silent 回は黙ったまま kill を待ち、それ以外は答えて終わる */
+  function scriptedSpawn(silentCalls: number): { spawn: SpawnFn; argv: string[][] } {
+    const argv: string[][] = [];
+    const spawn = ((_cmd: string, args: string[], _opts: unknown) => {
+      argv.push(args);
+      const p = new EventEmitter() as FakeProc;
+      p.pid = 777777;
+      p.killCalled = [];
+      p.stdout = new EventEmitter();
+      p.stderr = new EventEmitter();
+      (p as unknown as { kill: (s: string) => boolean }).kill = (sig: string) => {
+        p.killCalled.push(sig);
+        setTimeout(() => p.emit("exit", null), 0);
+        return true;
+      };
+      if (argv.length > silentCalls) {
+        setTimeout(() => {
+          p.stdout.emit("data", Buffer.from("answer", "utf8"));
+          p.emit("exit", 0);
+        }, 0);
+      }
+      return p as unknown as ChildProcess;
+    }) as SpawnFn;
+    return { spawn, argv };
+  }
+  const flag = (a: string[], name: string): string | undefined =>
+    a.includes(name) ? a[a.indexOf(name) + 1] : undefined;
+  const cfg = {
+    agents: { "graphhopper-simplify": "opencode-go/deepseek-v4.1-flash" },
+    cascade: { enabled: true, escalate: "claude-oauth/claude-sonnet-5-5" },
+  };
+  const root = (): string => mkdtempSync(join(tmpdir(), "gh-invoke-restart-"));
+
+  test("最初の出力が来なければ打ち切り、新しいセッション・代替モデルで 1 回やり直す", async () => {
+    const { invokeStructured } = await import("./invoke");
+    const { spawn, argv } = scriptedSpawn(1);
+    await withGlobal(cfg, async () => {
+      const r = await invokeStructured({ agent: "graphhopper-simplify", prompt: "hi", root: root() }, spawn, {
+        firstOutputMs: 60,
+      });
+      expect(argv.length).toBe(2);
+      expect(flag(argv[0], "--model")).toBe("opencode-go/deepseek-v4.1-flash");
+      expect(flag(argv[1], "--model")).toBe("claude-oauth/claude-sonnet-5-5");
+      expect(flag(argv[0], "--session")).toMatch(/^ses_[0-9a-f]{24}$/);
+      expect(flag(argv[1], "--session")).not.toBe(flag(argv[0], "--session"));
+      expect(r.restarted).toBe(true);
+      expect(r.output).toBe("answer");
+    });
+  }, 15000);
+
+  test("モデルを明示した呼び出しは、やり直しでも同じモデル", async () => {
+    const { invokeStructured } = await import("./invoke");
+    const { spawn, argv } = scriptedSpawn(1);
+    await withGlobal(cfg, async () => {
+      await invokeStructured(
+        { agent: "graphhopper-simplify", model: "opencode-go/kimi-k3", prompt: "hi", root: root() },
+        spawn,
+        { firstOutputMs: 60 },
+      );
+      expect(argv.length).toBe(2);
+      expect(flag(argv[1], "--model")).toBe("opencode-go/kimi-k3");
+    });
+  }, 15000);
+
+  test("やり直しも無応答なら 2 回で止まり、無応答の印とセッションIDを返す", async () => {
+    const { invokeStructured } = await import("./invoke");
+    const { spawn, argv } = scriptedSpawn(99);
+    await withGlobal(cfg, async () => {
+      const r = await invokeStructured({ agent: "graphhopper-simplify", prompt: "hi", root: root() }, spawn, {
+        firstOutputMs: 60,
+      });
+      expect(argv.length).toBe(2);
+      expect(r.idleTimedOut).toBe(true);
+      expect(r.timedOut).toBe(false);
+      expect(r.output).toContain(`session: ${flag(argv[1], "--session")}`);
+    });
+  }, 15000);
+
+  test("出力が来ていれば 1 回で終わる（見張りは最初の出力まで）", async () => {
+    const { invokeStructured } = await import("./invoke");
+    const { spawn, argv } = scriptedSpawn(0);
+    await withGlobal(cfg, async () => {
+      const r = await invokeStructured({ agent: "graphhopper-simplify", prompt: "hi", root: root() }, spawn, {
+        firstOutputMs: 60,
+      });
+      expect(argv.length).toBe(1);
+      expect(r.restarted).toBeFalsy();
+    });
+  }, 15000);
 });

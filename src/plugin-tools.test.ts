@@ -675,6 +675,48 @@ describe("plugin: invoke / scoreboard", () => {
     }
   });
 
+  test("invoke は時間切れのあと同じセッションから答えを回収し、履歴に salvage を残す", async () => {
+    const dir = tmpRoot();
+    startGoal(dir, "t", "s1");
+    const calls = join(dir, "calls.log");
+    const bin = join(dir, "fake-opencode");
+    writeFileSync(
+      bin,
+      [
+        "#!/bin/sh",
+        `echo "$*" >> "${calls}"`,
+        `case "$*" in *"持ち時間が切れた"*) echo "回収した答え"; exit 0;; esac`,
+        "sleep 60",
+      ].join("\n") + "\n",
+      { mode: 0o755 },
+    );
+    const prev = process.env["GH_OPENCODE_BIN"];
+    process.env["GH_OPENCODE_BIN"] = bin;
+    try {
+      const r = (await opsTools(dir).get("graphhopper_invoke")!.execute(
+        { agent: "graphhopper-librarian", prompt: "x", timeoutMs: 10000 },
+        {},
+      )) as { content: string };
+      expect(r.content).toContain("回収した答え");
+      expect(r.content).toContain("[invoke: 時間切れのあと、同じセッションから回収した");
+      expect(r.content).toMatch(/timedOut [0-9.]+s（回収）/);
+      const log = readFileSync(calls, "utf8");
+      const sessions = [...log.matchAll(/--session (ses_[0-9a-f]{24})/g)].map((m) => m[1]);
+      expect(sessions).toHaveLength(2);
+      expect(sessions[1]).toBe(sessions[0]);
+      // 回収の持ち時間（90 秒）は依頼文の先頭に載る
+      expect(log).toContain("最大 90 秒");
+      const { readHistory } = await import("./state");
+      const ev = readHistory(dir).find((h) => (h as { type: string }).type === "invoke") as
+        | { timed_out: boolean; salvage?: boolean; restart?: boolean }
+        | undefined;
+      expect(ev).toMatchObject({ timed_out: true, salvage: true, restart: false });
+    } finally {
+      if (prev === undefined) delete process.env["GH_OPENCODE_BIN"];
+      else process.env["GH_OPENCODE_BIN"] = prev;
+    }
+  }, 40000);
+
   test("scoreboard は見出し3つを返す / formatScoreboard", async () => {
     const r = (await opsTools(tmpRoot()).get("graphhopper_scoreboard")!.execute({})) as { content: string };
     expect(r.content).toBe("## models\n## goals\n## hints");
@@ -1317,6 +1359,32 @@ describe("plugin: graphhopper_verify（design g-mwiocibp 判断3・4）", () => 
     });
   });
 
+  test("角度の時間切れは回収しない（判定不能で返り、回収の依頼は送られない）", async () => {
+    const dir = tmpRoot();
+    const calls = join(dir, "calls.log");
+    const bin = fakeVerifier(
+      dir,
+      [
+        `ARGS="$*"`,
+        `case "$ARGS" in *"持ち時間が切れた"*) echo "SALVAGE" >> "${calls}"; echo '\`\`\`json'; echo '{"level":"clean","summary":"急いだ"}'; echo '\`\`\`'; exit 0;; esac`,
+        `case "$ARGS" in *"角度を選ぶ役"*) echo '\`\`\`json'; echo '{"angles":[{"id":"wiring"}]}'; echo '\`\`\`'; exit 0;; esac`,
+        `ID=$(echo "$ARGS" | sed -n 's/.*角度: [^（]*（\\([a-z0-9-]*\\)）.*/\\1/p' | head -1)`,
+        `echo "$ID" >> "${calls}"`,
+        `if [ "$ID" = "wiring" ]; then sleep 60; fi`,
+        `echo '\`\`\`json'; echo '{"level":"clean","summary":"ok"}'; echo '\`\`\`'`,
+      ].join("\n"),
+    );
+    await withBin(bin, async () => {
+      const { root } = await readyGoal();
+      const r = await verify(root, { timeoutMs: 10000 });
+      const missing = r.output["missing"] as { lens: string; reason: string }[];
+      expect(missing.map((m) => m.lens)).toEqual(["wiring"]);
+      expect(missing[0]?.reason).toContain("timeout");
+      expect(callsOf(calls)).toContain("wiring");
+      expect(callsOf(calls)).not.toContain("SALVAGE");
+    });
+  }, 40000);
+
   test("diff が変わると drift の角度が持ち越され、prior が記録される。持ち越した siblings は 1 巡目が clean でも走る", async () => {
     const dir = tmpRoot();
     const { bin, calls } = angleBin(dir, { pick: "wiring", drift: ["wiring", "siblings"] });
@@ -1563,6 +1631,7 @@ describe("verify: prompt 組み立てと判定の読み取り（純粋層）", (
     const v = await import("./verify");
     expect(v.invokeFailure("error: prompt too long (13000 > 12000)")).toBeTruthy();
     expect(v.invokeFailure("本文\nerror: opencode run exited with code 143\nstderr")).toBeTruthy();
+    expect(v.invokeFailure("\nerror: invoke gave no output for 45s (killed; no first output)")).toBeTruthy();
     // verifier が findings の中で "error:" 行を引用しても判定不能にしない
     expect(v.invokeFailure("finding: src/a.ts:1 で error: を握り潰す\n```json\n{}")).toBeNull();
   });
