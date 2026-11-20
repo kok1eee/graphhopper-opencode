@@ -1944,6 +1944,52 @@ describe("plugin tool: 状態ファイルが読めないとき（g-mwoernih）",
     // 開始を拒否したので goals.json は壊れたまま（上書きしない）
     expect(readFileSync(p, "utf8")).toBe('{ "goals": [');
   });
+
+  test("phase・edit・検証系のツールも「goal なし」と言わない", async () => {
+    const root = tmpRoot();
+    mkdirSync(join(root, ".graphhopper"), { recursive: true });
+    writeFileSync(join(root, ".graphhopper", "goals.json"), '{ "goals": [', "utf8");
+    const core = tools(root);
+    const ops = opsTools(root);
+
+    const returned = [
+      await core.get("graphhopper_phase")!.execute({ phase: "implementing" }, { sessionID: "s1" }),
+      await ops.get("graphhopper_usability_set")!.execute({ level: "clean", reason: "r" }, { sessionID: "s1" }),
+      await ops
+        .get("graphhopper_edit")!
+        .execute({ filePath: "a.txt", oldString: "a", newString: "b", expectedHash: "x" }, { sessionID: "s1" }),
+    ].map(textOf);
+    for (const body of returned) {
+      expect(body).toContain("壊れていて読めません");
+      expect(body).not.toContain("no active goal");
+    }
+
+    for (const name of ["graphhopper_router_check", "graphhopper_diff_stash", "graphhopper_diag", "graphhopper_verify"]) {
+      let message = "";
+      try {
+        await ops.get(name)!.execute({}, { sessionID: "s1" });
+      } catch (e) {
+        message = (e as Error).message;
+      }
+      expect(message).toContain("壊れていて読めません");
+      expect(message).not.toContain("no active goal");
+    }
+  });
+
+  test("状態ファイルが正常で goal が無いときは、従来どおり「no active goal」", async () => {
+    const root = tmpRoot();
+    const out = textOf(
+      await tools(root).get("graphhopper_phase")!.execute({ phase: "implementing" }, { sessionID: "s1" }),
+    );
+    expect(out).toContain("no active goal");
+    let message = "";
+    try {
+      await opsTools(root).get("graphhopper_router_check")!.execute({}, { sessionID: "s1" });
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toBe("no active goal");
+  });
 });
 
 describe("plugin tool: attempt(ok) は eval_cmd 設定中にカウンタを戻さない（g-mwoiwjif）", () => {

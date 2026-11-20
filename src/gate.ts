@@ -155,14 +155,18 @@ export function runGraphhopperEdit(
     !!active && active.goal.status === "active",
   );
   if (access === "no-goal") {
-    return "error: no active goal (use plain edit as fallback, no event recorded)";
+    /* 状態ファイルが読めないときは「goal なし」と言わない（plain edit も止まっているため。g-mwoernih 決めたこと4） */
+    return (
+      state.unreadableStateNotice(root) ??
+      "error: no active goal (use plain edit as fallback, no event recorded)"
+    );
   }
   if (access === "subagent") {
     throw new Error(
       "Refused: graphhopper_edit from subagent session is blocked (read-only invariant)",
     );
   }
-  if (!active) return "error: no active goal (unexpected)";
+  if (!active) return state.unreadableStateNotice(root) ?? "error: no active goal (unexpected)";
   const p = isAbsolute(args.filePath)
     ? args.filePath
     : join(root, args.filePath);
@@ -360,7 +364,7 @@ export function checkPhaseMove(
   to: state.Phase,
 ): string | null {
   const active = state.getActive(root);
-  if (!active) return "error: no active goal";
+  if (!active) return state.unreadableStateNotice(root) ?? "error: no active goal";
   if (!state.isLegalPhaseTransition(active.state.phase, to)) {
     return (
       `error: 非法遷移 ${active.state.phase} -> ${to}。` +

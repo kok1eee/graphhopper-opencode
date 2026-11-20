@@ -77,6 +77,11 @@ export function registerOpsTools(
 ): void {
   const { root } = gh;
 
+  /* 「goal なし」と「状態ファイルが読めない」を混同しない（g-mwoernih 決めたこと4） */
+  const noActiveText = (fallback = "error: no active goal"): string =>
+    state.unreadableStateNotice(root) ?? fallback;
+  const noActiveError = (): Error => new Error(noActiveText().replace(/^error: /, ""));
+
   editor.add({
     name: "graphhopper_router_check",
     description:
@@ -97,7 +102,7 @@ export function registerOpsTools(
     ),
     execute: async () => {
       const active = state.getActive(root);
-      if (!active) throw new Error("no active goal");
+      if (!active) throw noActiveError();
       const cfg = state.readConfig(root);
       const baseline = await state.resolveBaseline($, root, active.state);
       const measured = await state.measureDiffLines($, root, baseline);
@@ -146,7 +151,7 @@ export function registerOpsTools(
     ),
     execute: async () => {
       const active = state.getActive(root);
-      if (!active) throw new Error("no active goal");
+      if (!active) throw noActiveError();
       const baseline = await state.resolveBaseline($, root, active.state);
       const stashed = await state.stashDiff($, root, baseline, active.goal.id);
       if (!stashed) throw new Error("diff取得失敗（VCS不在またはbaseline不正）");
@@ -281,7 +286,7 @@ export function registerOpsTools(
     ),
     execute: async (args: { level: "clean" | "drift" | "skipped"; reason: string; model?: string }) => {
       const active = state.getActive(root);
-      if (!active) return text("error: no active goal");
+      if (!active) return text(noActiveText());
       const reason = String(args.reason ?? "").trim();
       if (!reason) return text("error: reason は必須です（skipped も理由を書く）");
       const baseline = await state.resolveBaseline($, root, active.state);
@@ -326,7 +331,7 @@ export function registerOpsTools(
     ),
     execute: async () => {
       const active = state.getActive(root);
-      if (!active) throw new Error("no active goal");
+      if (!active) throw noActiveError();
       const cmd = active.state.eval_cmd ?? null;
       const run = await state.runDiagCommand(root, cmd);
       const baseline = await state.resolveBaseline($, root, active.state);
@@ -424,7 +429,7 @@ export function registerOpsTools(
         delayMs?: number;
       };
       const active = state.getActive(root);
-      if (!active) throw new Error("no active goal");
+      if (!active) throw noActiveError();
       const goalId = active.goal.id;
       /* 採点基準の改ざんは検証を止める（design g-mwmnvx3x 判断1）。
        * 採点コード/system prompt の変更は記録だけ（complete のゲートで扱う） */
