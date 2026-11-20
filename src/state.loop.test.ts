@@ -51,6 +51,7 @@ import {
   resetLoopForClear,
   resumeGoal,
   setIntentPath,
+  setEvalCmd,
   setPhase,
   setStartBaselineRev,
   setUsabilityVerdict,
@@ -956,6 +957,54 @@ describe("evalリトライ上限 giveUp", () => {
     expect(r.fail_streak).toBe(0);
     expect(r.escalate).toBe(false);
     expect(r.giveUp).toBe(false);
+    expect(r.kept_progress).toBe(false);
+  });
+
+  /* 合否は eval が決める。自己申告の ok で詰まりを消せないようにする（design g-mwoiwjif 決めたこと7） */
+  test("eval_cmd 設定中の自己申告 ok は fail_streak と停滞カウンタを戻さない", () => {
+    const root = tmpRoot();
+    startGoal(root, "test goal", "sess1");
+    setEvalCmd(root, "make test");
+    recordAttempt(root, false, "");
+    recordAttempt(root, false, "");
+    noteEdit(root, "src/a.ts");
+    noteEdit(root, "src/a.ts");
+    noteDiffLines(root, 10);
+    noteDiffLines(root, 10);
+    noteDiffLines(root, 10);
+    const r = recordAttempt(root, true, "", { selfReported: true });
+    expect(r.fail_streak).toBe(2);
+    expect(r.kept_progress).toBe(true);
+    const s = readState(root);
+    expect(s.edit_streak).toBe(2);
+    expect(s.diff_stall).toBe(2);
+  });
+
+  test("eval_cmd 設定中でも eval 経由の ok はリセットする", () => {
+    const root = tmpRoot();
+    startGoal(root, "test goal", "sess1");
+    setEvalCmd(root, "make test");
+    recordAttempt(root, false, "");
+    recordAttempt(root, false, "");
+    noteEdit(root, "src/a.ts");
+    noteDiffLines(root, 10);
+    noteDiffLines(root, 10);
+    const r = recordAttempt(root, true, "");
+    expect(r.fail_streak).toBe(0);
+    expect(r.kept_progress).toBe(false);
+    expect(readState(root).edit_streak).toBe(0);
+    expect(readState(root).diff_stall).toBe(0);
+  });
+
+  test("eval_cmd が無ければ自己申告 ok は従来どおりリセットする", () => {
+    const root = tmpRoot();
+    startGoal(root, "test goal", "sess1");
+    recordAttempt(root, false, "");
+    noteEdit(root, "src/a.ts");
+    const r = recordAttempt(root, true, "", { selfReported: true });
+    expect(r.fail_streak).toBe(0);
+    expect(r.kept_progress).toBe(false);
+    expect(readState(root).edit_streak).toBe(0);
   });
 
   function rootWithConfig(cfg: object): string {

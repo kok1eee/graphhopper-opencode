@@ -25,7 +25,7 @@
 - **route=advisorだからverifier呼び出し自体を省略しない**: 「小diffだから自分で見れば十分」は禁止。`graphhopper_verifier_set`はresultsが空だと機械的にエラーを返す（self-graded完了防止のゲート）ので、必ず `graphhopper_verify` を1回呼んでから記録する。`graphhopper_invoke` で自前の results を作ると3指紋の照合をすり抜けるため、`verify` 自体が壊れている場合の例外に限る
 - **verifier fan-outへの指示を「重大な問題だけ報告」にしない**: 全件報告→機械集約が正しい順序（保守的な指示は再現率を落とす）。`results` に詰めるのは各角度の `level` そのまま（キーは `lens`/`level`/`target`/`model`/`severity`/`prior`。持ち越した角度の `prior` は verify が付けるのでそのまま渡す。`charter`・`verdict`・`note` は存在しない）。メインの裁量でdriftを握り潰さない（集約ルールがコード側にあるため握り潰せない）
 - **`graphhopper_verify` の前提を飛ばさない**: 退避diff・診断・現在のdiffの指紋が3つ揃わないと throw する（design g-mwiocibp）。順序は `diag` → `diff_stash` → `verify` で固定。simplify を適用した後も同じ順で取り直す
-- **`graphhopper_attempt`を省略しない**: 呼ばなければfail_streakが0のまま止まり、詰まっていても oracle への相談が起動しない。実装試行のたびに毎回呼ぶ
+- **`graphhopper_attempt`を省略しない（eval_cmd 未設定のとき）**: 呼ばなければfail_streakが0のまま止まり、詰まっていても oracle への相談が起動しない。eval_cmd 未設定なら実装試行のたびに毎回呼ぶ。eval_cmd 設定中は idle の eval が自動記録するので呼ばない（設計は refs/implementing.md）
 - **escalate: trueが出たのに自力でもう一度だけ試そうとしない**: 閾値はコード側の機械カウント。無視して回すと同じ失敗を繰り返すだけになりがちなので、必ずoracleに相談してから再試行する
 
 - **モデル割当を変えたらTUI再起動**: 実行中セッションのagent→モデル束縛は古いまま残る（`task()`は初回解決を維持し、config変更が伝播しない実証あり）。`graphhopper_invoke` と `graphhopper_verify` は毎回configを読み直すため新割当が効く。subagent呼び出しはinvoke系を優先し、fan-out前は最初に1件だけ投げてDBでモデルを確認せよ

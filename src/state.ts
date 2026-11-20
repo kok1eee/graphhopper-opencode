@@ -223,9 +223,10 @@ export interface LoopState {
   /** polish フェーズの verifier fan-out 結果。null = 未実行 */
   last_verifier: VerifierVerdict | null;
   /**
-   * implementing での連続失敗数（graphhopper_attempt が機械カウント）。
+   * implementing での連続失敗数（eval か graphhopper_attempt が機械カウント）。
    * stuck_threshold に達したら graphhopper-oracle への相談を促す。
-   * ok な attempt か phase 遷移でリセットされる。
+   * eval の成功・phase 遷移・resume でリセットされる。eval_cmd 設定中の自己申告 ok では
+   * リセットしない（合否は eval が決める。design g-mwoiwjif）。
    */
   fail_streak: number;
   /**
@@ -2402,6 +2403,47 @@ export async function computeDiffHash(
   }
 }
 
+/** git の未追跡ファイル（パス・サイズ・更新時刻）の指紋。git は未追跡を diff に含めないため、
+ * 新しいファイルを作っただけのターンを「進んでいない」と誤判定しないよう進捗の材料に足す
+ * （design g-mwoiwjif 決めたこと6）。jj は自動追跡なので jj のリポジトリでは使わない。
+ * 測れなければ空文字（材料に足さないだけ） */
+async function measureUntrackedFingerprint(shell: Shell, root: string): Promise<string> {
+  try {
+    const r = await shell`git ls-files --others --exclude-standard`.cwd(root).nothrow().quiet();
+    if (r.exitCode !== 0) return "";
+    const files = r.stdout
+      .toString()
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((f) => f.length > 0 && !f.startsWith(".graphhopper/"));
+    const parts = files.sort().map((f) => {
+      try {
+        const st = statSync(join(root, f));
+        return `${f}:${st.size}:${Math.trunc(st.mtimeMs)}`;
+      } catch {
+        return f;
+      }
+    });
+    return parts.length > 0 ? fnv1a(parts.join("\n")) : "";
+  } catch {
+    return "";
+  }
+}
+
+/** 進捗の証拠（goal 開始基準からの diff の指紋）。測れなければ null。
+ * jj のリポジトリは未追跡も diff に含むので、git のときだけ未追跡の指紋を足す。 */
+export async function measureProgressEvidence(
+  shell: Shell,
+  root: string,
+  baseline: string | null,
+): Promise<string | null> {
+  const hash = await computeDiffHash(shell, root, baseline);
+  if (hash === null) return null;
+  if (existsSync(join(root, ".jj"))) return hash;
+  const untracked = await measureUntrackedFingerprint(shell, root);
+  return untracked ? `${hash}+${untracked}` : hash;
+}
+
 /** diff_stash 時点の指紋を保存する（verifier_set が verdict へ写す） */
 export function setStashDiffHash(root: string, hash: string | null): void {
   const state = readState(root);
@@ -3096,6 +3138,8 @@ export interface AttemptResult {
   escalate: boolean;
   /** 連続失敗が max_eval_fails に達し、goal を pause すべきか */
   giveUp: boolean;
+  /** eval_cmd があるため自己申告 ok ではカウンタを戻さなかった（design g-mwoiwjif） */
+  kept_progress?: boolean;
 }
 
 export function setEvalCmd(root: string, cmd: string): LoopState {
@@ -3354,16 +3398,23 @@ export function recordAttempt(
   root: string,
   ok: boolean,
   note: string,
+  opts?: {
+    /** ツールの自己申告（graphhopper_attempt）か。idle の eval からの呼び出しは false */
+    selfReported?: boolean;
+  },
 ): AttemptResult {
   const state = readState(root);
-  const fail_streak = ok ? 0 : state.fail_streak + 1;
+  /* eval_cmd がある間は合否を eval が決める。自己申告の ok ではカウンタを戻さない
+   * （attempt(ok:true) を 1 回呼ぶだけで eval の連続失敗を消せてしまうため。design g-mwoiwjif 決めたこと7） */
+  const keepProgress = ok && opts?.selfReported === true && !!state.eval_cmd;
+  const fail_streak = ok ? (keepProgress ? state.fail_streak : 0) : state.fail_streak + 1;
   // ok は進展の証拠: edit 堂々巡り・diff 停滞もリセットする
   // （idle の eval 経路と attempt(ok) 自己申告経路の両方に効く）
   writeState(root, {
     ...state,
     fail_streak,
     notes: note || state.notes,
-    ...(ok
+    ...(ok && !keepProgress
       ? { edit_file: null, edit_streak: 0, diff_stall: 0 }
       : {}),
   });
@@ -3380,7 +3431,7 @@ export function recordAttempt(
       note,
     });
   }
-  return { fail_streak, escalate, giveUp };
+  return { fail_streak, escalate, giveUp, kept_progress: keepProgress };
 }
 
 /* ================================================================== *

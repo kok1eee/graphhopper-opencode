@@ -622,7 +622,7 @@ export function registerCoreTools(
   editor.add({
     name: "graphhopper_attempt",
     description:
-      "implementingでの実装試行の成否を記録する（graphhopper_set_evalでeval_cmdを設定していない場合の自己申告フォールバック。eval_cmd設定済みなら自動実行されるのでこのツールは不要）。連続失敗がstuck_threshold（既定2）に達したら escalate=true を返し、graphhopper_invoke(agent: 'graphhopper-oracle') での相談を促す。okな試行やphase遷移でfail_streakはリセットされる",
+      "implementingでの実装試行の成否を記録する（graphhopper_set_evalでeval_cmdを設定していない場合の自己申告フォールバック。eval_cmd設定済みなら自動実行されるのでこのツールは不要）。連続失敗がstuck_threshold（既定2）に達したら escalate=true を返し、graphhopper_invoke(agent: 'graphhopper-oracle') での相談を促す。okな試行やphase遷移でfail_streakはリセットされる（eval_cmd設定中はokでも戻さない。合否はevalが決める）",
     input: S.obj(
       {
         ok: { type: "boolean", description: "この試行は成功したか（テストが通った・目的の変更が完了した等）" },
@@ -634,14 +634,20 @@ export function registerCoreTools(
       const args = input as { ok: boolean; note: string };
       const active = state.getActive(root);
       if (!active) return text(noActiveText("error: no active goal"));
-      const r = state.recordAttempt(root, args.ok, args.note);
+      const r = state.recordAttempt(root, args.ok, args.note, { selfReported: true });
       const managed = !args.ok && active.state.eval_cmd ? `\n${EVAL_MANAGED_NOTE}` : "";
       const attemptCascade = !args.ok ? await syncCascade(gh) : null;
       const cascadeNote =
         attemptCascade && state.readConfig(root).cascade.enabled
           ? `${attemptCascade}（注: 判定nodeの子セッションは quality マップで昇格モデルに切替）`
           : attemptCascade;
-      if (args.ok) return text("attempt recorded: ok (fail_streak reset to 0)");
+      if (args.ok) {
+        return text(
+          r.kept_progress
+            ? "attempt recorded: ok（eval_cmd 設定中のため fail_streak・停滞カウンタは戻していない。合否は eval が決める）"
+            : "attempt recorded: ok (fail_streak reset to 0)",
+        );
+      }
       if (r.giveUp) {
         const paused = state.pauseGoal(root);
         if (paused) {

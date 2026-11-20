@@ -55,23 +55,38 @@
   （eval_cmd が pass しても同じ。ゲート拒否メッセージに残りタスクが列挙される）。
   タスクを足したなら、polish へ進む**前に**全部を completed か cancelled にしておくこと
   （1 件も足していなければ、この手順は要らない）
-- **実装試行のたびに `graphhopper_attempt(ok, note)` を呼ぶ**（成否をコード側で機械カウントする）。
-  ただし **eval_cmd設定中はattemptを呼ばない**（idle evalが自動記録するため二重計数になる。
-  手動の進捗メモが必要ならnoteに残す）。eval未設定時のみ自己申告フォールバックとして使う
+- **eval_cmd 未設定のときだけ、実装試行のたびに `graphhopper_attempt(ok, note)` を呼ぶ**
+  （成否をコード側で機械カウントする自己申告フォールバック）。
+  **eval_cmd設定中は呼ばない**（idle evalが自動記録するため二重計数になる）。
+  手動の進捗メモが必要ならnoteではなく会話・log に残す。
+  万一 eval_cmd 設定中に呼んでも、`ok: true` は fail_streak も停滞カウンタ（同一ファイル再編集・diff 停滞）も
+  戻さない（合否は eval が決める。申告で詰まりを消せないようにするため。design g-mwoiwjif）。
+  応答に「戻していない」と出る
 - **evalは自動**: eval_cmd設定後はターン終了ごとにidle evalが走る。遷移しない場合は `graphhopper_status` で phase と eval_cmd を確認する（goal切替でeval_cmdは消える。start白紙が仕様）
   - `ok: false` が続き `fail_streak` が `stuck_threshold`（既定2）に達すると `escalate: true` が返る
+    （eval_cmd 運用では attempt を呼ばないので、同じ判定の `escalate` が idle の eval 失敗文に追記される）
   - `escalate: true` が返ったら `graphhopper_invoke(agent: "graphhopper-oracle")` に相談する。これまでの
     失敗試行（何を試して何が起きたか）を渡し、助言を受けて別のアプローチで再試行する
   - 同一goal内の2回目以降のoracle相談も `graphhopper_invoke` を再度呼ぶ（invoke に session 継続は無い）。
     prompt には前回の質問・助言の結論（採用/棄却した案）・現在の失敗ログを要約して渡す
   - **これはrouter gate（diffサイズ）とは別軸のタイミング判断**——無条件で毎回opusを呼ぶのではなく、
     本当に詰まった時だけ上位モデルのコストを払う graph engineering の分岐点
-  - stuck 信号は2系統＋fail（いずれかで escalate。eval_cmd 運用では idle の eval 失敗文に自動追記される）:
-    - `fail_streak`（連続失敗。`ok`・phase 遷移・resume でリセット。`recordAttempt` 側で判定）
+  - stuck 信号は fail 系 1 つ＋進捗停滞系 2 つの計 3 系統。優先順位は fail_streak → 停滞系。
+    停滞系（`stuck:`）は同じ理由なら 1 回だけ通知され（`noteStuckNotified`）、fail_streak の
+    `escalate:` は毎回出る。知らせ方は 2 経路:
+    - eval_cmd 運用: idle の **eval 失敗文**に追記される。行名は `escalate: …`（fail_streak）と
+      `stuck: …`（停滞系）。eval が pass している間は出ない（pass なら polish へ進むので要らない）。
+    - eval_cmd 未設定: `graphhopper_attempt(ok: false)` の応答に載る。行名は
+      `escalate: true` と `escalate: true (stuck: …)`（stuck 単独の行にはならない）。
+    - どちらの経路も、eval 失敗（または `attempt(ok: false)`）で `max_eval_fails` に達した
+      giveUp が先に処理され、そのときは escalate/stuck を出さずに goal を pause する。
+    - `fail_streak`（連続失敗。`ok`（eval_cmd 未設定時のみ。設定中は戻さない）・phase 遷移・resume でリセット。
+      `recordAttempt` 側で判定）
     - 同一ファイル再編集（`stuck_edit_repeat` 既定5連。別ファイル・eval pass でリセット。
+      eval_cmd 設定中の attempt(ok) では戻らない。`checkStuck` で判定＝進捗停滞系）
+    - diff 停滞（`stuck_diff_stall` 既定4。進捗キー＝差分の指紋＋eval 合否が変わらない idle の連続。
+      差分変化・eval pass でリセット。eval_cmd 設定中の attempt(ok) では戻らない。
       `checkStuck` で判定＝進捗停滞系）
-    - diff 停滞（`stuck_diff_stall` 既定4。ワーキングコピー差分が変わらない idle eval の連続。
-      差分変化・eval pass でリセット。`checkStuck` で判定＝進捗停滞系）
   - 連続失敗が `max_eval_fails`（既定6）に達すると相談ではなく goal が pause する（giveUp）。修正して resume せよ
 - 全タスクを completed か cancelled にしたら、refs/verifier.md の `recipe: start` を実行する
   （`router_check` はレシピの中で呼ばれる。単独で先に呼ぶ必要はない）

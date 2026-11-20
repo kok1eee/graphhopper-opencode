@@ -339,8 +339,9 @@ export function designDocLockedRefusal(
   );
 }
 
-/* eval_cmd運用中のattempt二重計数への注意文（prose→codeの一歩目。
- * 拒否ではなく注意に留める: attempt(ok:true)のリセットには意味があるため） */
+/* eval_cmd運用中のattempt二重計数への注意文（prose→codeの一歩目。拒否ではなく注意に留める）。
+ * eval_cmd 設定中の attempt(ok:true) はもはやカウンタを戻さない（design g-mwoiwjif）ので、
+ * 害が残るのは fail 系の二重計上だけ */
 export const EVAL_MANAGED_NOTE =
   "（note: eval_cmd設定中のためfail系はeval側でも計数される。evalかattemptのどちらかに寄せ、二重計上に注意せよ）";
 

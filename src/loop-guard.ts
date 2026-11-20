@@ -44,7 +44,7 @@ function parseIso(v: string | null): number | null {
 /**
  * 継続してよいか / 待つか / 止めるかを決める。
  * - waiting: background 実行中。待ち始めを記録し、上限超過で pause。
- * - 進捗キーが前回と同じなら stalls を増やす。
+ * - 進捗キーが前回と同じなら stalls を増やす（キーは diff と eval 合否だけ。design g-mwoiwjif）。
  * - rounds は「積んだ回数」。上限に達したら pause（上限回数までは継続できる）。
  */
 export function evaluateGuard(input: GuardInput): GuardDecision {
@@ -105,8 +105,11 @@ export function isMidRoundRestart(
 }
 
 /**
- * 進捗キー。phase が変わった / todos が進んだ / eval 結果が変わった / 差分が変わった /
- * design doc が更新された のいずれかで別の値になる。
+ * 進捗キー。「進んだ」の証拠だけを材料にする（design g-mwoiwjif 決めたこと1・2）。
+ * - 差分の指紋（goal 開始基準からの diff の中身）と eval の合否があれば、その 2 つだけ。
+ * - 測れないとき（VCS 無し・基準無し）は従来の材料にフォールバックする（決めたこと5）。
+ * todo 完了数・phase・plan サイズは申告やツール 1 回で動くので、測れるときは材料にしない。
+ * eval 出力の末尾ハッシュも使わない（実行時間の表示が毎回変わる。決めたこと3）。
  */
 export function progressKeyOf(input: {
   phase: string;
@@ -114,7 +117,19 @@ export function progressKeyOf(input: {
   evalFingerprint: string | null;
   diffLines: number | null;
   planSize: number | null;
+  /** 差分の指紋（測れなければ null / 未指定） */
+  diffHash?: string | null;
+  /** 直近の eval の合否（eval_cmd が無ければ null / 未指定） */
+  evalOk?: boolean | null;
 }): string {
+  if (input.diffHash) {
+    const verdict = input.evalOk === null || input.evalOk === undefined
+      ? "-"
+      : input.evalOk
+        ? "pass"
+        : "fail";
+    return `diff:${input.diffHash}|eval:${verdict}`;
+  }
   return [
     input.phase,
     input.todosDone,

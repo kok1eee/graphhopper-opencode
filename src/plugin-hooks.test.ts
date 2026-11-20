@@ -38,6 +38,8 @@ function fakeCtx(opts: {
   entryThrows?: boolean;
   /** session.get の挙動。throws=即失敗、hangs=応答しない（prompt hook の期限切れ） */
   get?: "ok" | "throws" | "hangs";
+  /** session.context が返すメッセージ（テストから同じ配列に足して「進展」を作れる） */
+  messages?: unknown[];
 } = {}) {
   const hooks = new Map<string, HookCb[]>();
   const add = (name: string, cb: HookCb) => {
@@ -76,7 +78,7 @@ function fakeCtx(opts: {
           parentID: opts.parentID ?? null,
         };
       },
-      context: async () => [],
+      context: async () => opts.messages ?? [],
       prompt: async () => undefined,
       synthetic: async (input: {
         sessionID: string;
@@ -448,6 +450,139 @@ describe("plugin hook: 入口判定は裏で記録するだけ・system は固�
     /* 失敗しても例外を投げない（ユーザー入力を止めない） */
     await promptHook({ sessionID: "s-main", prompt: { text: "続き" } });
     expect(entryCalls.length).toBe(0);
+  });
+});
+
+describe("plugin hook: 進捗の証拠は diff と eval の合否だけ（g-mwoiwjif）", () => {
+  /** idle hook を 1 回叩く */
+  const runIdle = async (hooks: Map<string, HookCb[]>, sessionID: string) => {
+    const cb = hooks.get("experimental.idle")?.[0];
+    if (!cb) throw new Error("idle hook が登録されていない");
+    await cb({ sessionID, background: [] });
+  };
+
+  /** git の一時 repo（jj ではない）。.graphhopper/ は追跡しない */
+  async function gitRepo(): Promise<{
+    root: string;
+    restore: () => void;
+    setup: () => Promise<void>;
+  }> {
+    const { $ } = await import("bun");
+    const root = tmpRoot();
+    await $`git init -q ${root}`.quiet();
+    await $`git -C ${root} config user.email t@t`.quiet();
+    await $`git -C ${root} config user.name t`.quiet();
+    await Bun.write(`${root}/a.txt`, "one\n");
+    await Bun.write(`${root}/.gitignore`, ".graphhopper/\n");
+    await $`git -C ${root} add -A`.quiet();
+    await $`git -C ${root} commit -qm init`.quiet();
+    /* 進捗なしの停止を 2 回で試せるようにする（既定値を読まない） */
+    const prevCfg = process.env.GRAPHHOPPER_CONFIG;
+    const cfgPath = join(root, "gh-global.json");
+    writeFileSync(cfgPath, JSON.stringify({ loop_max_stalls: 2 }), "utf8");
+    process.env.GRAPHHOPPER_CONFIG = cfgPath;
+    return {
+      root,
+      restore: () => {
+        if (prevCfg === undefined) delete process.env.GRAPHHOPPER_CONFIG;
+        else process.env.GRAPHHOPPER_CONFIG = prevCfg;
+      },
+      setup: async () => {
+        startGoal(root, "進捗のテスト", "s-main");
+        stateSetPhase(root, "implementing");
+      },
+    };
+  }
+
+  /** 1 ターン分の tool 実行を履歴に足す（継続の重複判定を進める。実運用のターンに相当） */
+  const pushTurn = (messages: unknown[], n: number): void => {
+    messages.push({
+      type: "assistant",
+      id: `a${n}`,
+      content: [{ type: "tool", id: `call${n}`, name: "edit", state: { status: "completed", input: {} } }],
+      time: { created: n },
+    });
+  };
+
+  test("差分が変わらなければ、todo を done にしても「進捗なし」で pause する", async () => {
+    const { root, restore, setup } = await gitRepo();
+    try {
+      await setup();
+      const messages: unknown[] = [];
+      const { ctx, hooks } = fakeCtx({ messages });
+      await registerHooks({ ctx: ctx as never, root });
+      const { todoAction } = await import("./state");
+      const gid = readState(root).goal_id!;
+      todoAction(root, gid, "add", { text: "t1" });
+      await runIdle(hooks, "s-main");
+      pushTurn(messages, 1);
+      // 申告（todo 完了）は「進んだ」証拠にしない
+      todoAction(root, gid, "done", { id: "t1" });
+      await runIdle(hooks, "s-main");
+      expect(readState(root).guard.stalls).toBe(1);
+      pushTurn(messages, 2);
+      await runIdle(hooks, "s-main");
+      const s = readState(root);
+      expect(s.guard.stalls).toBe(2);
+      const goals = (await import("./state")).readGoals(root);
+      expect(goals.goals.find((g) => g.id === gid)?.status).toBe("paused");
+    } finally {
+      restore();
+    }
+  });
+
+  /* 今回の実害の再現: eval の出力末尾（実行時間など）が毎回変わっても、コードが変わらなければ
+   * 「進んだ」と見なさない。旧キーは eval 指紋を含んでいたので、この経路では一度も止まらなかった。 */
+  test("eval の出力が毎回変わっても、コードが変わらなければ「進捗なし」で pause する", async () => {
+    const { root, restore, setup } = await gitRepo();
+    try {
+      await setup();
+      setEvalCmd(root, "echo \"run $RANDOM\"; exit 1");
+      const messages: unknown[] = [];
+      const { ctx, hooks } = fakeCtx({ messages });
+      await registerHooks({ ctx: ctx as never, root });
+      await runIdle(hooks, "s-main");
+      pushTurn(messages, 1);
+      await runIdle(hooks, "s-main");
+      expect(readState(root).guard.stalls).toBe(1);
+      pushTurn(messages, 2);
+      await runIdle(hooks, "s-main");
+      const s = readState(root);
+      expect(s.guard.stalls).toBe(2);
+      const goals = (await import("./state")).readGoals(root);
+      expect(goals.goals[0].status).toBe("paused");
+    } finally {
+      restore();
+    }
+  });
+
+  test("未追跡の新規ファイルを作れば進捗になり、止まらない", async () => {
+    const { root, restore, setup } = await gitRepo();
+    try {
+      await setup();
+      const messages: unknown[] = [];
+      const { ctx, hooks } = fakeCtx({ messages });
+      await registerHooks({ ctx: ctx as never, root });
+      await runIdle(hooks, "s-main");
+      pushTurn(messages, 1);
+      await runIdle(hooks, "s-main");
+      expect(readState(root).guard.stalls).toBe(1);
+      // 追跡されていない新規ファイルも「進んだ」証拠として数える
+      await Bun.write(`${root}/b.txt`, "new file\n");
+      pushTurn(messages, 2);
+      await runIdle(hooks, "s-main");
+      expect(readState(root).guard.stalls).toBe(0);
+      // 追跡済みファイルの内容変更も同じ（git diff に出る）
+      await Bun.write(`${root}/a.txt`, "one\ntwo\n");
+      pushTurn(messages, 3);
+      await runIdle(hooks, "s-main");
+      const s = readState(root);
+      expect(s.guard.stalls).toBe(0);
+      const goals = (await import("./state")).readGoals(root);
+      expect(goals.goals[0].status).toBe("active");
+    } finally {
+      restore();
+    }
   });
 });
 

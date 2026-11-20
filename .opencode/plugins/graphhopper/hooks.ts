@@ -283,7 +283,7 @@ export function guardPauseText(
     reason === "rounds"
       ? `自動継続が上限（${cfg.loop_max_rounds} 回）に達した`
       : reason === "stalls"
-        ? `進捗の無いターンが ${cfg.loop_max_stalls} 回続いた`
+        ? `差分も eval の合否も変わらないターンが ${cfg.loop_max_stalls} 回続いた`
         : reason === "wait"
           ? "background（subagent / shell）の完了を待ち続けた"
           : "継続の途中でプロセスが落ちた";
@@ -294,8 +294,15 @@ export function guardPauseText(
   );
 }
 
-/** 継続可否を判断する材料になる進捗キー */
-function currentProgressKey(root: string, goalId: string, s: state.LoopState): string {
+/** 継続可否を判断する材料になる進捗キー。
+ * 「進んだ」の証拠は差分の指紋と eval の合否だけ（design g-mwoiwjif 決めたこと1・2）。
+ * 差分を測れない環境では従来の材料にフォールバックする（決めたこと5）。 */
+async function currentProgressKey(
+  shell: typeof $,
+  root: string,
+  goalId: string,
+  s: state.LoopState,
+): Promise<string> {
   const loaded = state.readTodosStatus(root, goalId);
   const items = loaded.valid ? loaded.store.items : [];
   const todosDone = items.filter((i) => i.status === "completed").length;
@@ -305,12 +312,19 @@ function currentProgressKey(root: string, goalId: string, s: state.LoopState): s
   } catch {
     planSize = null;
   }
+  /* 差分は goal 開始基準から測る（diff ゲートと同じ基準）。測れなければ null */
+  const baseline = await state.resolveBaseline(shell, root, s);
+  const diffHash = await state.measureProgressEvidence(shell, root, baseline);
+  const evalOk =
+    s.last_eval_fingerprint === null ? null : s.last_eval_fingerprint.startsWith("true");
   return progressKeyOf({
     phase: s.phase,
     todosDone,
     evalFingerprint: s.last_eval_fingerprint,
     diffLines: s.last_diff_lines,
     planSize,
+    diffHash,
+    evalOk,
   });
 }
 
@@ -997,8 +1011,6 @@ async function onIdleBody(
     state.noteEvalFingerprint(root, `${result.ok}:${state.fnv1a(tail)}`);
     const r = state.recordAttempt(root, result.ok, result.ok ? "" : `eval failed: ${cmd}`);
     if (!result.ok && !r.giveUp) cascadeNote = await syncCascade(gh);
-    const wcLines = await state.measureWorkingCopyLines($, root);
-    if (wcLines !== null) state.noteDiffLines(root, wcLines);
     if (active.goal.id) {
       state.recordEvent(root, { type: "eval_run", goal: active.goal.id, ok: result.ok, fail_streak: r.fail_streak });
     }
@@ -1046,8 +1058,13 @@ async function onIdleBody(
     }
   }
 
-  /* 上限ガード: ラウンド数・進捗なし回数で止める */
-  const progressKey = currentProgressKey(root, active.goal.id, active.state);
+  /* 上限ガード: ラウンド数・進捗なし回数で止める。
+   * 差分は eval の有無・phase に依らず毎回測る（進捗の証拠を diff と eval に限るため。g-mwoiwjif） */
+  {
+    const wcLines = await state.measureWorkingCopyLines($, root);
+    if (wcLines !== null) state.noteDiffLines(root, wcLines);
+  }
+  const progressKey = await currentProgressKey($, root, active.goal.id, active.state);
   const decision = evaluateGuard({
     guard: active.state.guard,
     config: cfg,

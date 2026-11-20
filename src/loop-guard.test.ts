@@ -113,4 +113,74 @@ describe("progressKeyOf", () => {
       progressKeyOf({ phase: "implementing", todosDone: 1, evalFingerprint: "x", diffLines: 10, planSize: 100 }),
     );
   });
+
+  /* 進んだ証拠を diff と eval 合否に限る（design g-mwoiwjif） */
+  test("差分の指紋があれば、todo 完了数・phase・eval 出力の指紋では変わらない", () => {
+    const base = {
+      phase: "implementing",
+      todosDone: 0,
+      evalFingerprint: "false:aaaa",
+      diffLines: 10,
+      planSize: 100,
+      diffHash: "H1",
+      evalOk: false,
+    };
+    const k = progressKeyOf(base);
+    expect(
+      progressKeyOf({ ...base, todosDone: 3, phase: "polish", diffLines: 99, planSize: 200 }),
+    ).toBe(k);
+    // eval 出力の末尾が変わっても合否が同じなら同じ
+    expect(progressKeyOf({ ...base, evalFingerprint: "false:bbbb" })).toBe(k);
+    // 合否が変われば進んだ扱い
+    expect(progressKeyOf({ ...base, evalOk: true })).not.toBe(k);
+    // 差分が変われば進んだ扱い
+    expect(progressKeyOf({ ...base, diffHash: "H2" })).not.toBe(k);
+  });
+
+  test("差分を測れないときは従来の材料にフォールバックする", () => {
+    const k = progressKeyOf({
+      phase: "implementing",
+      todosDone: 1,
+      evalFingerprint: "true:aaaa",
+      diffLines: 10,
+      planSize: 100,
+      diffHash: null,
+      evalOk: true,
+    });
+    expect(k).not.toContain("diff:");
+    expect(k).toBe(
+      progressKeyOf({ phase: "implementing", todosDone: 1, evalFingerprint: "true:aaaa", diffLines: 10, planSize: 100 }),
+    );
+  });
+
+  test("フォールバックでは従来の材料それぞれの変化でキーが変わる", () => {
+    const base = {
+      phase: "implementing",
+      todosDone: 1,
+      evalFingerprint: "true:aaaa",
+      diffLines: 10,
+      planSize: 100,
+      diffHash: null,
+      evalOk: null,
+    };
+    const k = progressKeyOf(base);
+    expect(progressKeyOf({ ...base, phase: "polish" })).not.toBe(k);
+    expect(progressKeyOf({ ...base, todosDone: 2 })).not.toBe(k);
+    expect(progressKeyOf({ ...base, evalFingerprint: "false:aaaa" })).not.toBe(k);
+    expect(progressKeyOf({ ...base, diffLines: 11 })).not.toBe(k);
+    expect(progressKeyOf({ ...base, planSize: 101 })).not.toBe(k);
+  });
+
+  test("eval_cmd が無ければ合否は材料に入らない（差分だけ）", () => {
+    const k = progressKeyOf({
+      phase: "implementing",
+      todosDone: 0,
+      evalFingerprint: null,
+      diffLines: null,
+      planSize: null,
+      diffHash: "H1",
+      evalOk: null,
+    });
+    expect(k).toBe("diff:H1|eval:-");
+  });
 });

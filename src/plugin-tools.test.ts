@@ -30,11 +30,13 @@ import {
   buildLineage,
   computeDiffHash,
   pauseGoal,
+  recordAttempt,
   recordEvent,
   planPath,
   readTodos,
   getActive,
   readState,
+  setEvalCmd,
   setVerifierVerdict,
   startGoal,
   todosPath,
@@ -1941,5 +1943,35 @@ describe("plugin tool: 状態ファイルが読めないとき（g-mwoernih）",
     expect(started).toContain("壊れていて読めません");
     // 開始を拒否したので goals.json は壊れたまま（上書きしない）
     expect(readFileSync(p, "utf8")).toBe('{ "goals": [');
+  });
+});
+
+describe("plugin tool: attempt(ok) は eval_cmd 設定中にカウンタを戻さない（g-mwoiwjif）", () => {
+  test("eval_cmd 設定中は fail_streak を維持したまま「戻していない」と返す", async () => {
+    const root = tmpRoot();
+    startGoal(root, "t", "s1");
+    setEvalCmd(root, "make test");
+    recordAttempt(root, false, "");
+    recordAttempt(root, false, "");
+    const out = textOf(
+      await tools(root)
+        .get("graphhopper_attempt")!
+        .execute({ ok: true, note: "直した" }, { sessionID: "s1" }),
+    );
+    expect(out).toContain("戻していない");
+    expect(readState(root).fail_streak).toBe(2);
+  });
+
+  test("eval_cmd が無ければ従来どおりリセットする", async () => {
+    const root = tmpRoot();
+    startGoal(root, "t", "s1");
+    recordAttempt(root, false, "");
+    const out = textOf(
+      await tools(root)
+        .get("graphhopper_attempt")!
+        .execute({ ok: true, note: "直した" }, { sessionID: "s1" }),
+    );
+    expect(out).toContain("fail_streak reset to 0");
+    expect(readState(root).fail_streak).toBe(0);
   });
 });

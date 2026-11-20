@@ -334,7 +334,13 @@ main 中（designing/確認/polish）に呼ぶと main で動く点に注意。
 - ガード（`loop_max_rounds` 50 / `loop_max_stalls` 3 / `loop_wait_limit_ms` 30分 / `loop_restart_pause`）に
   達したら `stopLoopByPause` で pause し、`guard_pause` を history に記録する。resume でガードは数え直す
   （`loop_stop_count` の恒久予算は維持）。
-- 進捗キー = phase + todos 完了数 + eval フィンガープリント + 差分行数 + design doc のサイズ。
+- 進捗キー = 差分の指紋（goal 開始基準からの diff の中身。初期汚れも含む＝開始時点から何も
+  変わっていなければ同じ値）＋ eval の合否。git では未追跡ファイルの一覧も足す
+  （新しいファイルを作っただけのターンを進捗と見なすため）。ちなみに遷移判定の「実効 diff」は
+  初期汚れを差し引くが、進捗キーは差し引かない（開始時点の状態を基準にするので同じことになる）。
+  差分を測れない環境（VCS 無し・基準無し）だけ、phase・todos 完了数・eval 指紋・行数・design doc の
+  サイズにフォールバックする（キーを変える材料として使うだけで、これらを「進んだ」証拠とは見なさない）。
+  todo の完了や phase の移動は、測れる環境では「進んだ」証拠にしない。
 - 継続を積んだままプロセスが落ちた場合（`guard.pending` かつ別 boot）、起動時に pause する。
 
 ## 組み込み `/goal` との併用禁止
