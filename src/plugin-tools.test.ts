@@ -1919,3 +1919,27 @@ describe("plugin tool: complete ゲートの observe（design g-mwmnvx3x 判断3
     expect(body).toContain("rubric: 未凍結（legacy goal）");
   });
 });
+
+describe("plugin tool: 状態ファイルが読めないとき（g-mwoernih）", () => {
+  test("status と goal start は「goal なし」ではなく専用の文言で止まる", async () => {
+    const root = tmpRoot();
+    mkdirSync(join(root, ".graphhopper"), { recursive: true });
+    const p = join(root, ".graphhopper", "goals.json");
+    writeFileSync(p, '{ "goals": [', "utf8");
+    const map = tools(root);
+    const status = textOf(
+      await map.get("graphhopper_status")!.execute({}, { sessionID: "s1" }),
+    );
+    expect(status).toContain("壊れていて読めません");
+    expect(status).not.toContain("no active goal");
+    const started = textOf(
+      await map.get("graphhopper_goal")!.execute(
+        { action: "start", title: "x" },
+        { sessionID: "s1" },
+      ),
+    );
+    expect(started).toContain("壊れていて読めません");
+    // 開始を拒否したので goals.json は壊れたまま（上書きしない）
+    expect(readFileSync(p, "utf8")).toBe('{ "goals": [');
+  });
+});

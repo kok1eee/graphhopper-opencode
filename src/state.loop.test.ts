@@ -61,6 +61,8 @@ import {
   buildTelemetry,
   recordEventBatch,
   toolCallHash,
+  unreadableStateFiles,
+  unreadableStateNotice,
 } from "./state";
 
 const CFG: GraphhopperConfig = {
@@ -714,6 +716,52 @@ describe("回帰: state 読み書きの堅牢化", () => {
     expect(canonicalJSON(undefined)).toBe("undefined");
     expect(canonicalJSON(() => {})).toBe("undefined");
     expect(canonicalJSON({ b: 2, a: 1 })).toBe(canonicalJSON({ a: 1, b: 2 }));
+  });
+
+  /* 読めない状態ファイルを「goal なし」と区別し、上書きで goal を失わない（g-mwoernih） */
+  describe("状態ファイルが読めないとき", () => {
+    const BAD_GOALS = '{ "goals": [ {"id": "g-1"';
+
+    test("壊れた goals.json は開始を拒否し、ファイルを書き換えない", () => {
+      const root = tmpRoot();
+      mkdirSync(join(root, ".graphhopper"), { recursive: true });
+      const p = join(root, ".graphhopper", "goals.json");
+      writeFileSync(p, BAD_GOALS, "utf8");
+      expect(unreadableStateFiles(root)).toContain(p);
+      expect(() => startGoal(root, "new goal", "s1")).toThrow(/cannot be parsed/);
+      expect(readFileSync(p, "utf8")).toBe(BAD_GOALS);
+    });
+
+    test("壊れた state.json は上書きしない（goal と検証記録を残す）", () => {
+      const root = tmpRoot();
+      startGoal(root, "keeper", "s1");
+      const p = join(root, ".graphhopper", "state.json");
+      writeFileSync(p, "{ broken", "utf8");
+      expect(unreadableStateNotice(root)).toContain("state.json");
+      expect(() => setIntentPath(root, "/tmp/x.md")).toThrow(/cannot be parsed/);
+      expect(readFileSync(p, "utf8")).toBe("{ broken");
+      // goals.json は無事なので goal 自体は読める
+      expect(readGoals(root).goals.map((g) => g.title)).toEqual(["keeper"]);
+    });
+
+    test("ファイルが無いのは「読めない」ではない（従来どおり開始できる）", () => {
+      const root = tmpRoot();
+      expect(unreadableStateFiles(root)).toEqual([]);
+      expect(unreadableStateNotice(root)).toBeNull();
+      expect(startGoal(root, "ok", "s1").goal.title).toBe("ok");
+    });
+
+    test("同じプロセスで一度読めていれば記憶値で書き込みを続ける", () => {
+      const root = tmpRoot();
+      startGoal(root, "memory", "s1");
+      const p = join(root, ".graphhopper", "state.json");
+      readState(root); // このプロセスで一度読む（記憶される）
+      writeFileSync(p, "{ broken", "utf8");
+      // 記憶があるので「読めない」とは扱わず、書き込みは通る（従来の保険）
+      expect(unreadableStateFiles(root)).toEqual([]);
+      expect(() => setIntentPath(root, "/tmp/memo.md")).not.toThrow();
+      expect(readState(root).intent_path).toBe("/tmp/memo.md");
+    });
   });
 });
 

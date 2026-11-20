@@ -22,6 +22,7 @@ import {
   ORACLE_ASK,
   isIntentLogPath,
   phaseGuideText,
+  unreadableStateRefusal,
 } from "../../../src/gate";
 import { INTENT_MAX_FETCH_CHARS } from "../../../src/intent";
 import { describeModelDenial } from "../../../src/model-policy";
@@ -70,6 +71,8 @@ let oversizeSticky = false;
 
 /** handoff 案内を評価済みのセッション（毎ターンの I/O を避ける） */
 const handoffChecked = new Set<string>();
+/** 状態ファイルが読めないことを知らせたセッション（1 セッション 1 回） */
+const unreadableNotified = new Set<string>();
 /** handoff メモの案内寿命（過ぎたメモは案内しない） */
 const HANDOFF_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 
@@ -348,6 +351,13 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
     const e = event as BeforeEvent;
     const toolName = String(e.tool ?? "").toLowerCase();
     if (!isGateTargetTool(e.tool)) return;
+    /* 状態ファイルが読めない間は phase を判断できない。designing の編集ブロックが
+     * 黙って外れないよう source 編集を止める（.graphhopper/ 配下は修復用に通す。g-mwoernih） */
+    if (state.unreadableStateFiles(root).length > 0) {
+      const target = resolveFilePath((e as { input?: unknown }).input);
+      if (!target || state.isUnderGraphhopperDir(root, target)) return;
+      throw new Error(unreadableStateRefusal(e.tool, target));
+    }
     const active = state.getActive(root);
     if (!active) return;
     const cfg = state.readConfig(root);
@@ -430,6 +440,29 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
        * 依存すると prompt admission が先に走った場合に漏れる（design g-mvj7ddcz 判断2-2）。
        * 時間切れは null（不明）で、判定も handoff 案内もしない（design g-mwkfisl7 判断2） */
       const child = await withinBudget(isChildSession(ctx, sessionID), deadline);
+
+      /* 状態ファイルが読めない間は自動継続も積まれない。黙って止まらないよう、
+       * そのセッションの次の入力で 1 回だけ知らせる（g-mwoernih 決めたこと4・5） */
+      if (child === false && !unreadableNotified.has(sessionID)) {
+        try {
+          const notice = state.unreadableStateNotice(root);
+          if (notice) {
+            const shown = await withinBudget(
+              ctx.session.synthetic({
+                sessionID,
+                text: notice,
+                description: "graphhopper state 読めない",
+                resume: false,
+              } as never),
+              deadline,
+            );
+            if (shown !== null) unreadableNotified.add(sessionID);
+          }
+        } catch {
+          // 通知の失敗でユーザー入力を止めない
+        }
+      }
+
       const decision = shouldRunEntryDecide({
         text,
         isInternal: isInternalPrompt(e.metadata, text),

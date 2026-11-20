@@ -125,6 +125,9 @@ export function registerCoreTools(
   gh: Gh,
 ): void {
   const { root } = gh;
+  /* 「goal なし」と「状態ファイルが読めない」を混同しない（g-mwoernih 決めたこと4） */
+  const noActiveText = (fallback = "no active goal"): string =>
+    state.unreadableStateNotice(root) ?? fallback;
 
   editor.add({
     name: "graphhopper_goal",
@@ -153,6 +156,10 @@ export function registerCoreTools(
       switch (args.action) {
         case "start": {
           if (!args.title) return text("error: title is required for start");
+          {
+            const bad = state.unreadableStateNotice(root);
+            if (bad) return text(bad);
+          }
           {
             const conflict = await builtinGoalRefusal(gh, sessionID);
             if (conflict) return text(conflict);
@@ -264,7 +271,7 @@ export function registerCoreTools(
           const cp = state.getActive(root)?.state.cascade?.checkpoint;
           if (cp && cp !== "done") state.setCascadeCheckpoint(root, "done", "pause");
           const a = state.pauseGoal(root);
-          return text(a ? `paused: "${a.goal.title}"` : "no active goal");
+          return text(a ? `paused: "${a.goal.title}"` : noActiveText());
         }
         case "resume": {
           {
@@ -288,12 +295,12 @@ export function registerCoreTools(
           return text(
             a
               ? `resumed: "${a.goal.title}" | phase: ${a.state.phase}${args.force ? " (forced)" : ""}${cascadeNote ? `\n${cascadeNote}` : ""}${policyNote ? `\n${policyNote}` : ""}\n次: ${PHASE_ACTION[a.state.phase]}`
-              : "no active goal",
+              : noActiveText(),
           );
         }
         case "complete": {
           const a = state.getActive(root);
-          if (!a) return text("no active goal");
+          if (!a) return text(noActiveText());
           clearWaitTimer(sessionID);
           /* ゲートの実効モードは goal 開始時に凍結した値を使う（design g-mwmnvx3x 判断3）。
            * 旧 goal（未凍結）だけ config の現在値にフォールバックする */
@@ -412,7 +419,7 @@ export function registerCoreTools(
                 ]
                   .filter(Boolean)
                   .join("\n")
-              : "no active goal",
+              : noActiveText(),
           );
         }
         case "clear": {
@@ -434,7 +441,7 @@ export function registerCoreTools(
     input: S.obj({}, []),
     execute: async () => {
       const a = state.getActive(root);
-      if (!a) return text("no active goal");
+      if (!a) return text(noActiveText());
       const v = a.state.last_verifier;
       const lensModels = v ? state.formatLensModels(v.lens, v.models, v.model) : "";
       const severityLine = v ? state.formatSeverity(v.severity) : "";
@@ -510,7 +517,7 @@ export function registerCoreTools(
       const mv = state.setPhaseChecked(root, args.phase, args.notes);
       if (!mv.ok) return text(`error: ${mv.error ?? "遷移に失敗"}`);
       let a = mv.active;
-      if (!a) return text("error: no active goal or invalid phase");
+      if (!a) return text(noActiveText("error: no active goal or invalid phase"));
       /* designing → implementing のときだけ、題と決定記録の「決めたこと」から難易度を判定し直す（上がる方向だけ）。
        * difficulty を上げてから syncCascade を呼ぶ（escalate_on: ["hard"] を効かせる） */
       const entering = before?.state.phase === "designing" && a.state.phase === "implementing";
@@ -559,7 +566,7 @@ export function registerCoreTools(
     execute: async (input: unknown) => {
       const args = input as { action: state.TodoAction; id?: string; text?: string; reason?: string };
       const active = state.getActive(root);
-      if (!active) return text("error: no active goal");
+      if (!active) return text(noActiveText("error: no active goal"));
       const r = state.todoAction(root, active.goal.id, args.action, {
         ...(args.id ? { id: args.id } : {}),
         ...(args.text ? { text: args.text } : {}),
@@ -602,7 +609,7 @@ export function registerCoreTools(
     execute: async (input: unknown) => {
       const args = input as { cmd: string };
       const active = state.getActive(root);
-      if (!active) return text("error: no active goal");
+      if (!active) return text(noActiveText("error: no active goal"));
       state.setEvalCmd(root, args.cmd);
       return text(
         args.cmd
@@ -626,7 +633,7 @@ export function registerCoreTools(
     execute: async (input: unknown) => {
       const args = input as { ok: boolean; note: string };
       const active = state.getActive(root);
-      if (!active) return text("error: no active goal");
+      if (!active) return text(noActiveText("error: no active goal"));
       const r = state.recordAttempt(root, args.ok, args.note);
       const managed = !args.ok && active.state.eval_cmd ? `\n${EVAL_MANAGED_NOTE}` : "";
       const attemptCascade = !args.ok ? await syncCascade(gh) : null;

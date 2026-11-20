@@ -8,7 +8,7 @@
  * hook 登録 → 呼び出し → decisions.jsonl の記録までを fake ctx で固定する。
  */
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerHooks, tailLikes } from "../.opencode/plugins/graphhopper/hooks";
@@ -619,6 +619,18 @@ describe("plugin hook: idle の phase案内フォールバック（design g-mwj6
     expect(cont).toContain("phase: implementing");
   });
 
+  test("状態ファイルが読めない間は継続メッセージを積まない", async () => {
+    const root = tmpRoot();
+    mkdirSync(join(root, ".graphhopper"), { recursive: true });
+    writeFileSync(join(root, ".graphhopper", "goals.json"), '{ "goals": [', "utf8");
+    const { ctx, hooks, synthetic } = fakeCtx();
+    await registerHooks({ ctx: ctx as never, root });
+    const cb = hooks.get("experimental.idle")?.[0];
+    if (!cb) throw new Error("idle hook が登録されていない");
+    await cb({ sessionID: "s-unreadable-idle", background: [] });
+    expect(synthetic.length).toBe(0);
+  });
+
   test("designing の idle は継続メッセージを積まない（質問して答えを待つ）", async () => {
     const root = tmpRoot();
     const { ctx, hooks, synthetic } = fakeCtx();
@@ -682,6 +694,20 @@ describe("plugin hook: idle の phase案内フォールバック（design g-mwj6
   });
 });
 
+describe("plugin hook: 状態ファイルが読めないとき（g-mwoernih）", () => {
+  test("次のユーザー入力で 1 回だけ通知し、2 回目は積まない", async () => {
+    const root = tmpRoot();
+    mkdirSync(join(root, ".graphhopper"), { recursive: true });
+    writeFileSync(join(root, ".graphhopper", "goals.json"), '{ "goals": [', "utf8");
+    const { ctx, hooks, synthetic } = fakeCtx();
+    const sessionID = "s-unreadable-notice";
+    await runPromptHook(root, ctx, hooks, { sessionID, text: "続き" });
+    expect(synthetic.filter((s) => s.text.includes("壊れていて読めません")).length).toBe(1);
+    await runPromptHook(root, ctx, hooks, { sessionID, text: "もう一度" });
+    expect(synthetic.filter((s) => s.text.includes("壊れていて読めません")).length).toBe(1);
+  });
+});
+
 describe("plugin hook: ループ検知の入力（design g-mwj6481n 判断6）", () => {
   test("instructions の通知（system 型）は履歴の入力から外し、synthetic は残す", () => {
     const likes = tailLikes([
@@ -734,5 +760,17 @@ describe("plugin hook: designing の編集ゲート（execute.before）", () => 
     ).rejects.toThrow(/immutable once the/);
     // source は通る
     await expect(runBefore(root, "edit", "src/a.ts")).resolves.toBeUndefined();
+  });
+
+  /* 状態ファイルが読めない間は phase を判断できないので、安全側で source 編集を止める（g-mwoernih） */
+  test("状態ファイルが読めない間は source 編集を拒否し、.graphhopper 配下は通す", async () => {
+    const root = tmpRoot();
+    mkdirSync(join(root, ".graphhopper"), { recursive: true });
+    writeFileSync(join(root, ".graphhopper", "goals.json"), '{ "goals": [', "utf8");
+    await expect(runBefore(root, "edit", "src/a.ts")).rejects.toThrow(/state files/);
+    // 修復のために .graphhopper 配下は通す
+    await expect(
+      runBefore(root, "edit", ".graphhopper/goals.json"),
+    ).resolves.toBeUndefined();
   });
 });

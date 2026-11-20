@@ -223,6 +223,21 @@ export function runGraphhopperEdit(
 
 /* 拒否文の単一源泉（hook の throw 文と tool の error 返却で共有）。
  * 文面を変えると両方の応答に反映される。 */
+/** 状態ファイルが読めない間の安全側ゲート（g-mwoernih 決めたこと3）。
+ * phase を判断できないので、designing 中の編集ブロックを外さないよう source 編集を止める。
+ * `.graphhopper/` 配下は修復用に通す（判定は hooks 側で isUnderGraphhopperDir）。 */
+export function unreadableStateRefusal(
+  toolName: string | undefined,
+  filePath: string,
+): string {
+  return (
+    `Refused: ${toolName} to ${filePath} is blocked because graphhopper's state files ` +
+    `(.graphhopper/goals.json / state.json) are unreadable. The phase cannot be determined, ` +
+    `so source edits are stopped instead of silently bypassing the designing gate. ` +
+    `Fix or remove the broken file first.`
+  );
+}
+
 export function designGateRefusal(
   toolName: string | undefined,
   filePath: string,

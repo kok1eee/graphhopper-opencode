@@ -31,7 +31,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { sha1Hex } from "./hashedit";
 import {
   addTodo,
@@ -738,6 +738,8 @@ export type HistoryEvent =
     }
   | { type: "goal_pause"; goal: string }
   | { type: "goal_resume"; goal: string }
+  /* 状態ファイルが「在るのに読めない」の検知（g-mwoernih）。1 プロセス 1 ファイル 1 回だけ記録する */
+  | { type: "state_unreadable"; file: string }
   | { type: "cascade_switch"; goal: string; from: string; to: string; phase: Phase; reason: string }
   | {
       type: "guard_pause";
@@ -988,16 +990,36 @@ function writeOutbox(
  * 書込み途中の壊れJSONを読んだ場合、記憶があればそれを返し、
  * 全agentモデル欠落（子の親main継承）を防ぐ。初回から壊れていたらfallback */
 const lastGoodJson = new Map<string, unknown>();
-export function readJson<T>(path: string, fallback: T): T {
-  if (!existsSync(path)) return fallback;
+/** 読めたかどうかも返す内部版。「在るのに読めない」を fallback と区別するために使う
+ * （g-mwoernih）。missing=ファイルが無い / ok=読めた / recovered=壊れているが記憶値あり /
+ * unreadable=在るのに読めず、このプロセスで一度も読めていない */
+function readJsonCore<T>(
+  path: string,
+  fallback: T,
+  shapeOk?: (v: unknown) => boolean,
+): { value: T; status: "missing" | "ok" | "recovered" | "unreadable" } {
+  if (!existsSync(path)) return { value: fallback, status: "missing" };
+  let parsed: unknown;
+  let readable = true;
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as T;
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    readable = false;
+  }
+  if (readable && shapeOk && !shapeOk(parsed)) readable = false;
+  if (readable) {
     // 呼び出し側の変更から守るため複製を記憶する（返却値は毎回freshなparse結果）
     lastGoodJson.set(path, structuredClone(parsed));
-    return parsed;
-  } catch {
-    return (lastGoodJson.get(path) as T | undefined) ?? fallback;
+    return { value: parsed as T, status: "ok" };
   }
+  const remembered = lastGoodJson.get(path) as T | undefined;
+  return remembered === undefined
+    ? { value: fallback, status: "unreadable" }
+    : { value: remembered, status: "recovered" };
+}
+
+export function readJson<T>(path: string, fallback: T): T {
+  return readJsonCore(path, fallback).value;
 }
 
 function atomicWrite(path: string, data: unknown): void {
@@ -1093,7 +1115,56 @@ export function readConfig(root: string): GraphhopperConfig {
 }
 
 export function readGoals(root: string): GoalsFile {
-  return readJson<GoalsFile>(goalsPath(root), { goals: [], active: null });
+  return readJsonCore<GoalsFile>(
+    goalsPath(root),
+    { goals: [], active: null },
+    isGoalsShape,
+  ).value;
+}
+
+/** goals.json の形（goals が配列）。壊れた形を「goal なし」と取り違えないための検査 */
+function isGoalsShape(v: unknown): boolean {
+  const o = v as { goals?: unknown } | null;
+  return !!o && typeof o === "object" && !Array.isArray(o) && Array.isArray(o.goals);
+}
+
+/** state.json の形（オブジェクト）。配列や null は壊れた扱い */
+function isStateShape(v: unknown): boolean {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+/** goals.json / state.json のうち「在るのに読めない」もののパス一覧（無ければ空）。
+ * 「ファイルが無い（= goal なし）」と「読めない」を区別する。同じプロセスで一度読めていれば
+ * 記憶値で動けるので、これにも含めない（g-mwoernih 決めたこと1） */
+export function unreadableStateFiles(root: string): string[] {
+  const bad: string[] = [];
+  if (readJsonCore<unknown>(goalsPath(root), null, isGoalsShape).status === "unreadable") {
+    bad.push(goalsPath(root));
+  }
+  if (readJsonCore<unknown>(statePath(root), null, isStateShape).status === "unreadable") {
+    bad.push(statePath(root));
+  }
+  return bad;
+}
+
+const unreadableReported = new Set<string>();
+
+/** 読めない状態ファイルの説明（無ければ null）。history へは 1 プロセス 1 ファイル 1 回だけ記録する。
+ * ツール応答・会話への通知の単一源泉（g-mwoernih 決めたこと4） */
+export function unreadableStateNotice(root: string): string | null {
+  const files = unreadableStateFiles(root);
+  if (files.length === 0) return null;
+  for (const f of files) {
+    if (unreadableReported.has(f)) continue;
+    unreadableReported.add(f);
+    recordEvent(root, { type: "state_unreadable", file: f });
+  }
+  const names = files.map((f) => basename(f)).join(" / ");
+  return (
+    `error: graphhopper の状態ファイル（${names}）が壊れていて読めません（「goal なし」ではありません）。` +
+    "このまま書き込むと goal 一覧や検証の記録が消えるため、書き込みを止めています。" +
+    "自動の退避・作り直しはしません。ファイルを直すか削除してから続けてください。"
+  );
 }
 
 function emptyState(): LoopState {
@@ -1149,7 +1220,11 @@ function emptyState(): LoopState {
 }
 
 export function readState(root: string): LoopState {
-  const loaded = readJson<Partial<LoopState>>(statePath(root), emptyState());
+  const loaded = readJsonCore<Partial<LoopState>>(
+    statePath(root),
+    emptyState(),
+    isStateShape,
+  ).value;
   const merged: LoopState = {
     ...emptyState(),
     ...loaded,
@@ -1169,11 +1244,24 @@ export function readState(root: string): LoopState {
   return merged;
 }
 
+/** 読めないファイルは上書きしない（goal 一覧・検証記録の消失防止。g-mwoernih 決めたこと2）。
+ * 「壊れているが記憶値がある」は従来どおり書ける（書込み途中の壊れ対策を維持する） */
+function assertWritableStateFile(path: string, shapeOk: (v: unknown) => boolean): void {
+  if (readJsonCore<unknown>(path, null, shapeOk).status !== "unreadable") return;
+  throw new Error(
+    `Refused: ${path} exists but cannot be parsed and this process has no earlier good read, ` +
+      "so it was left untouched to avoid losing goals / verifier state. " +
+      "Fix or remove the file, then retry.",
+  );
+}
+
 function writeGoals(root: string, data: GoalsFile): void {
+  assertWritableStateFile(goalsPath(root), isGoalsShape);
   atomicWrite(goalsPath(root), data);
 }
 
 function writeState(root: string, state: LoopState): void {
+  assertWritableStateFile(statePath(root), isStateShape);
   state.updated_at = new Date().toISOString();
   atomicWrite(statePath(root), state);
 }
@@ -3460,6 +3548,11 @@ export function normalizeForGate(root: string, filePath: string): string {
 function matchesAllowed(normalized: string, prefix: string): boolean {
   const p = normalize(prefix).split(sep).join("/").replace(/\/+$/, "");
   return normalized === p || normalized.startsWith(`${p}/`);
+}
+
+/** `.graphhopper/` 配下か。状態ファイルが読めない間も、修復のためにここだけは書かせる */
+export function isUnderGraphhopperDir(root: string, filePath: string): boolean {
+  return matchesAllowed(normalizeForGate(root, filePath), ".graphhopper");
 }
 
 export function isDesignGateBlocked(
