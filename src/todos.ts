@@ -243,9 +243,3 @@ export function formatTodoList(store: TodoStore): string {
   lines.push(`完了 ${p.done}/${p.total}（cancel ${p.cancelled}・未完了 ${p.open}）`);
   return lines.join("\n");
 }
-
-/** TUI チップ用の最短形。タスク 0 件なら null */
-export function formatTodoChip(progress: { total: number; done: number }): string | null {
-  if (progress.total === 0) return null;
-  return `✓${progress.done}/${progress.total}`;
-}

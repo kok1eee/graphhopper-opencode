@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import {
   addTodo,
   applyMark,
-  formatTodoChip,
   formatTodoList,
   isAllowedTransition,
   isTodoComplete,
@@ -137,11 +136,6 @@ describe("todo 純粋層", () => {
       expect(out).toContain("[x] t1: A");
       expect(out).toContain("[ ] t2: B");
       expect(out).toContain("完了 1/2");
-    });
-    test("formatTodoChip はタスク 0 件で null", () => {
-      expect(formatTodoChip({ total: 0, done: 0 })).toBeNull();
-      expect(formatTodoChip({ total: 1, done: 1 })).toBe("✓1/1");
-      expect(formatTodoChip({ total: 3, done: 2 })).toBe("✓2/3");
     });
   });
 });

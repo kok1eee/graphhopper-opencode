@@ -6,11 +6,9 @@
  */
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { execSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { GRAPHHOPPER_AGENTS } from "./agents";
 import { checkModelAllowed } from "./model-policy";
-import { recordInvokeEnd, recordInvokeStart } from "./running-invoke";
 import { readConfig } from "./state";
 
 export const PROMPT_MAX_CHARS = 12000;
@@ -406,31 +404,24 @@ export async function invokeStructured(
       cancelled: true,
     };
   }
-  /* 実行中の数を TUI に共有する（design g-mwkfisl7 判断3）。失敗しても invoke は止めない */
-  const runID = randomUUID();
-  await recordInvokeStart(root, { id: runID, pid: process.pid, started_at: new Date().toISOString() });
-  try {
-    const r = await runChild(
-      binary,
-      argv,
-      {
-        timeoutMs,
-        cwd: root,
-        childEnv,
-        signal: invokeOpts.signal,
-        heartbeatMs: invokeOpts.heartbeatMs,
-        onTick: invokeOpts.onTick,
-      },
-      spawnFn,
-    );
-    return {
-      output: r.output,
-      timedOut: r.timedOut,
-      elapsedMs: r.elapsedMs,
-      fallbackWarning: r.fallbackWarning,
-      cancelled: r.cancelled,
-    };
-  } finally {
-    await recordInvokeEnd(root, runID);
-  }
+  const r = await runChild(
+    binary,
+    argv,
+    {
+      timeoutMs,
+      cwd: root,
+      childEnv,
+      signal: invokeOpts.signal,
+      heartbeatMs: invokeOpts.heartbeatMs,
+      onTick: invokeOpts.onTick,
+    },
+    spawnFn,
+  );
+  return {
+    output: r.output,
+    timedOut: r.timedOut,
+    elapsedMs: r.elapsedMs,
+    fallbackWarning: r.fallbackWarning,
+    cancelled: r.cancelled,
+  };
 }

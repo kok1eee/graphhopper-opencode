@@ -1,8 +1,7 @@
 /**
  * progress lens charter の埋め込みと進捗ビューのテスト。
  *
- * goal の中心的な主張「progress lens と TUI が同じ進捗を見る」を固定する。
- * charter は lens 指示文にタスク一覧を直接埋め込み、TUI は todoProgressView を読む。
+ * charter は lens 指示文にタスク一覧を直接埋め込む。応答文の進捗行（todoSummaryLine）と同じ数え方をする。
  */
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
@@ -13,7 +12,6 @@ import {
   readTodosStatus,
   startGoal,
   todoAction,
-  todoProgressView,
   todoSummaryLine,
   todosPath,
 } from "./state";
@@ -85,7 +83,7 @@ describe("progress lens charter への進捗埋め込み", () => {
   });
 });
 
-describe("進捗ビュー（progress lens と TUI が同じ数え方をする）", () => {
+describe("進捗の 1 行サマリ（progress lens と同じ数え方をする）", () => {
   test("足したタスクと完了がストア基準の進捗に出る", () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
@@ -93,23 +91,16 @@ describe("進捗ビュー（progress lens と TUI が同じ数え方をする）
     todoAction(root, g.id, "add", { text: "手動追加タスク" });
     todoAction(root, g.id, "done", { id: "t1" });
     // 3 件足して 1 件完了
-    const loaded = readTodosStatus(root, g.id);
-    const view = todoProgressView(loaded);
-    expect(view.total).toBe(3);
-    expect(view.done).toBe(1);
-    expect(view.open).toBe(2);
-    expect(view.unreadable).toBeUndefined();
     expect(todoSummaryLine(root, g.id)).toContain("1/3");
   });
 
-  test("ストア不読なら unreadable が立つ（0件に潰さない）", () => {
+  test("ストア不読なら「進捗不明」と出す（0件に潰さない）", () => {
     const root = tmpRoot();
     const g = startGoal(root, "t", "s").goal;
     const p = todosPath(root, g.id);
     mkdirSync(dirname(p), { recursive: true });
     writeFileSync(p, "{ broken", "utf8");
-    const loaded = readTodosStatus(root, g.id);
-    expect(loaded.valid).toBe(false);
-    expect(todoProgressView(loaded).unreadable).toBe(true);
+    expect(readTodosStatus(root, g.id).valid).toBe(false);
+    expect(todoSummaryLine(root, g.id)).toContain("進捗不明");
   });
 });

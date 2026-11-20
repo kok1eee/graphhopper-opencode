@@ -42,7 +42,6 @@ import {
   todoGateError,
   todoProgress,
   todoStoreError,
-  type TodoItem,
   type TodoStatus,
   type TodoStore,
 } from "./todos";
@@ -585,41 +584,6 @@ export function todoSummaryLine(root: string, goalId: string): string | null {
   } catch {
     return null;
   }
-}
-
-/**
- * 進捗の公開ビュー（goals.json resource 用）。
- * ストア不読・不正要素を「0件」に潰さず、不読として出す。
- */
-export interface TodoProgressView {
-  total: number;
-  done: number;
-  cancelled: number;
-  open: number;
-  items: TodoItem[];
-  /** ストアを読めなかった場合 true */
-  unreadable?: boolean;
-  /** 捨てられた不正要素の件数 */
-  invalidCount?: number;
-}
-
-export function todoProgressView(loaded: {
-  store: TodoStore;
-  valid: boolean;
-  invalidCount: number;
-}): TodoProgressView {
-  if (!loaded.valid) {
-    return { total: 0, done: 0, cancelled: 0, open: 0, items: [], unreadable: true, invalidCount: 0 };
-  }
-  const p = todoProgress(loaded.store);
-  return {
-    total: p.total,
-    done: p.done,
-    cancelled: p.cancelled,
-    open: p.open,
-    items: p.items,
-    ...(loaded.invalidCount > 0 ? { invalidCount: loaded.invalidCount } : {}),
-  };
 }
 
 const TODO_ACTION_STATUS: Record<

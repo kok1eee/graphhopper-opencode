@@ -1579,7 +1579,7 @@ describe("verify: prompt 組み立てと判定の読み取り（純粋層）", (
 describe("plugin: 廃止した経路の残骸が無い", () => {
   test("oracle 相談は invoke 表記・workflow runner の参照も残らない", () => {
     const dir = join(import.meta.dir, "..", ".opencode", "plugins", "graphhopper");
-    const files = readdirSync(dir).filter((f) => f.endsWith(".ts") || f.endsWith(".tsx"));
+    const files = readdirSync(dir).filter((f) => f.endsWith(".ts"));
     const hits = files.filter((f) => {
       const raw = readFileSync(join(dir, f), "utf8");
       return (

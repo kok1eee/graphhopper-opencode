@@ -4,7 +4,7 @@ global `~/.config/opencode/AGENTS.md` (CodeGraph / graft-first / rg制限) を�
 以下はこの repo 固有の追加分のみ。
 
 - バイナリは mise 管理の `opencode` を使うこと。バージョンは repo で固定せず `latest`（global 設定と同じ）に追従させる。
-  `opencode --version` が上がったら、`package.json` の `@opencode/plugin`・`@opencode/theme` も同じ版に揃える。
+  `opencode --version` が上がったら、`package.json` の `@opencode/plugin` も同じ版に揃える。
   opencode v1 (1.18.x) でこのディレクトリを開かない
   (v1 global plugin が `.graphhopper/` を誤ランタイムで駆動する)。
 - eval: `bun test && npx tsc --noEmit` (green を維持)。
