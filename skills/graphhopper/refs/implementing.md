@@ -87,7 +87,9 @@
     - diff 停滞（`stuck_diff_stall` 既定4。進捗キー＝差分の指紋＋eval 合否が変わらない idle の連続。
       差分変化・eval pass でリセット。eval_cmd 設定中の attempt(ok) では戻らない。
       `checkStuck` で判定＝進捗停滞系）
-  - 連続失敗が `max_eval_fails`（既定6）に達すると相談ではなく goal が pause する（giveUp）。修正して resume せよ
+  - 連続失敗が `max_eval_fails`（既定6）に達すると相談ではなく goal が pause する（giveUp）。修正して resume せよ。
+    この停止も自動停止の回数（`loop_stop_max` 既定3）に数える。何も変えずに resume すると、次の判定で
+    同じ進捗キーを見て 1 ターンでまた止まる（`guard_pause` の reason は `stuck_again`）。
 - 全タスクを completed か cancelled にしたら、refs/verifier.md の `recipe: start` を実行する
   （`router_check` はレシピの中で呼ばれる。単独で先に呼ぶ必要はない）
 - goal start時に初期汚れ（前goal未コミット分）を自動snapshotし、遷移判定は実効diff（測定－初期値）で行う。

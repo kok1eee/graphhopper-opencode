@@ -949,7 +949,9 @@ export function registerOpsTools(
               ].join("\n"),
             );
           }
-          resumeNote = `resumed: "${r.goal.title}" (${r.goal.id}) / phase: ${r.state.phase}`;
+          const stuckNote = state.stuckResumeNote(r.state.guard);
+          resumeNote = `resumed: "${r.goal.title}" (${r.goal.id}) / phase: ${r.state.phase}` +
+            (stuckNote ? `\n${stuckNote}` : "");
           const policyNote = catalogPolicyWarning(root, state.readConfig(root));
           if (policyNote) resumeNote += `\n${policyNote}`;
         } else if (active.state.session_id && active.state.session_id !== sessionID) {

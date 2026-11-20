@@ -43,6 +43,7 @@ import {
   readDiscover,
   readJson,
   readGoals,
+  noteGuard,
   readHistory,
   readState,
   recordAttempt,
@@ -2602,5 +2603,55 @@ describe("意図ログの state 連携（design g-mwebh9vl）", () => {
     expect(
       existsSync(join(root, ".graphhopper", "plans", "archive", `${g.id}.intent.md`)),
     ).toBe(true);
+  });
+});
+
+describe("同じ詰まりの resume を 1 ターンに限る（design g-mwokteud）", () => {
+  test("stuck_key を渡すと残り、停止回数が増える", () => {
+    const root = tmpRoot();
+    startGoal(root, "t", "sess1");
+    stopLoopByPause(root, { stuckKey: "diff:H|eval:-" });
+    const s = readState(root);
+    expect(s.guard.stuck_key).toBe("diff:H|eval:-");
+    expect(s.loop_stop_count).toBe(1);
+  });
+
+  test("silent 指定では loop_stopped を記録しない", () => {
+    const root = tmpRoot();
+    startGoal(root, "t", "sess1");
+    stopLoopByPause(root, { stuckKey: "k", silent: true });
+    const types = readHistory(root).map((h) => h.type);
+    expect(types).not.toContain("loop_stopped");
+    expect(readState(root).loop_stop_count).toBe(1); // 数えること自体は同じ
+  });
+
+  test("resume は stuck_key を引き継ぎ、他の数は 0 に戻す", () => {
+    const root = tmpRoot();
+    startGoal(root, "t", "sess1");
+    noteGuard(root, { stalls: 2, rounds: 5, progress_key: "k" });
+    stopLoopByPause(root, { stuckKey: "k" });
+    noteGuard(root, { stalls: 2, rounds: 5 });
+    const r = resumeGoal(root, "sess1");
+    expect(r).not.toBeNull();
+    const g = readState(root).guard;
+    expect(g.stuck_key).toBe("k");
+    expect(g.stalls).toBe(0);
+    expect(g.rounds).toBe(0);
+    expect(g.progress_key).toBeNull();
+  });
+
+  test("force の resume は stuck_key を消す（人の判断で解除）", () => {
+    const root = tmpRoot();
+    startGoal(root, "t", "sess1");
+    stopLoopByPause(root, { stuckKey: "k" });
+    resumeGoal(root, "sess1", true);
+    expect(readState(root).guard.stuck_key).toBeNull();
+  });
+
+  test("注意文は stuck_key があるときだけ出る", async () => {
+    const { stuckResumeNote } = await import("./state");
+    expect(stuckResumeNote(null)).toBeNull();
+    expect(stuckResumeNote({ stuck_key: null } as never)).toBeNull();
+    expect(stuckResumeNote({ stuck_key: "diff:abcdef1234567890|eval:-" } as never)).toContain("同じ状態のまま resume");
   });
 });

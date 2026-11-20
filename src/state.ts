@@ -1,4 +1,5 @@
 import { recordTemplate } from "./record";
+import { progressKeyOf } from "./loop-guard";
 /**
  * graphhopper state 管理
  *
@@ -203,6 +204,9 @@ export interface LoopGuard {
   stalls: number;
   /** 直近の継続時の進捗キー */
   progress_key: string | null;
+  /** 「進捗なし」「eval 連続失敗」で止めたときの進捗キー。resume 後の初回判定が同じ値なら
+   * その場で pause する（design g-mwokteud）。force の resume で消える。旧 state は undefined */
+  stuck_key?: string | null;
   /** background（subagent/shell）待ちを始めた時刻。無ければ null */
   wait_since: string | null;
   /** 継続を積んだが、まだターンが返っていない */
@@ -745,7 +749,7 @@ export type HistoryEvent =
   | {
       type: "guard_pause";
       goal: string;
-      reason: "rounds" | "stalls" | "wait" | "restart";
+      reason: "rounds" | "stalls" | "wait" | "restart" | "stuck_again";
       rounds: number;
       stalls: number;
     }
@@ -1202,6 +1206,7 @@ function emptyState(): LoopState {
       rounds: 0,
       stalls: 0,
       progress_key: null,
+      stuck_key: null,
       wait_since: null,
       pending: false,
       boot: null,
@@ -1386,6 +1391,8 @@ export function resumeGoal(
 ): ActiveLoop | null {
   // 恒久ブロック: loop_stop_max に達したら通常resumeを拒否（forceで明示解除のみ）
   if (isResumeBlocked(root) && !force) return null;
+  /* 停止時と同じ状態のまま再開していないか、次の継続判定で見る（design g-mwokteud） */
+  const stuckKey = readState(root).guard.stuck_key ?? null;
   const r = mutateActive(root, (goal) => {
     const snap = goal.paused_snapshot;
     return {
@@ -1410,6 +1417,7 @@ export function resumeGoal(
           rounds: 0,
           stalls: 0,
           progress_key: null,
+          stuck_key: force ? null : stuckKey,
           wait_since: null,
           pending: false,
           boot: null,
@@ -3097,6 +3105,38 @@ export function bootId(): string {
   return (BOOT_ID ??= globalThis.crypto.randomUUID());
 }
 
+/** 継続可否を判断する材料になる進捗キー（design g-mwoiwjif）。
+ * 「進んだ」の証拠は差分の指紋と eval の合否だけ。測れない環境では従来の材料にフォールバックする。 */
+export async function measureProgressKey(
+  shell: Shell,
+  root: string,
+  goalId: string,
+  s: LoopState,
+): Promise<string> {
+  const loaded = readTodosStatus(root, goalId);
+  const items = loaded.valid ? loaded.store.items : [];
+  const todosDone = items.filter((i) => i.status === "completed").length;
+  let planSize: number | null = null;
+  try {
+    planSize = statSync(planPath(root, goalId)).size;
+  } catch {
+    planSize = null;
+  }
+  const baseline = await resolveBaseline(shell, root, s);
+  const diffHash = await measureProgressEvidence(shell, root, baseline);
+  const evalOk =
+    s.last_eval_fingerprint === null ? null : s.last_eval_fingerprint.startsWith("true");
+  return progressKeyOf({
+    phase: s.phase,
+    todosDone,
+    evalFingerprint: s.last_eval_fingerprint,
+    diffLines: s.last_diff_lines,
+    planSize,
+    diffHash,
+    evalOk,
+  });
+}
+
 /** ガード状態の部分更新 */
 export function noteGuard(
   root: string,
@@ -3107,15 +3147,39 @@ export function noteGuard(
   }));
 }
 
-export function stopLoopByPause(root: string): ActiveLoop | null {
+export function stopLoopByPause(
+  root: string,
+  opts?: {
+    /** 停止時点の進捗キー（resume 後に同じなら即 pause する。design g-mwokteud） */
+    stuckKey?: string | null;
+    /** true なら `loop_stopped` を記録しない（既に理由付きのイベントがある経路用） */
+    silent?: boolean;
+  },
+): ActiveLoop | null {
   const state = readState(root);
   const count = state.loop_stop_count + 1;
-  writeState(root, { ...state, loop_stop_count: count });
+  writeState(root, {
+    ...state,
+    loop_stop_count: count,
+    ...(opts?.stuckKey !== undefined
+      ? { guard: { ...state.guard, stuck_key: opts.stuckKey } }
+      : {}),
+  });
   const r = pauseGoal(root);
-  if (r?.goal.id) {
+  if (r?.goal.id && !opts?.silent) {
     recordEvent(root, { type: "loop_stopped", goal: r.goal.id, count });
   }
   return r;
+}
+
+/** resume 直後に出す注意（止めたときと同じ状態のまま再開したとき）。null なら何も出さない */
+export function stuckResumeNote(guard: LoopGuard | null | undefined): string | null {
+  const key = guard?.stuck_key ?? null;
+  if (!key) return null;
+  return (
+    `注意: 止めたときと同じ状態のまま resume しています（進捗キー ${key.slice(0, 24)}…）。` +
+    "差分か eval の結果が変わらないと、次のターンでまた停止します（force: true の resume で解除できます）。"
+  );
 }
 
 /** resume がブロックされているか（loop_stop_max に累積停止回数が達した） */

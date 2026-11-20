@@ -37,7 +37,7 @@ import {
 } from "../../../src/entry-decide";
 import { decisionAvailable } from "../../../src/decision";
 import { isFailedEvent, isInterruptedEvent } from "../../../src/events";
-import { evaluateGuard, isMidRoundRestart, progressKeyOf, type GuardPauseReason } from "../../../src/loop-guard";
+import { evaluateGuard, isMidRoundRestart, type GuardPauseReason } from "../../../src/loop-guard";
 import { checkBuiltinGoal } from "../../../src/goal-conflict";
 import { statSync } from "node:fs";
 import { readHandoff } from "../../../src/handoff";
@@ -286,46 +286,17 @@ export function guardPauseText(
         ? `差分も eval の合否も変わらないターンが ${cfg.loop_max_stalls} 回続いた`
         : reason === "wait"
           ? "background（subagent / shell）の完了を待ち続けた"
-          : "継続の途中でプロセスが落ちた";
+          : reason === "stuck_again"
+            ? "止めたときと同じ状態のまま再開された（差分も eval の合否も変わっていない）"
+            : "継続の途中でプロセスが落ちた";
+  const advice =
+    reason === "stuck_again"
+      ? "差分か eval の結果を変えてから graphhopper_goal(action: 'resume') で再開してください（同じ状態のまま resume すると 1 ターンでまた止まります）。"
+      : "状況を確認し、続けるなら graphhopper_goal(action: 'resume') で再開してください。";
   return (
     `[graphhopper] ${head}ため自動継続を停止しました（goal は pause）。` +
-    `rounds=${next.rounds} stalls=${next.stalls}。` +
-    "状況を確認し、続けるなら graphhopper_goal(action: 'resume') で再開してください。"
+    `rounds=${next.rounds} stalls=${next.stalls}。${advice}`
   );
-}
-
-/** 継続可否を判断する材料になる進捗キー。
- * 「進んだ」の証拠は差分の指紋と eval の合否だけ（design g-mwoiwjif 決めたこと1・2）。
- * 差分を測れない環境では従来の材料にフォールバックする（決めたこと5）。 */
-async function currentProgressKey(
-  shell: typeof $,
-  root: string,
-  goalId: string,
-  s: state.LoopState,
-): Promise<string> {
-  const loaded = state.readTodosStatus(root, goalId);
-  const items = loaded.valid ? loaded.store.items : [];
-  const todosDone = items.filter((i) => i.status === "completed").length;
-  let planSize: number | null = null;
-  try {
-    planSize = statSync(state.planPath(root, goalId)).size;
-  } catch {
-    planSize = null;
-  }
-  /* 差分は goal 開始基準から測る（diff ゲートと同じ基準）。測れなければ null */
-  const baseline = await state.resolveBaseline(shell, root, s);
-  const diffHash = await state.measureProgressEvidence(shell, root, baseline);
-  const evalOk =
-    s.last_eval_fingerprint === null ? null : s.last_eval_fingerprint.startsWith("true");
-  return progressKeyOf({
-    phase: s.phase,
-    todosDone,
-    evalFingerprint: s.last_eval_fingerprint,
-    diffLines: s.last_diff_lines,
-    planSize,
-    diffHash,
-    evalOk,
-  });
 }
 
 export async function registerHooks(gh: Gh): Promise<() => void> {
@@ -1020,7 +991,10 @@ async function onIdleBody(
       const t = await state.evalToPolish($, root, { cmd, ...inp });
       evalNote = t.note;
     } else if (r.giveUp) {
-      const paused = state.pauseGoal(root);
+      /* 停止回数（loop_stop_max）に数え、resume 後の初回判定用に進捗キーを残す（design g-mwokteud）。
+       * loop_stopped は出さない（eval_gave_up と二重になる） */
+      const stuckKey = await state.measureProgressKey($, root, active.goal.id, state.readState(root));
+      const paused = state.stopLoopByPause(root, { stuckKey, silent: true });
       if (paused) {
         state.recordEvent(root, { type: "eval_gave_up", goal: paused.goal.id, fail_streak: r.fail_streak });
         console.warn(
@@ -1063,8 +1037,9 @@ async function onIdleBody(
   {
     const wcLines = await state.measureWorkingCopyLines($, root);
     if (wcLines !== null) state.noteDiffLines(root, wcLines);
+    active = state.getActive(root) ?? active;
   }
-  const progressKey = await currentProgressKey($, root, active.goal.id, active.state);
+  const progressKey = await state.measureProgressKey($, root, active.goal.id, active.state);
   const decision = evaluateGuard({
     guard: active.state.guard,
     config: cfg,

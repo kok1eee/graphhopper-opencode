@@ -332,8 +332,14 @@ main 中（designing/確認/polish）に呼ぶと main で動く点に注意。
 
 - `background`（実行中の subagent / shell）がある間は継続しない。完了時の wake で idle が再発火する。
 - ガード（`loop_max_rounds` 50 / `loop_max_stalls` 3 / `loop_wait_limit_ms` 30分 / `loop_restart_pause`）に
-  達したら `stopLoopByPause` で pause し、`guard_pause` を history に記録する。resume でガードは数え直す
-  （`loop_stop_count` の恒久予算は維持）。
+  達したら `stopLoopByPause` で pause し、`guard_pause` を history に記録する。resume で `rounds`・`stalls`・
+  `progress_key` は数え直す（`loop_stop_count` の恒久予算は維持）。下の `stuck_key` だけは例外で残る。
+- 「進捗なし」「eval の連続失敗」で止めたときは、停止時の進捗キーを `guard.stuck_key` に残す。
+  何も変えずに resume すると、次の継続判定で同じキーを見て **1 ターンでまた止まる**（`guard_pause` の
+  reason は `stuck_again`）。差分か eval の結果を変えるか、`force: true` の resume で解除する
+  （force はこの印と `loop_stop_max` のブロックの両方を外す。何も変えなければ今度は `loop_max_stalls` で
+  再停止し、それも停止回数に数えられる）。
+  eval の連続失敗（giveUp）も `stopLoopByPause` を通すので、停止回数に数えられる。
 - 進捗キー = 差分の指紋（goal 開始基準からの diff の中身。初期汚れも含む＝開始時点から何も
   変わっていなければ同じ値）＋ eval の合否。git では未追跡ファイルの一覧も足す
   （新しいファイルを作っただけのターンを進捗と見なすため）。ちなみに遷移判定の「実効 diff」は

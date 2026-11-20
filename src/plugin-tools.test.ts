@@ -1975,3 +1975,52 @@ describe("plugin tool: attempt(ok) は eval_cmd 設定中にカウンタを戻�
     expect(readState(root).fail_streak).toBe(0);
   });
 });
+
+describe("plugin tool: giveUp も停止回数に数え、resume に注意を出す（design g-mwokteud）", () => {
+  test("attempt の連続失敗で止まると loop_stop_count が増え、resume が注意を返す", async () => {
+    const root = tmpRoot();
+    startGoal(root, "t", "s1");
+    const attempt = tools(root).get("graphhopper_attempt")!;
+    for (let i = 0; i < 6; i++) {
+      await attempt.execute({ ok: false, note: `try ${i}` }, { sessionID: "s1" });
+    }
+    const stopped = readState(root);
+    expect(stopped.loop_stop_count).toBe(1);
+    expect(stopped.guard.stuck_key).not.toBeNull();
+
+    const out = textOf(
+      await tools(root)
+        .get("graphhopper_goal")!
+        .execute({ action: "resume" }, { sessionID: "s1" }),
+    );
+    expect(out).toContain("resumed");
+    expect(out).toContain("同じ状態のまま resume");
+  });
+
+  test("連続失敗の停止が loop_stop_max に達すると resume が拒否され、force で戻れる", async () => {
+    const root = tmpRoot();
+    startGoal(root, "t", "s1");
+    const attempt = tools(root).get("graphhopper_attempt")!;
+    const goal = tools(root).get("graphhopper_goal")!;
+    const failUntilPaused = async (): Promise<void> => {
+      for (let i = 0; i < 6; i++) {
+        await attempt.execute({ ok: false, note: `try ${i}` }, { sessionID: "s1" });
+      }
+    };
+    await failUntilPaused();
+    await goal.execute({ action: "resume", force: true }, { sessionID: "s1" });
+    await failUntilPaused();
+    await goal.execute({ action: "resume", force: true }, { sessionID: "s1" });
+    await failUntilPaused();
+    expect(readState(root).loop_stop_count).toBe(3);
+
+    const refused = textOf(await goal.execute({ action: "resume" }, { sessionID: "s1" }));
+    expect(refused).not.toContain("resumed");
+    const { readGoals } = await import("./state");
+    expect(readGoals(root).goals[0].status).toBe("paused");
+
+    const forced = textOf(await goal.execute({ action: "resume", force: true }, { sessionID: "s1" }));
+    expect(forced).toContain("resumed");
+    expect(readState(root).guard.stuck_key).toBeNull(); // force は印も消す
+  });
+});

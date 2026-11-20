@@ -140,7 +140,7 @@ export function registerCoreTools(
         force: {
           type: "boolean",
           description:
-            "complete 時に verifier 未clearでも強制完了する、または resume 時に loop_stop_max のブロックを明示的に無視する（人間の判断が見える場合のみ。監査ログに loop_resume_forced が記録される）",
+            "complete 時に verifier 未clearでも強制完了する、または resume 時に loop_stop_max のブロックを明示的に無視し、「止めたときと同じ状態なら 1 ターンでまた止める」印（stuck_key）も消す（人間の判断が見える場合のみ。監査ログに loop_resume_forced が記録される）",
         },
         strong: {
           type: "boolean",
@@ -292,9 +292,10 @@ export function registerCoreTools(
           const policyNote = a
             ? catalogPolicyWarning(root, state.readConfig(root))
             : null;
+          const stuckNote = a ? state.stuckResumeNote(a.state.guard) : null;
           return text(
             a
-              ? `resumed: "${a.goal.title}" | phase: ${a.state.phase}${args.force ? " (forced)" : ""}${cascadeNote ? `\n${cascadeNote}` : ""}${policyNote ? `\n${policyNote}` : ""}\n次: ${PHASE_ACTION[a.state.phase]}`
+              ? `resumed: "${a.goal.title}" | phase: ${a.state.phase}${args.force ? " (forced)" : ""}${stuckNote ? `\n${stuckNote}` : ""}${cascadeNote ? `\n${cascadeNote}` : ""}${policyNote ? `\n${policyNote}` : ""}\n次: ${PHASE_ACTION[a.state.phase]}`
               : noActiveText(),
           );
         }
@@ -622,7 +623,7 @@ export function registerCoreTools(
   editor.add({
     name: "graphhopper_attempt",
     description:
-      "implementingでの実装試行の成否を記録する（graphhopper_set_evalでeval_cmdを設定していない場合の自己申告フォールバック。eval_cmd設定済みなら自動実行されるのでこのツールは不要）。連続失敗がstuck_threshold（既定2）に達したら escalate=true を返し、graphhopper_invoke(agent: 'graphhopper-oracle') での相談を促す。okな試行やphase遷移でfail_streakはリセットされる（eval_cmd設定中はokでも戻さない。合否はevalが決める）",
+      "implementingでの実装試行の成否を記録する（graphhopper_set_evalでeval_cmdを設定していない場合の自己申告フォールバック。eval_cmd設定済みなら自動実行されるのでこのツールは不要）。連続失敗がstuck_threshold（既定2）に達したら escalate=true を返し、graphhopper_invoke(agent: 'graphhopper-oracle') での相談を促す。okな試行やphase遷移でfail_streakはリセットされる（eval_cmd設定中はokでも戻さない。合否はevalが決める）。連続失敗がmax_eval_fails（既定6）に達するとgoalがpauseする（自動停止の回数に数える。何も変えずにresumeすると1ターンでまた止まる）",
     input: S.obj(
       {
         ok: { type: "boolean", description: "この試行は成功したか（テストが通った・目的の変更が完了した等）" },
@@ -649,7 +650,12 @@ export function registerCoreTools(
         );
       }
       if (r.giveUp) {
-        const paused = state.pauseGoal(root);
+        /* 停止回数（loop_stop_max）に数え、resume 後の初回判定用に進捗キーを残す（design g-mwokteud）。
+         * loop_stopped は出さない（eval_gave_up と二重になる） */
+        const stuckKey = active.goal.id
+          ? await state.measureProgressKey($, root, active.goal.id, state.readState(root))
+          : null;
+        const paused = state.stopLoopByPause(root, { stuckKey, silent: true });
         if (paused) {
           state.recordEvent(root, { type: "eval_gave_up", goal: paused.goal.id, fail_streak: r.fail_streak });
         }
@@ -657,6 +663,7 @@ export function registerCoreTools(
           [
             `attempt recorded: fail (fail_streak=${r.fail_streak})`,
             `giveUp: true — 連続失敗が上限に達したため goal を pause した。修正して graphhopper_goal(action: 'resume') で再開せよ（fail_streak は 0 に戻る）。`,
+            "同じ状態のまま resume すると 1 ターンでまた止まる（差分か eval の結果を変えること）。",
             managed,
             cascadeNote,
           ]

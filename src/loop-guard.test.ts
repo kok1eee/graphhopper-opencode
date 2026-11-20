@@ -184,3 +184,66 @@ describe("progressKeyOf", () => {
     expect(k).toBe("diff:H1|eval:-");
   });
 });
+
+describe("同じ詰まりの resume を 1 ターンに限る（design g-mwokteud）", () => {
+  test("進捗なしで止めるとき、停止時のキーを残す", () => {
+    let d = evaluateGuard({ ...base, guard: g(), progressKey: "k1", waiting: false });
+    while (d.action === "continue") {
+      expect(d.next.stuck_key).toBeNull(); // まだ止まっていないので印は無い
+      d = evaluateGuard({ ...base, guard: d.next, progressKey: "k1", waiting: false });
+    }
+    expect(d.action).toBe("pause");
+    if (d.action !== "pause") return;
+    expect(d.reason).toBe("stalls");
+    expect(d.next.stuck_key).toBe("k1");
+  });
+
+  test("resume 後も同じキーなら stuck_again で止まり、キーは残る", () => {
+    const d = evaluateGuard({
+      ...base,
+      guard: g({ stuck_key: "k1", rounds: 0, stalls: 0, progress_key: null, pending: false }),
+      progressKey: "k1",
+      waiting: false,
+    });
+    expect(d.action).toBe("pause");
+    if (d.action !== "pause") return;
+    expect(d.reason).toBe("stuck_again");
+    expect(d.next.stuck_key).toBe("k1"); // 次に resume しても同じ扱い
+  });
+
+  test("キーが変われば続行し、印を消す", () => {
+    const d = evaluateGuard({
+      ...base,
+      guard: g({ stuck_key: "k1", progress_key: null, pending: false }),
+      progressKey: "k2",
+      waiting: false,
+    });
+    expect(d.action).toBe("continue");
+    if (d.action !== "continue") return;
+    expect(d.next.stuck_key).toBeNull();
+  });
+
+  test("進捗があって続行すると、古い印も消える", () => {
+    const first = evaluateGuard({ ...base, guard: g(), progressKey: "a", waiting: false });
+    if (first.action !== "continue") throw new Error("continue のはず");
+    expect(first.next.stuck_key).toBeNull();
+  });
+
+  test("background 待ちの間はキーも印も触らない", () => {
+    const d = evaluateGuard({
+      ...base,
+      guard: g({ stuck_key: "k1", progress_key: "k1", pending: false }),
+      progressKey: "k1",
+      waiting: true,
+    });
+    expect(d.action).toBe("wait");
+    expect(d.next.stuck_key).toBe("k1");
+  });
+
+  test("印の無い古い guard は従来どおり（undefined でも壊れない）", () => {
+    const legacy = { ...g(), stuck_key: undefined };
+    const first = evaluateGuard({ ...base, guard: legacy, progressKey: "k1", waiting: false });
+    expect(first.action).toBe("continue");
+    if (first.action === "continue") expect(first.next.stalls).toBe(0);
+  });
+});

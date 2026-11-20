@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerHooks, tailLikes } from "../.opencode/plugins/graphhopper/hooks";
 import { writeHandoff } from "./handoff";
-import { readState, setEvalCmd, setPhase as stateSetPhase, startGoal } from "./state";
+import { readHistory, readState, resumeGoal, setEvalCmd, setPhase as stateSetPhase, startGoal } from "./state";
 import { clearAllWaitTimers } from "../.opencode/plugins/graphhopper/shared";
 
 type HookCb = (event: unknown) => void | Promise<void>;
@@ -462,7 +462,7 @@ describe("plugin hook: 進捗の証拠は diff と eval の合否だけ（g-mwoi
   };
 
   /** git の一時 repo（jj ではない）。.graphhopper/ は追跡しない */
-  async function gitRepo(): Promise<{
+  async function gitRepo(extraCfg: Record<string, unknown> = {}): Promise<{
     root: string;
     restore: () => void;
     setup: () => Promise<void>;
@@ -479,7 +479,7 @@ describe("plugin hook: 進捗の証拠は diff と eval の合否だけ（g-mwoi
     /* 進捗なしの停止を 2 回で試せるようにする（既定値を読まない） */
     const prevCfg = process.env.GRAPHHOPPER_CONFIG;
     const cfgPath = join(root, "gh-global.json");
-    writeFileSync(cfgPath, JSON.stringify({ loop_max_stalls: 2 }), "utf8");
+    writeFileSync(cfgPath, JSON.stringify({ loop_max_stalls: 2, ...extraCfg }), "utf8");
     process.env.GRAPHHOPPER_CONFIG = cfgPath;
     return {
       root,
@@ -551,6 +551,104 @@ describe("plugin hook: 進捗の証拠は diff と eval の合否だけ（g-mwoi
       expect(s.guard.stalls).toBe(2);
       const goals = (await import("./state")).readGoals(root);
       expect(goals.goals[0].status).toBe("paused");
+    } finally {
+      restore();
+    }
+  });
+
+  /** 進捗なしで止まるまで idle を回す（各回の前に 1 ターン分の履歴を足す） */
+  const stallUntilPaused = async (
+    hooks: Map<string, HookCb[]>,
+    messages: unknown[],
+    rounds = 3,
+  ): Promise<void> => {
+    for (let i = 1; i <= rounds; i++) {
+      pushTurn(messages, i);
+      await runIdle(hooks, "s-main");
+    }
+  };
+
+  test("止まった後、何も変えずに resume すると 1 ターンでまた止まる（stuck_again）", async () => {
+    const { root, restore, setup } = await gitRepo();
+    try {
+      await setup();
+      const messages: unknown[] = [];
+      const { ctx, hooks } = fakeCtx({ messages });
+      await registerHooks({ ctx: ctx as never, root });
+      await stallUntilPaused(hooks, messages);
+      const stopped = readState(root);
+      expect(stopped.guard.stuck_key).not.toBeNull();
+      const gid = stopped.goal_id!;
+      const goals = (await import("./state")).readGoals(root);
+      expect(goals.goals.find((g) => g.id === gid)?.status).toBe("paused");
+
+      resumeGoal(root, "s-main");
+      // 何も変えずに 1 ターン
+      pushTurn(messages, 10);
+      await runIdle(hooks, "s-main");
+      const again = readState(root);
+      const after = (await import("./state")).readGoals(root);
+      expect(after.goals.find((g) => g.id === gid)?.status).toBe("paused");
+      expect(again.guard.stuck_key).toBe(stopped.guard.stuck_key); // 印は残る
+      const last = readHistory(root).filter((h) => h.type === "guard_pause").pop() as
+        | { reason?: string }
+        | undefined;
+      expect(last?.reason).toBe("stuck_again");
+    } finally {
+      restore();
+    }
+  });
+
+  test("resume 後にファイルを変えれば続行し、印が消える", async () => {
+    const { root, restore, setup } = await gitRepo();
+    try {
+      await setup();
+      const messages: unknown[] = [];
+      const { ctx, hooks } = fakeCtx({ messages });
+      await registerHooks({ ctx: ctx as never, root });
+      await stallUntilPaused(hooks, messages);
+      expect(readState(root).guard.stuck_key).not.toBeNull();
+
+      resumeGoal(root, "s-main");
+      await Bun.write(`${root}/a.txt`, "one\ntwo\n");
+      pushTurn(messages, 10);
+      await runIdle(hooks, "s-main");
+      const s = readState(root);
+      expect(s.guard.stuck_key).toBeNull();
+      expect(s.guard.stalls).toBe(0);
+      const goals = (await import("./state")).readGoals(root);
+      expect(goals.goals[0].status).toBe("active");
+    } finally {
+      restore();
+    }
+  });
+
+  test("eval の連続失敗で止まると停止回数が増え、resume 後の 1 ターンでまた止まる", async () => {
+    const { root, restore, setup } = await gitRepo({ max_eval_fails: 2 });
+    try {
+      await setup();
+      setEvalCmd(root, 'echo "$RANDOM"; exit 1');
+      const messages: unknown[] = [];
+      const { ctx, hooks } = fakeCtx({ messages });
+      await registerHooks({ ctx: ctx as never, root });
+      pushTurn(messages, 1);
+      await runIdle(hooks, "s-main");
+      pushTurn(messages, 2);
+      await runIdle(hooks, "s-main");
+      const stopped = readState(root);
+      expect(stopped.guard.stuck_key).not.toBeNull();
+      expect(stopped.loop_stop_count).toBe(1); // giveUp も停止回数に数える
+      const types = readHistory(root).map((h) => h.type);
+      expect(types).not.toContain("loop_stopped"); // eval_gave_up と二重にしない
+
+      resumeGoal(root, "s-main");
+      pushTurn(messages, 3);
+      await runIdle(hooks, "s-main");
+      expect(readState(root).loop_stop_count).toBe(2);
+      const last = readHistory(root).filter((h) => h.type === "guard_pause").pop() as
+        | { reason?: string }
+        | undefined;
+      expect(last?.reason).toBe("stuck_again");
     } finally {
       restore();
     }

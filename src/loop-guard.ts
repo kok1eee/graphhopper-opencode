@@ -5,7 +5,7 @@
  */
 import type { GraphhopperConfig, LoopGuard } from "./state";
 
-export type GuardPauseReason = "rounds" | "stalls" | "wait" | "restart";
+export type GuardPauseReason = "rounds" | "stalls" | "wait" | "restart" | "stuck_again";
 
 export type GuardDecision =
   | { action: "wait"; next: LoopGuard }
@@ -45,6 +45,7 @@ function parseIso(v: string | null): number | null {
  * 継続してよいか / 待つか / 止めるかを決める。
  * - waiting: background 実行中。待ち始めを記録し、上限超過で pause。
  * - 進捗キーが前回と同じなら stalls を増やす（キーは diff と eval 合否だけ。design g-mwoiwjif）。
+ * - 止めたときと同じキーのまま resume されたら、その場で pause（design g-mwokteud）。
  * - rounds は「積んだ回数」。上限に達したら pause（上限回数までは継続できる）。
  */
 export function evaluateGuard(input: GuardInput): GuardDecision {
@@ -64,6 +65,14 @@ export function evaluateGuard(input: GuardInput): GuardDecision {
   /* background が空になったら待ち時間はリセット */
   const base: LoopGuard = { ...guard, wait_since: null };
 
+  /* 「進捗なし」「eval 連続失敗」で止めたときと同じキーのまま resume されたなら、
+   * 何も変わっていないので 1 ターンで止める（design g-mwokteud 決めたこと4）。
+   * stuck_key は残す（次に resume しても同じ扱い）。 */
+  const stuckKey = base.stuck_key ?? null;
+  if (stuckKey !== null && stuckKey === progressKey) {
+    return { action: "pause", reason: "stuck_again", next: { ...base, stuck_key: stuckKey } };
+  }
+
   if (config.loop_max_rounds > 0 && base.rounds >= config.loop_max_rounds) {
     return { action: "pause", reason: "rounds", next: base };
   }
@@ -76,7 +85,7 @@ export function evaluateGuard(input: GuardInput): GuardDecision {
     return {
       action: "pause",
       reason: "stalls",
-      next: { ...base, stalls, progress_key: progressKey },
+      next: { ...base, stalls, progress_key: progressKey, stuck_key: progressKey },
     };
   }
 
@@ -87,6 +96,8 @@ export function evaluateGuard(input: GuardInput): GuardDecision {
       rounds: base.rounds + 1,
       stalls,
       progress_key: progressKey,
+      /* 進んだので「同じ詰まり」の印は消す */
+      stuck_key: null,
       pending: true,
       boot,
     },
