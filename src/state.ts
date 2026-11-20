@@ -311,6 +311,9 @@ export interface LoopState {
   cascade: CascadeState | null;
   /** 自動継続の上限ガード */
   guard: LoopGuard;
+  /** この goal で verifier が drift と判定した回数（design g-mwoxgpsa）。resume で 0 に戻す。
+   * verify_drift_max に達したら goal を pause して人間に聞く（ループ検知の loop_stop_count とは別勘定） */
+  verify_drift_count: number;
   updated_at: string;
 }
 
@@ -409,6 +412,9 @@ export interface GraphhopperConfig {
   loop_max_stalls: number;
   /** 自動継続の上限: background（subagent/shell）待ちの最大時間 ms（既定 30 分） */
   loop_wait_limit_ms: number;
+  /** 同じ goal で verifier が drift と判定した回数の上限（既定 3）。達したら pause して
+   * 人間に聞く。0 以下で無効 */
+  verify_drift_max: number;
   /** true ならラウンド途中で落ちた goal を起動時に pause する（既定 true） */
   loop_restart_pause: boolean;
   /** モデルカスケード。既定無効 */
@@ -463,6 +469,7 @@ export const DEFAULT_CONFIG: GraphhopperConfig = {
   loop_max_rounds: 50,
   loop_max_stalls: 3,
   loop_wait_limit_ms: 30 * 60_000,
+  verify_drift_max: 3,
   loop_restart_pause: true,
   lsp_servers: [],
   cascade: {
@@ -769,6 +776,15 @@ export type HistoryEvent =
       models?: (string | null)[];
     }
   | {
+      /* 差し戻しの回数が上限に達して pause した（design g-mwoxgpsa）。
+       * 角度ごとの回数は再開前の分も含めた累計 */
+      type: "verify_cap";
+      goal: string;
+      count: number;
+      max: number;
+      by_lens: { lens: string; count: number }[];
+    }
+  | {
       /* complete ゲートを observe で通した（design g-mwmnvx3x 判断3） */
       type: "complete_gate_observe";
       goal: string;
@@ -1046,6 +1062,8 @@ export function readConfig(root: string): GraphhopperConfig {
     loop_max_stalls: raw.loop_max_stalls ?? DEFAULT_CONFIG.loop_max_stalls,
     loop_wait_limit_ms:
       raw.loop_wait_limit_ms ?? DEFAULT_CONFIG.loop_wait_limit_ms,
+    verify_drift_max:
+      raw.verify_drift_max ?? DEFAULT_CONFIG.verify_drift_max,
     loop_restart_pause:
       raw.loop_restart_pause ?? DEFAULT_CONFIG.loop_restart_pause,
     loop_tool_window:
@@ -1162,6 +1180,7 @@ function emptyState(): LoopState {
     loop_streak: 0,
     loop_stopped: false,
     loop_stop_count: 0,
+    verify_drift_count: 0,
     edit_file: null,
     edit_streak: 0,
     last_diff_lines: null,
@@ -1374,6 +1393,8 @@ export function resumeGoal(
         loop_streak: 0,
         loop_stopped: false,
         fail_streak: 0,
+        /* 差し戻しの数の数え直し（design g-mwoxgpsa）。再開後にまた上限まで差し戻されたら止める */
+        verify_drift_count: 0,
         edit_file: null,
         edit_streak: 0,
         last_diff_lines: null,
@@ -2698,6 +2719,54 @@ export function setVerifierVerdict(
     });
   }
   return next;
+}
+
+/** goal の履歴から角度ごとの drift 回数を数える（再開前の分も含む累計。design g-mwoxgpsa） */
+export function driftCountsByLens(
+  root: string,
+  goalId?: string,
+): { lens: string; count: number }[] {
+  const gid = goalId ?? readState(root).goal_id;
+  if (!gid) return [];
+  const counts = new Map<string, number>();
+  for (const h of readHistory(root)) {
+    if (h.type !== "verifier_verdict" || h.goal !== gid) continue;
+    for (const a of (h as { angles?: { lens: string; level: VerdictLevel }[] }).angles ?? []) {
+      if (a.level === "drift") counts.set(a.lens, (counts.get(a.lens) ?? 0) + 1);
+    }
+  }
+  return [...counts]
+    .map(([lens, count]) => ({ lens, count }))
+    .sort((a, b) => b.count - a.count || a.lens.localeCompare(b.lens));
+}
+
+/** verifier の drift を 1 回数える。上限（verify_drift_max）に達したら goal を pause して
+ * 人間に聞く。ループ検知の loop_stop_count には数えない（異常ではなく確認のための停止。
+ * 数えると loop_stop_max で resume すら拒否される）。design g-mwoxgpsa */
+export function noteVerifyDrift(root: string): {
+  count: number;
+  max: number;
+  capped: boolean;
+  byLens: { lens: string; count: number }[];
+} {
+  const state = readState(root);
+  const max = readConfig(root).verify_drift_max;
+  const count = state.verify_drift_count + 1;
+  /* pause は現在の state をスナップショットするので、先に数えた回数を書く */
+  writeState(root, { ...state, verify_drift_count: count });
+  const byLens = driftCountsByLens(root);
+  const capped = max > 0 && count >= max;
+  if (capped && state.goal_id) {
+    pauseGoal(root);
+    recordEvent(root, {
+      type: "verify_cap",
+      goal: state.goal_id,
+      count,
+      max,
+      by_lens: byLens,
+    });
+  }
+  return { count, max, capped, byLens };
 }
 
 /** status表示用：既定と異なるlensのみ `lens@model` 式で列挙する（差分表示）。

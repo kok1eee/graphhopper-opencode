@@ -87,6 +87,14 @@ return { stop: "clean", summaries: v.summaries, completed };
   やり直す（advisor なら `start`＋`tail` を1バッチ。ただし下の usability が要る goal は
   usability を挟むので2バッチ）。drift を握り潰して `complete` はできない。
   ルール文書を直した場合は、やり直す前に usability をもう一度通す（下の usability 節の手順から）
+- **差し戻しの回数に上限がある**（`verify_drift_max`、既定 3。0 以下で無効）。`verifier_set` が drift を記録するたびに
+  数え、上限に達すると goal を pause し、出力に `paused: true`・角度ごとの差し戻し回数（再開前の分も含む
+  累計なので、上限判定の回数とは合計が一致しないことがある）・選択肢を返す（history の `verify_cap`）。
+  このときは**止まってユーザーに聞く**。そのまま続けるなら `goal(resume)`（回数は数え直す）。そのあと
+  巻き戻し先が implementing の drift なら `graphhopper_phase({ phase: "implementing" })` で戻して直し、
+  design/requirements なら人間待ち。決めた内容から見直すなら `goal(resume)` のあと
+  `graphhopper_phase({ phase: "designing" })`（resume が pause 時の phase に戻すため、順序は resume が先）。勝手に resume しない。この停止はループ検知の `loop_stop_count` には
+  数えない（`loop_stop_max` で resume を塞がない）
 - `goal(complete)` は throw せず**拒否理由の `error:` 文字列**を返す（レシピは `stop: "complete"`
   で返す）。理由ごとの対応:
   - usability が未記録・drift → usability を記録してから

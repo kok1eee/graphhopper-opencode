@@ -78,6 +78,7 @@ const CFG: GraphhopperConfig = {
   loop_tool_window: 8,
   loop_tool_repeat_threshold: 4,
   max_eval_fails: 6,
+  verify_drift_max: 3,
   stuck_edit_repeat: 5,
   stuck_diff_stall: 4,
   loop_max_rounds: 50,

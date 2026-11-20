@@ -349,6 +349,14 @@ main 中（designing/確認/polish）に呼ぶと main で動く点に注意。
 - ガード（`loop_max_rounds` 50 / `loop_max_stalls` 3 / `loop_wait_limit_ms` 30分 / `loop_restart_pause`）に
   達したら `stopLoopByPause` で pause し、`guard_pause` を history に記録する。resume で `rounds`・`stalls`・
   `progress_key` は数え直す（`loop_stop_count` の恒久予算は維持）。下の `stuck_key` だけは例外で残る。
+- 差し戻しの上限（`verify_drift_max`・既定 3。0 以下で無効）: `verifier_set` が drift を記録するたびに数え、
+  上限で goal を pause する（history の `verify_cap`）。`paused: true` と角度ごとの回数（再開前の分も含む
+  累計なので、上限判定に使う回数とは合計が一致しないことがある）が返るので、止まってユーザーに聞く。
+  続けるなら `goal(resume)`（数え直し）。そのあと巻き戻し先が implementing の drift なら
+  `graphhopper_phase({ phase: "implementing" })` で戻して直す（design/requirements は人間待ち）。
+  見直すなら `goal(resume)` → `graphhopper_phase({ phase: "designing" })`
+  （pause 中に phase を動かしても、resume が pause 時の phase に戻すため、順序は resume が先）。
+  この停止は `loop_stop_count` に数えない（人間に聞くための停止なので、`loop_stop_max` で resume を塞がない）。
 - 「進捗なし」「eval の連続失敗」で止めたときは、停止時の進捗キーを `guard.stuck_key` に残す。
   何も変えずに resume すると、次の継続判定で同じキーを見て **1 ターンでまた止まる**（`guard_pause` の
   reason は `stuck_again`）。差分か eval の結果を変えるか、`force: true` の resume で解除する

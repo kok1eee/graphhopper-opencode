@@ -2091,6 +2091,104 @@ describe("plugin tool: attempt(ok) は eval_cmd 設定中にカウンタを戻�
   });
 });
 
+describe("plugin tool: 差し戻しの回数上限（design g-mwoxgpsa）", () => {
+  type Out = { output: Record<string, unknown>; content: string };
+  const driftOnce = async (
+    root: string,
+    lens = "agreement",
+  ): Promise<Out> => {
+    await seedPlan(root, [lens]);
+    const r = await opsTools(root)
+      .get("graphhopper_verifier_set")!
+      .execute(
+        { results: [{ lens, level: "drift", target: "implementing" }], reason: "指摘" },
+        { sessionID: "s1" },
+      );
+    return r as Out;
+  };
+
+  test("3 回目の drift で goal を pause し、角度ごとの回数と選択肢を返す", async () => {
+    const root = tmpRoot();
+    startGoal(root, "t", "s1");
+    const first = await driftOnce(root, "wiring");
+    expect(first.output["paused"]).toBe(false);
+    expect(first.output["verify_drift_count"]).toBe(1);
+    expect(first.content).toContain("差し戻し 1/3 回目");
+    const second = await driftOnce(root, "wiring");
+    expect(second.output["paused"]).toBe(false);
+    const third = await driftOnce(root, "test-efficacy");
+    expect(third.output["paused"]).toBe(true);
+    expect(third.content).toContain("上限（3 回）に達した");
+    expect(third.content).toContain("wiring 2 / test-efficacy 1");
+    expect(third.content).toContain("resume");
+    const { readGoals, readHistory } = await import("./state");
+    expect(readGoals(root).goals[0].status).toBe("paused");
+    /* ループ検知の累積停止とは別勘定（loop_stop_max で resume を塞がない） */
+    expect(readState(root).loop_stop_count).toBe(0);
+    const cap = readHistory(root).find((h) => h.type === "verify_cap") as
+      | { count: number; max: number; by_lens: { lens: string; count: number }[] }
+      | undefined;
+    expect(cap).toMatchObject({ count: 3, max: 3 });
+    expect(cap?.by_lens).toEqual([
+      { lens: "wiring", count: 2 },
+      { lens: "test-efficacy", count: 1 },
+    ]);
+  });
+
+  test("resume で数え直し、また 3 回で止まる", async () => {
+    const root = tmpRoot();
+    startGoal(root, "t", "s1");
+    for (let i = 0; i < 3; i++) await driftOnce(root);
+    const goal = tools(root).get("graphhopper_goal")!;
+    await goal.execute({ action: "resume" }, { sessionID: "s1" });
+    expect(readState(root).verify_drift_count).toBe(0);
+    const again = await driftOnce(root);
+    expect(again.output["paused"]).toBe(false);
+    expect(again.output["verify_drift_count"]).toBe(1);
+  });
+
+  test("止まったあと resume → phase(designing) で設計に戻れる（順序は resume が先）", async () => {
+    const root = tmpRoot();
+    startGoal(root, "t", "s1");
+    for (let i = 0; i < 3; i++) await driftOnce(root);
+    const goal = tools(root).get("graphhopper_goal")!;
+    await goal.execute({ action: "resume" }, { sessionID: "s1" });
+    const out = textOf(
+      await tools(root).get("graphhopper_phase")!.execute({ phase: "designing" }, { sessionID: "s1" }),
+    );
+    expect(out).not.toContain("error:");
+    expect(readState(root).phase).toBe("designing");
+  });
+
+  test("clean は数えない・止まらない", async () => {
+    const root = tmpRoot();
+    startGoal(root, "t", "s1");
+    await driftOnce(root);
+    await seedPlan(root);
+    const clean = (await opsTools(root)
+      .get("graphhopper_verifier_set")!
+      .execute(
+        { results: [{ lens: "agreement", level: "clean" }], reason: "ok" },
+        { sessionID: "s1" },
+      )) as Out;
+    expect(clean.output["paused"]).toBe(false);
+    expect(clean.output["verify_drift_count"]).toBe(1);
+  });
+
+  test("verify_drift_max が 0 なら止まらない（数えるだけ）", async () => {
+    const root = tmpRoot();
+    startGoal(root, "t", "s1");
+    writeFileSync(join(root, ".graphhopper", "config.json"), '{"verify_drift_max": 0}\n', "utf8");
+    for (let i = 0; i < 3; i++) {
+      const r = await driftOnce(root);
+      expect(r.output["paused"]).toBe(false);
+    }
+    expect(readState(root).verify_drift_count).toBe(3);
+    const { readGoals } = await import("./state");
+    expect(readGoals(root).goals[0].status).toBe("active");
+  });
+});
+
 describe("plugin tool: giveUp も停止回数に数え、resume に注意を出す（design g-mwokteud）", () => {
   test("attempt の連続失敗で止まると loop_stop_count が増え、resume が注意を返す", async () => {
     const root = tmpRoot();

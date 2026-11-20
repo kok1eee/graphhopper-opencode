@@ -167,7 +167,7 @@ export function registerOpsTools(
   editor.add({
     name: "graphhopper_verifier_set",
     description:
-      'verifier結果を記録する（polish/advisor共通・唯一の記録入口）。resultsを渡すとlevel/targetは機械集約される（drift かつ target=implementing なら implementing に巻き戻し可能。target=design/requirementsは人間のhand-back待ち）。self-graded完了防止のため、resultsが空（=verifierを一度も呼んでいない）場合はエラーになる。graphhopper_verify の返り値 out.results をそのまま渡せる（呼び出し例: {"results":[{"lens":"agreement","level":"clean"}],"reason":"要約1〜3文"}）。キーは results[].lens / results[].level / results[].target / results[].model / results[].severity / results[].prior / reason / model のみ',
+      'verifier結果を記録する（polish/advisor共通・唯一の記録入口）。resultsを渡すとlevel/targetは機械集約される（drift かつ target=implementing なら implementing に巻き戻し可能。target=design/requirementsは人間のhand-back待ち）。self-graded完了防止のため、resultsが空（=verifierを一度も呼んでいない）場合はエラーになる。drift を記録するたびに回数を数え、上限（verify_drift_max・既定3）に達したら goal を pause して paused=true を返す（止まってユーザーに聞く）。graphhopper_verify の返り値 out.results をそのまま渡せる（呼び出し例: {"results":[{"lens":"agreement","level":"clean"}],"reason":"要約1〜3文"}）。キーは results[].lens / results[].level / results[].target / results[].model / results[].severity / results[].prior / reason / model のみ',
     input: S.obj(
       {
         results: S.arrOf(
@@ -202,8 +202,10 @@ export function registerOpsTools(
         target: S.enumOf(["implementing", "design", "requirements"], "drift時の巻き戻し先（clean時は省略）"),
         lens: S.arrOf(S.str("lens名"), "記録した lens"),
         next: S.str("次にやること（1行）"),
+        paused: S.bool("差し戻しの上限に達して goal を pause したか"),
+        verify_drift_count: S.num("この goal で drift と判定した回数（resume で 0 に戻る）"),
       },
-      ["level", "lens", "next"],
+      ["level", "lens", "next", "paused", "verify_drift_count"],
     ),
     execute: async (input: unknown) => {
       const args = input as {
@@ -247,25 +249,45 @@ export function registerOpsTools(
       if (result.last_verifier?.level === "clean") {
         const next = "graphhopper_goal(action: 'complete')（done への遷移は complete が行う）";
         return structured(
-          { level: "clean" as const, lens, next },
+          {
+            level: "clean" as const,
+            lens,
+            next,
+            paused: false,
+            verify_drift_count: result.verify_drift_count,
+          },
           `verifier verdict: clean\n同じターン内で続けること: ${next}。途中で報告して止まらない。`,
         );
       }
-      const next =
-        decided.target === "implementing"
+      /* 差し戻しの回数を数え、上限なら pause して人間に聞く（design g-mwoxgpsa） */
+      const cap = state.noteVerifyDrift(root);
+      const next = cap.capped
+        ? "ユーザーに聞く（続けるなら graphhopper_goal(action: 'resume')。巻き戻しが要るならそのあと graphhopper_phase(phase: 'implementing') / 見直すなら resume のあと graphhopper_phase(phase: 'designing')）"
+        : decided.target === "implementing"
           ? "graphhopper_phase(phase: 'implementing') で巻き戻す"
           : "人間の hand-back を待つ（design/requirementsは自動で戻らない）";
+      const byLens = cap.byLens.map((x) => `${x.lens} ${x.count}`).join(" / ");
+      const capLine = cap.capped
+        ? [
+            `差し戻しが上限（${cap.max} 回）に達したため goal を pause した（自動継続は止まる）。`,
+            `角度ごとの差し戻し（再開前の分も含む累計）: ${byLens}`,
+            "この場で止まり、ユーザーに聞くこと。続けるなら graphhopper_goal(action: 'resume')（回数は数え直す）→ 巻き戻し先が implementing なら graphhopper_phase(phase: 'implementing')（design/requirements は人間待ち）、見直すなら resume のあと graphhopper_phase(phase: 'designing')（順序は resume が先）。勝手に resume しない。",
+          ].join("\n")
+        : `差し戻し ${cap.count}/${cap.max} 回目。`;
       return structured(
         {
           level: "drift" as const,
           ...(decided.target ? { target: decided.target } : {}),
           lens,
           next,
+          paused: cap.capped,
+          verify_drift_count: cap.count,
         },
         [
           `verifier verdict: drift -> ${decided.target ?? "-"}`,
           `reason: ${args.reason}`,
           `lens: ${results.map((r) => `${r.lens}=${r.level}`).join(",")}`,
+          capLine,
           `次: ${next}`,
         ].join("\n"),
       );
