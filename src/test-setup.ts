@@ -10,6 +10,9 @@ for (const k of [
   "GRAPHHOPPER_DECISION_SHADOW",
   "GRAPHHOPPER_JEV_MODEL",
   "OPENCODE_API_KEY",
+  /* 判定モデルの key。手元にあると idle hook（見張り・入口判定）がテスト中に実ネットワークへ出る。
+   * 判定を使うテストは自前で set → finally で戻す */
+  "LIQUID_API_KEY",
 ] as const) {
   delete process.env[k];
 }

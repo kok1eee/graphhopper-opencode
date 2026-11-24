@@ -38,6 +38,7 @@ import {
 import { decisionAvailable } from "../../../src/decision";
 import { isFailedEvent, isInterruptedEvent } from "../../../src/events";
 import { evaluateGuard, isMidRoundRestart, type GuardPauseReason } from "../../../src/loop-guard";
+import { watchGoal } from "../../../src/goal-watch";
 import { checkBuiltinGoal } from "../../../src/goal-conflict";
 import { statSync } from "node:fs";
 import { readHandoff } from "../../../src/handoff";
@@ -973,6 +974,18 @@ async function onIdleBody(
       }
       return;
     }
+  }
+
+  /* 見張り（design g-mwu3tz06）: ループ・停滞・過剰設計かを判断モデルに聞き、記録だけ残す。
+   * 待たない・会話に出さない・state を変えない・失敗は握り潰す。材料はその時点の履歴
+   * （このターンの eval 結果は次回の材料になる） */
+  if (active.goal.id && (active.state.phase === "implementing" || active.state.phase === "polish")) {
+    void watchGoal({
+      root,
+      goalID: active.goal.id,
+      sessionID,
+      phase: active.state.phase,
+    });
   }
 
   if (active.state.phase === "implementing" && active.state.eval_cmd) {

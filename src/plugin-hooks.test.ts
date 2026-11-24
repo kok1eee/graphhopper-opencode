@@ -1007,3 +1007,82 @@ describe("plugin hook: designing の編集ゲート（execute.before）", () => 
     ).resolves.toBeUndefined();
   });
 });
+
+describe("plugin hook: goal の見張り（design g-mwu3tz06）", () => {
+  /* 見張りは判断モデルを叩くので、fetch を差し替えてネットワークに出ないようにする。
+   * 判定を使える状態にするため LIQUID_API_KEY はテスト内だけで立てる */
+  const SAVED_KEY = process.env.LIQUID_API_KEY;
+  const SAVED_FETCH = globalThis.fetch;
+
+  async function waitFor(cond: () => boolean, ms = 1000): Promise<boolean> {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      if (cond()) return true;
+      await Bun.sleep(10);
+    }
+    return cond();
+  }
+
+  test("implementing の idle で判定が decisions.jsonl に 1 行残る（記録だけ・介入しない）", async () => {
+    const root = tmpRoot();
+    const { ctx, hooks, synthetic } = fakeCtx();
+    await registerHooks({ ctx: ctx as never, root });
+    startGoal(root, "見張りの配線", "s-main");
+    stateSetPhase(root, "implementing");
+    /* 材料になる履歴を 1 行足す（0 件なら判定しない仕様のため） */
+    const st = await import("./state");
+    st.recordEvent(root, { type: "phase", goal: st.getActive(root)!.goal.id, from: "designing", to: "implementing" });
+    process.env.LIQUID_API_KEY = "liquid_test";
+    globalThis.fetch = (async () => ({
+      ok: true,
+      json: async () => ({ answers: { loop: { noul: 0.2 }, stall: { noul: 0.1 }, overscope: { noul: 0.05 } } }),
+    })) as unknown as typeof fetch;
+    try {
+      const cb = hooks.get("experimental.idle")?.[0];
+      if (!cb) throw new Error("idle hook が登録されていない");
+      const before = readState(root);
+      await cb({ sessionID: "s-main", background: [] });
+      const rowsOf = () =>
+        existsSync(join(root, ".graphhopper", "decisions.jsonl"))
+          ? readRows(root).filter((r) => r["kind"] === "watch")
+          : [];
+      expect(await waitFor(() => rowsOf().length > 0)).toBe(true);
+      const w = rowsOf();
+      expect(w.length).toBe(1);
+      expect(w[0]!["goal"]).toBe(before.goal_id);
+      expect(w[0]!["delivered"]).toBe(false);
+      /* 介入しない: 判定そのものは state を変えない（phase も guard も判定の前後で同じ） */
+      const after = readState(root);
+      expect(after.phase).toBe("implementing");
+      expect(synthetic.some((s) => s.text.includes("watch"))).toBe(false);
+    } finally {
+      globalThis.fetch = SAVED_FETCH;
+      if (SAVED_KEY === undefined) delete process.env.LIQUID_API_KEY;
+      else process.env.LIQUID_API_KEY = SAVED_KEY;
+    }
+  });
+
+  test("designing の idle では見張りを呼ばない", async () => {
+    const root = tmpRoot();
+    const { ctx, hooks } = fakeCtx();
+    await registerHooks({ ctx: ctx as never, root });
+    startGoal(root, "designing は見張らない", "s-main");
+    process.env.LIQUID_API_KEY = "liquid_test";
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return { ok: true, json: async () => ({ answers: {} }) };
+    }) as unknown as typeof fetch;
+    try {
+      const cb = hooks.get("experimental.idle")?.[0];
+      if (!cb) throw new Error("idle hook が登録されていない");
+      await cb({ sessionID: "s-main", background: [] });
+      await Bun.sleep(50);
+      expect(calls).toBe(0);
+    } finally {
+      globalThis.fetch = SAVED_FETCH;
+      if (SAVED_KEY === undefined) delete process.env.LIQUID_API_KEY;
+      else process.env.LIQUID_API_KEY = SAVED_KEY;
+    }
+  });
+});

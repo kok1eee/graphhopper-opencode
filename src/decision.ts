@@ -130,7 +130,17 @@ export type DecisionLog = {
   /** decide行のid。outcome行は decision_id で参照する */
   id?: string;
   decision_id?: string | null;
-  kind: "decide" | "decide-skip" | "difficulty" | "select" | "compact" | "compact-skip" | "outcome" | "shadow";
+  kind:
+    | "decide"
+    | "decide-skip"
+    | "difficulty"
+    | "select"
+    | "compact"
+    | "compact-skip"
+    | "outcome"
+    | "shadow"
+    /** goal の見張り（ループ・停滞・過剰設計。記録のみ。design g-mwu3tz06） */
+    | "watch";
   /** 判定を行ったプロバイダ／実際に答えたモデル（shadow 行は shadow 側） */
   provider?: DecisionProviderName;
   model?: string | null;
@@ -151,6 +161,8 @@ export type DecisionLog = {
   rawChoice?: string | null;
   /** 判定を行ったセッション（hook経由の自動判定で発生。null=不明） */
   sessionID?: string | null;
+  /** kind="watch" の対象 goal（後から実際の停止と突き合わせる） */
+  goal?: string;
   /** kind="difficulty" の出所（"goal-start" / "implementing"。較正用） */
   source?: string;
   /** 判定に対応するユーザーメッセージのID（hook経由。null=不明）。
