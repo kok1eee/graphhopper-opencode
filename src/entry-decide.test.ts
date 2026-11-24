@@ -8,12 +8,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   decideEntry,
+  entryNudge,
+  ENTRY_NUDGE_MIN_CONFIDENCE,
   INTERNAL_PROMPT_METADATA_KEY,
   judgeGoalDifficulty,
   isInternalPrompt,
   recordEntrySkip,
   shouldRunEntryDecide,
   type EntryDecideInput,
+  type EntryVerdict,
 } from "./entry-decide";
 import { mapDecisionAnswer } from "./decision";
 
@@ -108,6 +111,36 @@ describe("shouldRunEntryDecide（判定の除外条件）", () => {
       text: "",
     });
     expect(r).toEqual({ run: false, reason: "internal" });
+  });
+});
+
+describe("entryNudge（強い goal 判定だけモデルに一言）", () => {
+  const verdict = (over: Partial<EntryVerdict>): EntryVerdict => ({
+    id: "dec1",
+    route: "goal",
+    rawChoice: "goal",
+    rawRoute: "goal",
+    confidence: 0.9,
+    reason: "d1判定(goal)",
+    fallback: false,
+    difficulty: null,
+    difficultyConfidence: null,
+    ...over,
+  });
+
+  test("goal かつ 0.7 以上なら 1 行を返す", () => {
+    const line = entryNudge(verdict({ confidence: ENTRY_NUDGE_MIN_CONFIDENCE }));
+    expect(line).toContain("入口判定: goal 向き");
+    expect(line).toContain("0.70");
+    expect(line).toContain("始めるかはあなたが決める");
+  });
+
+  test("0.7 未満・direct・fallback・confidence 無しは届けない", () => {
+    expect(entryNudge(verdict({ confidence: 0.69 }))).toBeNull();
+    expect(entryNudge(verdict({ route: "direct", rawRoute: "direct" }))).toBeNull();
+    expect(entryNudge(verdict({ fallback: true }))).toBeNull();
+    expect(entryNudge(verdict({ confidence: null }))).toBeNull();
+    expect(entryNudge(verdict({ confidence: Number.NaN }))).toBeNull();
   });
 });
 

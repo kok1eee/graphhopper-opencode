@@ -129,13 +129,13 @@ function fakeCtx(opts: {
 }
 
 /** d1 の応答を模した fetch（一時的にグローバルを差し替える） */
-const patchFetch = (route: "light" | "direct" = "light") => {
+const patchFetch = (route: "light" | "direct" | "goal" = "light", confidence = 0.3) => {
   const original = globalThis.fetch;
   globalThis.fetch = (async () => ({
     ok: true,
     json: async () => ({
       answers: {
-        route: { choice: route, confidence: 0.3 },
+        route: { choice: route, confidence },
         difficulty: { choice: "normal", confidence: 0.9 },
       },
     }),
@@ -400,6 +400,55 @@ describe("plugin hook: 入口判定は裏で記録するだけ・system は固�
         if (!promptHook) throw new Error("hook が登録されていない");
         await promptHook({ sessionID: "s-main", prompt: { text: "こんにちは" } });
         expect(synthetic).toHaveLength(0);
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  test("強い goal 判定（0.7 以上）は synthetic で 1 行積み、nudge 行を decision_id 付きで残す", async () => {
+    const root = tmpRoot();
+    const restore = patchFetch("goal", 0.9);
+    try {
+      await withKey(async () => {
+        const { ctx, hooks, synthetic } = fakeCtx();
+        await registerHooks({ ctx: ctx as never, root });
+        const promptHook = hooks.get("prompt")?.[0];
+        if (!promptHook) throw new Error("hook が登録されていない");
+        await promptHook({
+          sessionID: "s-main",
+          prompt: { text: "複数ファイルを変更する重い依頼" },
+        });
+        expect(synthetic).toHaveLength(1);
+        expect(synthetic[0]?.text).toContain("入口判定: goal 向き");
+        expect(synthetic[0]?.resume).toBe(false);
+
+        /* decide 行は従来どおり delivered:false で、nudge 行だけが届いた記録 */
+        const rows = readRows(root);
+        const decide = rows.find((r) => r.kind === "decide");
+        const nudge = rows.find((r) => r.kind === "nudge");
+        expect(decide?.delivered).toBe(false);
+        expect(nudge).toMatchObject({ delivered: true, decision_id: decide?.id });
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  test("弱い goal 判定（0.7 未満）は synthetic も nudge 行も積まない", async () => {
+    const root = tmpRoot();
+    const restore = patchFetch("goal", 0.5);
+    try {
+      await withKey(async () => {
+        const { ctx, hooks, synthetic } = fakeCtx();
+        await registerHooks({ ctx: ctx as never, root });
+        const promptHook = hooks.get("prompt")?.[0];
+        if (!promptHook) throw new Error("hook が登録されていない");
+        await promptHook({ sessionID: "s-main", prompt: { text: "重い依頼" } });
+        expect(synthetic).toHaveLength(0);
+        const rows = readRows(root);
+        expect(rows.some((r) => r.kind === "nudge")).toBe(false);
+        expect(rows.find((r) => r.kind === "decide")?.delivered).toBe(false);
       });
     } finally {
       restore();

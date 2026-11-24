@@ -140,7 +140,9 @@ export type DecisionLog = {
     | "outcome"
     | "shadow"
     /** goal の見張り（ループ・停滞・過剰設計。記録のみ。design g-mwu3tz06） */
-    | "watch";
+    | "watch"
+    /** 入口判定の一言をモデルに届けた記録。decision_id で decide 行を参照する（g-mwujrhv6） */
+    | "nudge";
   /** 判定を行ったプロバイダ／実際に答えたモデル（shadow 行は shadow 側） */
   provider?: DecisionProviderName;
   model?: string | null;
@@ -378,6 +380,8 @@ export const DECISION_ROUTE_CRITERIA: Record<EntryRoute, string> = {
 };
 
 export type DecideResult = {
+  /** decisions.jsonl の decide 行の id（root 未指定なら null）。nudge 行が参照する */
+  id: string | null;
   route: EntryRoute;
   /** d1が選んだ生のchoice文字列（fail-safe適用前）。不正応答ならnull */
   rawChoice: string | null;
@@ -535,11 +539,12 @@ export function mapDecisionAnswer(
   const rawChoice = typeof choice === "string" ? choice : null;
   const route = rawChoice ? normalizeRoute(rawChoice) : null;
   if (!route) {
-    return { route: "goal", rawChoice, rawRoute: null, confidence: null, reason: "d1不正choice→goal", fallback: false, difficulty: null, difficultyConfidence: null };
+    return { id: null, route: "goal", rawChoice, rawRoute: null, confidence: null, reason: "d1不正choice→goal", fallback: false, difficulty: null, difficultyConfidence: null };
   }
   const conf = typeof confidence === "number" ? confidence : null;
   if (conf !== null && conf < DECISION_CONFIDENCE_FLOOR) {
     return {
+      id: null,
       route: "goal",
       rawChoice,
       rawRoute: route,
@@ -550,7 +555,7 @@ export function mapDecisionAnswer(
       difficultyConfidence: null,
     };
   }
-  return { route, rawChoice, rawRoute: route, confidence: conf, reason: `d1判定(${route})`, fallback: false, difficulty: null, difficultyConfidence: null };
+  return { id: null, route, rawChoice, rawRoute: route, confidence: conf, reason: `d1判定(${route})`, fallback: false, difficulty: null, difficultyConfidence: null };
 }
 
 /* shadow 呼び出しの in-flight 集合。テストが `await Promise.all(pendingShadows())` で
@@ -667,6 +672,7 @@ export async function decideRoute(
   ): Promise<DecideResult> => {
     const root = opts?.root;
     const id = decisionId;
+    d.id = id;
     if (root && id) {
       /* 失敗した判定は last decision id を更新しない。更新すると
        * 次の goal が偽の decide に紐付き、較正データを汚染する。
@@ -715,6 +721,7 @@ export async function decideRoute(
   if (!r.ok) {
     return finish(
       {
+        id: decisionId,
         route: "goal",
         rawChoice: null,
         rawRoute: null,
@@ -731,6 +738,7 @@ export async function decideRoute(
   return finish(
     {
       ...base,
+      id: decisionId,
       difficulty: null,
       difficultyConfidence: null,
       reason: base.reason,

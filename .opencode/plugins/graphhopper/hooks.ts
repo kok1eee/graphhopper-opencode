@@ -30,12 +30,13 @@ import { resolveCompactDb, runCompactGate } from "../../../src/compact";
 import { goalResumeContext } from "../../../src/gate";
 import {
   decideEntry,
+  entryNudge,
   INTERNAL_PROMPT_METADATA_KEY,
   isInternalPrompt,
   recordEntrySkip,
   shouldRunEntryDecide,
 } from "../../../src/entry-decide";
-import { decisionAvailable } from "../../../src/decision";
+import { decisionAvailable, logDecision } from "../../../src/decision";
 import { isFailedEvent, isInterruptedEvent } from "../../../src/events";
 import { evaluateGuard, isMidRoundRestart, type GuardPauseReason } from "../../../src/loop-guard";
 import { watchGoal } from "../../../src/goal-watch";
@@ -457,17 +458,47 @@ export async function registerHooks(gh: Gh): Promise<() => void> {
         hasActiveGoal: !!active && active.goal.status !== "done",
         hasApiKey: decisionAvailable(),
       });
-      /* 入口判定は待たない。裏で 1 回走らせて decisions.jsonl に残すだけで、会話には出さない
-       * （判定と実際の行動を後から突き合わせるための記録。g-mwn9al7r） */
+      /* 入口判定は裏で 1 回走らせて decisions.jsonl に残す。強い goal 判定だけは、受付予算の
+       * 残りで間に合えば synthetic で 1 行積む（g-mwujrhv6）。届かない回も記録は残る（g-mwn9al7r） */
       if (decision.run) {
-        void decideEntry(text, fetch, {
+        const pending = decideEntry(text, fetch, {
           root,
           sessionID,
           messageID: e.messageID ?? null,
           delivered: false,
         }).catch((err) => {
           console.warn(`graphhopper: 入口判定に失敗: ${String(err)}`);
+          return null;
         });
+        const verdict = await withinBudget(pending, deadline);
+        const nudge = verdict ? entryNudge(verdict) : null;
+        if (nudge && verdict) {
+          /* 記録は synthetic の解決側に置く（待ちが時間切れでも、実際に積めたら残す） */
+          const delivered = ctx.session
+            .synthetic({
+              sessionID,
+              text: nudge,
+              description: "graphhopper 入口判定",
+              resume: false,
+            } as never)
+            .then(async () => {
+              await logDecision(root, {
+                kind: "nudge",
+                decision_id: verdict.id,
+                request: text,
+                result: "delivered",
+                confidence: verdict.confidence,
+                latencyMs: 0,
+                fallback: false,
+                reason: "入口判定の一言を届けた",
+                sessionID,
+                messageID: e.messageID ?? null,
+                delivered: true,
+              });
+            })
+            .catch(() => {});
+          await withinBudget(delivered, deadline);
+        }
       } else {
         void recordEntrySkip(root, decision.reason, text, sessionID).catch(() => {});
       }

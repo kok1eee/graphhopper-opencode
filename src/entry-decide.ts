@@ -96,6 +96,21 @@ export function shouldRunEntryDecide(
   return { run: true };
 }
 
+/** 一言を届ける goal 判定の confidence 下限（ユーザー合意で固定。設定キーにはしない） */
+export const ENTRY_NUDGE_MIN_CONFIDENCE = 0.7;
+
+/**
+ * 強い goal 判定のときだけ、モデル向けの 1 行を返す（それ以外は null）。
+ * 届けるだけで、goal の開始は強制しない（g-mwujrhv6）。
+ */
+export function entryNudge(v: EntryVerdict): string | null {
+  if (v.fallback) return null;
+  if (v.route !== "goal") return null;
+  /* NaN も弾く（NaN < 0.7 は false になるため、>= で判定する） */
+  if (!(v.confidence !== null && v.confidence >= ENTRY_NUDGE_MIN_CONFIDENCE)) return null;
+  return `入口判定: goal 向き（自信 ${v.confidence.toFixed(2)}）。複数ファイルや設計判断を含むなら、ループを始めるか検討する。始めるかはあなたが決める。`;
+}
+
 /** 判定を実行して記録する。失敗は fallback（route=goal）として返す */
 export async function decideEntry(
   request: string,
