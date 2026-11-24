@@ -105,8 +105,19 @@ const DESIGN_WITH_TASKS = compliantDesignDoc({
 });
 
 describe("plugin tool: strong モード（design g-mwfnlpr9）", () => {
+  /** strong は cascade が有効なときだけ効く。手元の全体設定に頼らず、project config で有効にする */
+  function enableCascade(root: string): void {
+    mkdirSync(join(root, ".graphhopper"), { recursive: true });
+    writeFileSync(
+      join(root, ".graphhopper", "config.json"),
+      JSON.stringify({ cascade: { enabled: true } }),
+      "utf8",
+    );
+  }
+
   test("start(strong) で strong_mode が入り status に出る", async () => {
     const root = tmpRoot();
+    enableCascade(root);
     const goal = tools(root).get("graphhopper_goal");
     const out = await goal!.execute(
       { action: "start", title: "t", strong: true },
@@ -121,6 +132,7 @@ describe("plugin tool: strong モード（design g-mwfnlpr9）", () => {
 
   test("complete で strong_mode が false に戻る", async () => {
     const root = tmpRoot();
+    enableCascade(root);
     await tools(root)
       .get("graphhopper_goal")!
       .execute({ action: "start", title: "t", strong: true }, { sessionID: "s1" });
@@ -1069,7 +1081,11 @@ describe("plugin: graphhopper_diag（design g-mwiocibp 判断2）", () => {
     const root = await gitRoot();
     startGoal(root, "diag timeout", "s1");
     const st = await import("./state");
-    const run = await st.runDiagCommand(root, "sleep 5", 100);
+    const t0 = Date.now();
+    /* 孫を確実に作る形（`sh -c 'sleep 3'` は exec 最適化で孫が生じないことがある。design g-mwu1q953）。
+     * 孫が出力の管をつかんだまま残るので、sh だけを殺す実装だと timeoutMs を大きく超えて戻る */
+    const run = await st.runDiagCommand(root, "sh -c 'sleep 3; true'", 100);
+    expect(Date.now() - t0).toBeLessThan(2000);
     expect(run.status).toBe("timeout");
     expect(run.exitCode).toBeNull();
     const w = st.writeDiagFile(root, st.getActive(root)!.goal.id, run, null);

@@ -2223,6 +2223,25 @@ describe("退避diff掃除（complete/clear）", () => {
 });
 
 describe("初期脏れsnapshot（baseline誤認防止）", () => {
+  test("同じミリ秒に 2 つ startGoal しても goal ID が衝突しない（design g-mwu1q953）", async () => {
+    const s = await import("./state");
+    const root = tmpRoot();
+    const realNow = Date.now;
+    Date.now = () => 1_700_000_000_000;
+    try {
+      const a = s.startGoal(root, "a", "s1");
+      const b = s.startGoal(root, "b", "s2");
+      expect(a.goal.id).not.toBe(b.goal.id);
+      const goals = s.readGoals(root);
+      expect(goals.goals.map((g) => g.id).sort()).toEqual(
+        [a.goal.id, b.goal.id].sort(),
+      );
+      expect(goals.active).toBe(b.goal.id);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
   test("effectiveDiffLines: 減算・floor・legacy", async () => {
     const s = await import("./state");
     expect(s.effectiveDiffLines(10, 3)).toBe(7);

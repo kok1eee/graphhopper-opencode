@@ -1273,6 +1273,15 @@ export function getActive(root: string): ActiveLoop | null {
   return { goal, state: readState(root) };
 }
 
+/** goal id を作る。時刻だけだと同じミリ秒に 2 つ作ったとき衝突し、再開で別の goal を拾う
+ * （CI で発覚。design g-mwu1q953）。空くまで時刻を進める。 */
+function newGoalId(goals: GoalsFile): string {
+  const taken = new Set(goals.goals.map((g) => g.id));
+  let ms = Date.now();
+  while (taken.has(`g-${ms.toString(36)}`)) ms += 1;
+  return `g-${ms.toString(36)}`;
+}
+
 export function startGoal(
   root: string,
   title: string,
@@ -1281,7 +1290,7 @@ export function startGoal(
 ): ActiveLoop {
   const goals = readGoals(root);
   const goal: Goal = {
-    id: `g-${Date.now().toString(36)}`,
+    id: newGoalId(goals),
     title,
     status: "active",
     created_at: new Date().toISOString(),
@@ -3306,6 +3315,8 @@ export async function runDiagCommand(
       stdout: "pipe",
       stderr: "pipe",
       stdin: "ignore",
+      /* 時間切れでプロセスグループごと止めるため（孫も残さない。design g-mwu1q953） */
+      detached: true,
     });
   } catch (e) {
     return {
@@ -3318,19 +3329,47 @@ export async function runDiagCommand(
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
+    /* sh だけでなく孫（sh -c の中の実際のコマンド）も止める。孫が出力の管をつかんだまま残ると
+     * 診断が timeoutMs を大きく超えて戻らない（CI で発覚。design g-mwu1q953）。
+     * detached で起動しているので、プロセスグループごと殺す */
     try {
-      proc.kill("SIGKILL");
+      process.kill(-proc.pid, "SIGKILL");
     } catch {
-      // kill失敗は無視（timeout の事実はファイルに残る）
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+        // kill失敗は無視（timeout の事実はファイルに残る）
+      }
     }
   }, timeoutMs);
-  const [out, err] = await Promise.all([
-    new Response(proc.stdout as ReadableStream).text(),
-    new Response(proc.stderr as ReadableStream).text(),
+  /* 出力は読みながら溜める */
+  const outChunks: Uint8Array[] = [];
+  const errChunks: Uint8Array[] = [];
+  const drain = async (
+    stream: ReadableStream<Uint8Array>,
+    sink: Uint8Array[],
+  ): Promise<void> => {
+    const reader = stream.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      if (value) sink.push(value);
+    }
+  };
+  const drained = Promise.all([
+    drain(proc.stdout as ReadableStream<Uint8Array>, outChunks),
+    drain(proc.stderr as ReadableStream<Uint8Array>, errChunks),
   ]);
   const code = await proc.exited;
   clearTimeout(timer);
-  const output = [out, err].filter(Boolean).join("\n");
+  /* 通常終了は読み終わりまで待つ。時間切れはグループごと殺しているので普通はすぐ閉じるが、
+   * killできなかった場合に備えて 1 秒で諦める（出力が欠けても timeout の事実は残す） */
+  if (!timedOut) await drained;
+  else await Promise.race([drained, new Promise((r) => setTimeout(r, 1000))]);
+  const output = [outChunks, errChunks]
+    .map((chunks) => Buffer.concat(chunks).toString("utf8"))
+    .filter(Boolean)
+    .join("\n");
   if (timedOut) return { status: "timeout", command: cmd, exitCode: null, output };
   return { status: code === 0 ? "passed" : "failed", command: cmd, exitCode: code, output };
 }
