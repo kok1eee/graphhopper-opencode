@@ -189,7 +189,6 @@ export function checkCatalogPolicy(input: {
     baseline?: string;
     escalate?: string;
     expert?: string;
-    strong?: string;
     main_fallback?: string;
     phase_models?: Record<string, string>;
     /** legacy の escalate も readConfig が quality へマージするため検査する */
@@ -214,7 +213,6 @@ export function checkCatalogPolicy(input: {
       ["cascade.baseline", c.baseline],
       ["cascade.escalate", c.escalate],
       ["cascade.expert", c.expert],
-      ["cascade.strong", c.strong],
       ["cascade.main_fallback", c.main_fallback],
       ...Object.entries(c.phase_models ?? {}).map(
         ([k, v]) => [`cascade.phase_models.${k}`, v] as [string, string],

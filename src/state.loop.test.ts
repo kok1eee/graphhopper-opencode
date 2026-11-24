@@ -2443,21 +2443,6 @@ describe("goal の decision_id（セッション限定）", () => {
   });
 });
 
-describe("strong モードの state（design g-mwfnlpr9）", () => {
-  test("pause→別goal→resume で strong_mode が復元される", () => {
-    const root = tmpRoot();
-    const g1 = startGoal(root, "first", "s1", { strong: true }).goal;
-    pauseGoal(root);
-    startGoal(root, "second", "s2");
-    const p = join(root, ".graphhopper", "goals.json");
-    const gj = JSON.parse(readFileSync(p, "utf8")) as { active: string | null };
-    gj.active = g1.id;
-    writeFileSync(p, JSON.stringify(gj), "utf8");
-    const r = resumeGoal(root, "s1");
-    expect(r?.state.strong_mode).toBe(true);
-  });
-});
-
 describe("baseline の一元解決（design g-mwfltxyt）", () => {
   test("start > router > capture の順で解決する", async () => {
     const s = await import("./state");

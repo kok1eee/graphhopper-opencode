@@ -79,16 +79,11 @@ export function resolveLevel(input: {
   failStreak: number;
   currentLevel: CascadeLevel | null;
   config: CascadeConfig;
-  /** goal start の strong: true。difficulty に関係なく escalated にする */
-  strongMode?: boolean;
 }): { level: CascadeLevel; reason: string } {
   const { difficulty, failStreak, currentLevel, config } = input;
   if (!config.enabled) return { level: "baseline", reason: "cascade disabled" };
   if (currentLevel === "escalated") {
     return { level: "escalated", reason: "already escalated（ラチェット）" };
-  }
-  if (input.strongMode) {
-    return { level: "escalated", reason: "strong mode" };
   }
   if (config.fail_threshold > 0 && failStreak >= config.fail_threshold) {
     return {
@@ -139,23 +134,16 @@ export function resolveTargetModel(input: {
   /** goal 開始時のモデル（cascade.restore） */
   main?: ModelRef | null;
   checkpoint?: string | null;
-  /** goal start の strong: true。phase_models を無視して strong のモデルを使う */
-  strong?: boolean;
 }): { ref: ModelRef | null; raw: string; source: "phase" | "level" | "main" } {
   const levelRaw = input.level === "escalated" ? input.config.escalate : input.config.baseline;
   const wantMain = input.checkpoint === "reviewing" && input.phase === "implementing";
   const phaseRaw = input.phase ? input.config.phase_models?.[input.phase] : undefined;
-  /* 途中確認（reviewing）は strong でも main に戻す（方向を見る仕組みを止めない） */
-  if (wantMain || (!input.strong && phaseRaw?.trim() === "main")) {
+  /* 途中確認（reviewing）は main に戻す（方向を見る仕組みを止めない） */
+  if (wantMain || phaseRaw?.trim() === "main") {
     const main = resolveMainModel({ main: input.main ?? null, config: input.config });
     if (main.ref) return { ref: main.ref, raw: main.raw, source: "main" };
     /* main が解決できないときは level へフォールバック（切替しないより安い） */
     return { ref: parseCascadeModel(levelRaw), raw: levelRaw, source: "level" };
-  }
-  if (input.strong) {
-    const strongRaw =
-      input.config.strong ?? input.config.expert ?? input.config.escalate;
-    return { ref: parseCascadeModel(strongRaw), raw: strongRaw, source: "level" };
   }
   const phaseRef = parseCascadeModel(phaseRaw);
   if (phaseRaw && phaseRef) return { ref: phaseRef, raw: phaseRaw, source: "phase" };
@@ -177,8 +165,6 @@ export async function applyCascade(
     phase?: string | null;
     /** checkpoint を引き継ぐ（syncCascade の書き込みで消さない） */
     checkpoint?: CascadeState["checkpoint"];
-    /** goal start の strong: true */
-    strong?: boolean;
   },
 ): Promise<CascadeState | null> {
   /* restore は最初の適用時に固定する（以後の main 解決の基準になる） */
@@ -191,7 +177,6 @@ export async function applyCascade(
     config: input.config,
     main: restore,
     checkpoint: checkpoint ?? null,
-    strong: input.strong === true,
   }).ref;
   if (!target) return null;
 

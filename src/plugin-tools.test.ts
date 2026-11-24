@@ -104,53 +104,6 @@ const DESIGN_WITH_TASKS = compliantDesignDoc({
   tasks: ["- [ ] T1（判断1）: 実装する", "- [ ] T2（判断1）: テストを書く"],
 });
 
-describe("plugin tool: strong モード（design g-mwfnlpr9）", () => {
-  /** strong は cascade が有効なときだけ効く。手元の全体設定に頼らず、project config で有効にする */
-  function enableCascade(root: string): void {
-    mkdirSync(join(root, ".graphhopper"), { recursive: true });
-    writeFileSync(
-      join(root, ".graphhopper", "config.json"),
-      JSON.stringify({ cascade: { enabled: true } }),
-      "utf8",
-    );
-  }
-
-  test("start(strong) で strong_mode が入り status に出る", async () => {
-    const root = tmpRoot();
-    enableCascade(root);
-    const goal = tools(root).get("graphhopper_goal");
-    const out = await goal!.execute(
-      { action: "start", title: "t", strong: true },
-      { sessionID: "s1" },
-    );
-    expect(textOf(out)).toContain("strong: on");
-    const status = await tools(root)
-      .get("graphhopper_status")!
-      .execute({}, { sessionID: "s1" });
-    expect(textOf(status)).toContain("strong: on");
-  });
-
-  test("complete で strong_mode が false に戻る", async () => {
-    const root = tmpRoot();
-    enableCascade(root);
-    await tools(root)
-      .get("graphhopper_goal")!
-      .execute({ action: "start", title: "t", strong: true }, { sessionID: "s1" });
-    await seedPlan(root);
-    await opsTools(root)
-      .get("graphhopper_verifier_set")!
-      .execute(
-        { results: [{ lens: "agreement", level: "clean" }], reason: "ok" },
-        { sessionID: "s1" },
-      );
-    const out = await tools(root)
-      .get("graphhopper_goal")!
-      .execute({ action: "complete" }, { sessionID: "s1" });
-    expect(textOf(out)).toContain("completed");
-    expect(readState(root).strong_mode).toBe(false);
-  });
-});
-
 describe("plugin tool: usability ゲート（design g-mwfltxyt）", () => {
   test("skipped は reason 必須、clean は status に出る", async () => {
     const root = tmpRoot();

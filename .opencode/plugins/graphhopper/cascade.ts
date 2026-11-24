@@ -67,7 +67,7 @@ export async function syncCascadeResult(gh: Gh): Promise<SyncCascadeResult> {
   const fail = (note: string): SyncCascadeResult => ({ note, failed: true });
   let active = state.getActive(gh.root);
   if (!active) return ok(null);
-  // active 以外（done/paused）は cascade を触らない（strong の残骸で再昇格しない）
+  // active 以外（done/paused）は cascade を触らない
   if (active.goal.status !== "active") return ok(null);
   /* implementing を外れたら途中確認は終わり（polish は main 指定なので不要） */
   const cp = active.state.cascade?.checkpoint;
@@ -90,7 +90,6 @@ export async function syncCascadeResult(gh: Gh): Promise<SyncCascadeResult> {
     failStreak: active.state.fail_streak,
     currentLevel: active.state.cascade?.level ?? null,
     config: config.cascade,
-    strongMode: active.state.strong_mode,
   });
 
   const phase = active.state.phase;
@@ -104,7 +103,6 @@ export async function syncCascadeResult(gh: Gh): Promise<SyncCascadeResult> {
     config: config.cascade,
     main,
     checkpoint: current?.checkpoint ?? null,
-    strong: active.state.strong_mode,
   });
   const targetRef = resolved.ref;
   if (!targetRef) {
@@ -138,7 +136,6 @@ export async function syncCascadeResult(gh: Gh): Promise<SyncCascadeResult> {
     config: config.cascade,
     previous: current,
     phase,
-    strong: active.state.strong_mode,
   });
   if (!next) return fail("cascade: モデル不明のため切替せず");
   const fromModel =

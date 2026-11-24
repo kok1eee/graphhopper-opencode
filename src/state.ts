@@ -88,8 +88,6 @@ export interface GoalSnapshot {
   gate_modes: GateModes | null;
   /** goal 開始時に凍結した採点基準の sha1（design g-mwmnvx3x 判断1）。null＝未凍結 */
   rubric_hash: string | null;
-  /** goal start の strong: true（goal の間だけ強いモデルで回す） */
-  strong_mode: boolean;
 }
 
 /** goal出来栄えの機械採点。式はv1で固定し、breakdownで透明化する（調整は式ごと変える） */
@@ -301,8 +299,6 @@ export interface LoopState {
   gate_modes: GateModes | null;
   /** goal 開始時に凍結した採点基準の sha1（design g-mwmnvx3x 判断1）。null＝未凍結 */
   rubric_hash: string | null;
-  /** goal start の strong: true（goal の間だけ強いモデルで回す） */
-  strong_mode: boolean;
   /** 入口判定の難易度。null＝未判定（昇格しない） */
   difficulty: Difficulty | null;
   /** 入口判定(decide)の較正ログ id。decisions.jsonl の decide 行と outcome 行を結ぶ。null＝未判定 */
@@ -331,8 +327,6 @@ export interface CascadeConfig {
   escalate: string;
   /** お手上げ段（oracle 用）のモデル（省略時は escalate にフォールバック） */
   expert?: string;
-  /** strong モード（goal start の strong: true）で使うモデル。省略時は expert→escalate */
-  strong?: string;
   /** 昇格する難易度 */
   escalate_on: Difficulty[];
   /** 連続失敗がこの数に達したら難易度に関係なく昇格（0以下で無効） */
@@ -698,7 +692,6 @@ export type HistoryEvent =
       type: "goal_start";
       goal: string;
       title: string;
-      strong?: boolean;
       /** 直前の入口判定（decisions.jsonl の decide 行）の id。判定と結果の突き合わせ用（g-mwn9al7r） */
       decision_id?: string | null;
     }
@@ -1207,7 +1200,6 @@ function emptyState(): LoopState {
     baseline_source: null,
     gate_modes: null,
     rubric_hash: null,
-    strong_mode: false,
     updated_at: new Date().toISOString(),
   };
 }
@@ -1286,7 +1278,7 @@ export function startGoal(
   root: string,
   title: string,
   sessionID: string,
-  opts?: { strong?: boolean; difficulty?: Difficulty | null },
+  opts?: { difficulty?: Difficulty | null },
 ): ActiveLoop {
   const goals = readGoals(root);
   const goal: Goal = {
@@ -1307,7 +1299,6 @@ export function startGoal(
     ...emptyState(),
     goal_id: goal.id,
     session_id: sessionID,
-    strong_mode: opts?.strong === true,
   };
   /* decision_id は「このセッションの成功 decide」に結ぶ。グローバルな last_decision は
    * 他セッションの依頼を拾うことがあり、d1 障害中は特に誤結合になる */
@@ -1321,7 +1312,6 @@ export function startGoal(
     type: "goal_start",
     goal: goal.id,
     title: goal.title,
-    ...(opts?.strong === true ? { strong: true } : {}),
     decision_id: next.decision_id,
   });
   // design scaffold: 骨格を自動生成（既存があれば壊さない）。
@@ -1370,7 +1360,6 @@ export function pauseGoal(root: string): ActiveLoop | null {
         baseline_source: state.baseline_source,
         gate_modes: state.gate_modes,
         rubric_hash: state.rubric_hash,
-        strong_mode: state.strong_mode,
       },
     },
     // 人間による明示的な操作なのでloop停止フラグも解除（pause自体が駆動を止める）
@@ -1437,7 +1426,6 @@ export function resumeGoal(
               baseline_source: snap.baseline_source ?? null,
               gate_modes: snap.gate_modes ?? null,
               rubric_hash: snap.rubric_hash ?? null,
-              strong_mode: snap.strong_mode ?? false,
             }
           : {}),
       },
@@ -1468,7 +1456,6 @@ export function completeGoal(
       phase: "done",
       loop_streak: 0,
       loop_stopped: false,
-      strong_mode: false,
     },
   }));
   if (r) {
@@ -1707,7 +1694,6 @@ export function clearActiveGoal(root: string): Goal | null {
     loop_streak: 0,
     loop_stopped: false,
     loop_stop_count: 0,
-    strong_mode: false,
   });
   return goal;
 }

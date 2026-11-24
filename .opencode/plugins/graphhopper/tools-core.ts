@@ -142,16 +142,11 @@ export function registerCoreTools(
           description:
             "complete 時に verifier 未clearでも強制完了する、または resume 時に loop_stop_max のブロックを明示的に無視し、「止めたときと同じ状態なら 1 ターンでまた止める」印（stuck_key）も消す（人間の判断が見える場合のみ。監査ログに loop_resume_forced が記録される）",
         },
-        strong: {
-          type: "boolean",
-          description:
-            "action=start のとき、goal の間ずっと強いモデル（cascade.strong→expert→escalate）で回す。cascade が無効なら効かない",
-        },
       },
       ["action"],
     ),
     execute: async (input: unknown, context: unknown) => {
-      const args = input as { action: string; title?: string; force?: boolean; strong?: boolean };
+      const args = input as { action: string; title?: string; force?: boolean };
       const sessionID = sess(gh, context as Ctx);
       switch (args.action) {
         case "start": {
@@ -174,7 +169,6 @@ export function registerCoreTools(
            * 待たずに null を返す。上限 1.0 秒。 */
           const judged = await judgeGoalDifficulty(root, sessionID || null, args.title);
           const a = state.startGoal(root, args.title, sessionID, {
-            strong: args.strong === true,
             difficulty: judged,
           });
           try {
@@ -246,11 +240,6 @@ export function registerCoreTools(
             cascadeBase && cfg.cascade.enabled
               ? `${cascadeBase}（注: 判定nodeは cascade.agents.quality の子セッションだけ昇格モデルに切替）`
               : cascadeBase;
-          const strongNote = args.strong
-            ? cfg.cascade.enabled
-              ? "strong: on（goal の間は cascade.strong→expert→escalate）"
-              : "strong: 指定されたが cascade が無効のため効かない"
-            : "";
           /* baseline の由来を見える化する（design g-mwkgfssi 判断3）。
            * 前 goal は baseline が親 commit になり、今回の変更が実効 diff から漏れた */
           const bs = started.state;
@@ -262,7 +251,7 @@ export function registerCoreTools(
               }`
             : "baseline: 取得できず（差分ゲートは fail-open・未 commit があると実効 diff が漏れうる）";
           return text(
-            `goal started: "${started.goal.title}" (${started.goal.id})\n${started.state.difficulty ? `difficulty=${started.state.difficulty}\n` : ""}phase: designing${cascadeNote ? `\n${cascadeNote}` : ""}${strongNote ? `\n${strongNote}` : ""}${intentNote ? `\n${intentNote}` : ""}\n${baselineNote}${rubricNote ? `\n${rubricNote}` : ""}\n次: ${PHASE_ACTION["designing"]}`,
+            `goal started: "${started.goal.title}" (${started.goal.id})\n${started.state.difficulty ? `difficulty=${started.state.difficulty}\n` : ""}phase: designing${cascadeNote ? `\n${cascadeNote}` : ""}${intentNote ? `\n${intentNote}` : ""}\n${baselineNote}${rubricNote ? `\n${rubricNote}` : ""}\n次: ${PHASE_ACTION["designing"]}`,
           );
         }
         case "pause": {
@@ -458,7 +447,6 @@ export function registerCoreTools(
           `goal: "${a.goal.title}" (${a.goal.id}) [${a.goal.status}]`,
           `phase: ${a.state.phase}`,
           `session: ${a.state.session_id ?? "unbound"}`,
-          ...(a.state.strong_mode ? ["strong: on（cascade.strong→expert→escalate）"] : []),
           a.state.router.route
             ? `router: route=${a.state.router.route} diff_lines=${a.state.router.diff_lines} checked_at=${a.state.router.checked_at}${a.state.router.deep ? ` deep (${a.state.router.deep_reason})` : ""}`
             : "router: (not checked)",
