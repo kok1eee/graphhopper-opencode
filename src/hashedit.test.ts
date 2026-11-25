@@ -562,8 +562,9 @@ describe("continuationText 3段階文面", () => {
       last_verifier: { level: "drift", reason: "r".repeat(500), target: "design", lens: [], at: "" },
     } as never);
     expect(out).toContain("hand-back");
-    expect(out.split("\n").length).toBeLessThanOrEqual(4);
+    expect(out.split("\n").length).toBeLessThanOrEqual(5);
     expect(out).toContain("…");
+    expect(out).toContain("question ツール");
   });
 
   test("静穏時は最小", async () => {
@@ -571,6 +572,7 @@ describe("continuationText 3段階文面", () => {
     const out = continuationText(goal, { ...base } as never);
     expect(out.split("\n").length).toBeLessThanOrEqual(3);
     expect(out).not.toContain("eval_cmd");
+    expect(out).toContain("question ツール");
   });
 
   test("通常時は丸めあり", async () => {
@@ -583,6 +585,14 @@ describe("continuationText 3段階文面", () => {
     expect(out).toContain("fail_streak: 2");
     expect(out).toContain("…");
     expect(out.length).toBeLessThan(900);
+    expect(out).toContain("question ツール");
+  });
+
+  test("implementing・polish の案内は question ツールで聞くよう指示する（designing は本文で聞く）", async () => {
+    const g = await import("./gate");
+    expect(g.PHASE_ACTION.implementing).toContain(g.ASK_VIA_QUESTION);
+    expect(g.PHASE_ACTION.polish).toContain(g.ASK_VIA_QUESTION);
+    expect(g.PHASE_ACTION.designing).not.toContain(g.ASK_VIA_QUESTION);
   });
 });
 

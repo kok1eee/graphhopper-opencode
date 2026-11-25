@@ -192,6 +192,10 @@ designing は**質問して合意を取る段階**。自動継続は止まる（
   [refs/implementing.md](refs/implementing.md) の `hash` → `edit` レシピで1バッチにできる
 - 詰まったら `graphhopper_invoke(agent: "graphhopper-researcher")` で並列調査。
   外部公式doc裏付けが必要なら `graphhopper-librarian` を使う
+- **ユーザーの返事が要るとき（ファイルの場所・承認・選択）は `question` ツールで聞く**。
+  implementing・polish はターンを終えると自動継続が積まれるため、本文で聞いて止まっても返事を待てず空回りする
+  （stall 上限で pause されるまで続く）。`question` で待っている間はターンが終わらないので、自動継続は走らない。
+  自由記述の答え（パスなど）も、自動で付く「自分で入力」欄で受けられる
 > 詳細は [refs/implementing.md](refs/implementing.md) を読め（implementingに入ったら必読）
 
 ### polish

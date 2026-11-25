@@ -16,6 +16,11 @@ import * as state from "./state";
 import { checkDecisionRecord } from "./record";
 import { todoGateError, todoStoreError } from "./todos";
 
+/* implementing・polish はターン終了で自動継続が積まれるため、本文で質問して止まっても待てない。
+ * question ツールで聞けばターンが終わらないので、返事を待てる */
+export const ASK_VIA_QUESTION =
+  "ユーザーの返事が要るとき（場所・承認・選択）は本文で聞かず question ツールで聞く（本文で聞いてターンを終えると自動継続が空回りする）。";
+
 const DESIGNING_ACTION =
   "ユーザーと合意を取る（grilling）。決める項目ごとに、推奨を添えた質問を本文に書き、答えを待つ（designing の間は自動継続が止まる）。" +
   "答えが出そろったら .graphhopper/plans/<goal-id>.md を「決めたこと／やらないこと／完了の確かめ方」の3見出しで埋め、" +
@@ -29,9 +34,9 @@ const DESIGNING_ACTION =
 export const PHASE_ACTION: Record<state.Phase, string> = {
   designing: DESIGNING_ACTION,
   implementing:
-    "決定記録の「決めたこと」を実装する。長い作業のときは graphhopper_todo(add) で残り作業を置ける（任意）。置いた分は polish の前に done か cancel で閉じる（未完了が残ると polish へ進めない）。goal中のsource編集は graphhopper_edit（hash検証付き）を使え、素のedit/writeはフォールバック。まず graphhopper_set_eval(cmd) で合否を機械判定できるコマンド（テスト/lint/typecheck）を1度設定せよ。設定後はターン終了ごとに自動実行され、passならpolishへ自動遷移、failならfail_streakが機械カウントされ、stuck通知が来たら graphhopper_invoke(agent: 'graphhopper-oracle') に相談する。eval_cmdが無い（機械判定できない）場合のみ graphhopper_attempt(ok, note) の自己申告にフォールバックする。外部公式doc裏付けが必要なら graphhopper_invoke(agent: 'graphhopper-librarian') を使える",
+    "決定記録の「決めたこと」を実装する。長い作業のときは graphhopper_todo(add) で残り作業を置ける（任意）。置いた分は polish の前に done か cancel で閉じる（未完了が残ると polish へ進めない）。goal中のsource編集は graphhopper_edit（hash検証付き）を使え、素のedit/writeはフォールバック。まず graphhopper_set_eval(cmd) で合否を機械判定できるコマンド（テスト/lint/typecheck）を1度設定せよ。設定後はターン終了ごとに自動実行され、passならpolishへ自動遷移、failならfail_streakが機械カウントされ、stuck通知が来たら graphhopper_invoke(agent: 'graphhopper-oracle') に相談する。eval_cmdが無い（機械判定できない）場合のみ graphhopper_attempt(ok, note) の自己申告にフォールバックする。外部公式doc裏付けが必要なら graphhopper_invoke(agent: 'graphhopper-librarian') を使える。" + ASK_VIA_QUESTION,
   polish:
-    "Code Mode のレシピを実行する: skills/graphhopper/refs/verifier.md の recipe: start → recipe: tail を上から順に execute に貼る（advisorは1バッチ、polishは start→simplify適用→tail の2バッチ）。simplify は route=polish のときだけ（router_check の simplify）。適用はメインが Read と edit で行い、critical は挙動不変・局所のみ自動、high は人間確認、medium/note は報告のみ。順序は diag → diff_stash → verify（graphhopper_verify が指紋3つを照合する）。第三者チェック（verifier）は省略不可、level/target の集約は verifier_set が機械で行う",
+    "Code Mode のレシピを実行する: skills/graphhopper/refs/verifier.md の recipe: start → recipe: tail を上から順に execute に貼る（advisorは1バッチ、polishは start→simplify適用→tail の2バッチ）。simplify は route=polish のときだけ（router_check の simplify）。適用はメインが Read と edit で行い、critical は挙動不変・局所のみ自動、high は人間確認、medium/note は報告のみ。順序は diag → diff_stash → verify（graphhopper_verify が指紋3つを照合する）。第三者チェック（verifier）は省略不可、level/target の集約は verifier_set が機械で行う。" + ASK_VIA_QUESTION,
   done: "完了済み。graphhopper_goal(action: 'complete') を確認",
 };
 
@@ -423,6 +428,7 @@ export function continuationText(goal: state.Goal, s: state.LoopState): string {
       `→ 人間の hand-back 待ち (drift -> ${v.target})`,
       trunc(v.reason, TRUNC_REASON),
       notes,
+      ASK_VIA_QUESTION,
     ]
       .filter(Boolean)
       .join("\n");
@@ -434,7 +440,7 @@ export function continuationText(goal: state.Goal, s: state.LoopState): string {
       head,
       notes,
       `Next: ${PHASE_ACTION_SHORT[s.phase]}`,
-      "フェーズのexit条件を満たしたら graphhopper_phase で遷移する。",
+      `フェーズのexit条件を満たしたら graphhopper_phase で遷移する。${ASK_VIA_QUESTION}`,
     ]
       .filter(Boolean)
       .join("\n");
@@ -452,6 +458,7 @@ export function continuationText(goal: state.Goal, s: state.LoopState): string {
     `Next: ${PHASE_ACTION_SHORT[s.phase]}`,
     "フェーズのexit条件を満たしたら graphhopper_phase で遷移する。",
     "ブロックしたら回らずに理由を述べて停止。完了したら graphhopper_goal(complete)。無駄な空転は禁止。",
+    ASK_VIA_QUESTION,
   ]
     .filter(Boolean)
     .join("\n");
