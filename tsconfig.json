@@ -8,5 +8,5 @@
     "noEmit": true,
     "types": ["bun-types", "node"]
   },
-  "include": ["src/**/*.ts", ".opencode/plugins/**/*.ts"]
+  "include": ["src/**/*.ts", ".opencode/plugins/**/*.ts", "herdr-plugin/**/*.ts"]
 }

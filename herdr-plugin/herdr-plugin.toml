@@ -1,0 +1,21 @@
+id = "graphhopper.board"
+name = "graphhopper board"
+version = "0.1.0"
+min_herdr_version = "0.9.5"
+description = "graphhopper の goal を全リポジトリ横断で一覧・詳細表示し、該当ワークスペースへ移る"
+platforms = ["macos", "linux"]
+
+[[panes]]
+id = "board"
+title = "graphhopper board"
+placement = "popup"
+width = "90%"
+height = "85%"
+command = ["bun", "run", "board.ts"]
+
+# キー割当から開くための入口（herdr の設定で plugin_action に graphhopper.board.open を指定する）
+[[actions]]
+id = "open"
+title = "graphhopper board を開く"
+contexts = ["workspace"]
+command = ["sh", "open.sh"]
