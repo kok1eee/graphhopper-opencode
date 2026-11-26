@@ -209,11 +209,27 @@ export function extractJsonBlock(text: string): Record<string, unknown> | null {
   }
 }
 
+/** 判定の json フェンスを探す。level を持つ最初のフェンスを採る（無ければ null）。
+ * 判定は本文より先に出させる（本文が出力上限で切れても判定は残る）。
+ * 旧規約（末尾に出す）で凍結した goal も、本文に level 付きのフェンスが無い限り同じ結果になる */
+export function extractVerdictBlock(text: string): Record<string, unknown> | null {
+  const re = /```json\s*\n([\s\S]*?)```/g;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    try {
+      const v = JSON.parse(m[1] ?? "") as unknown;
+      if (v && typeof v === "object" && !Array.isArray(v) && "level" in v) return v as Record<string, unknown>;
+    } catch {
+      // 壊れたフェンスは飛ばす
+    }
+  }
+  return null;
+}
+
 /** 判定の json フェンス規約（prompt に足す。パースは parseLensVerdict） */
 export const VERDICT_CONTRACT = [
   "",
   "## 出力形式（必須）",
-  "本文（findings と各 finding の証拠状態）を書いたあと、最後に次の形の json フェンスを1つだけ出す。",
+  "出力の最初に、次の形の json フェンスを1つだけ出す（本文より先。本文が長くて途中で切れても判定を読めるようにするため）。そのあとに本文（findings と各 finding の証拠状態）を書く。",
   "```json",
   '{"level":"clean","summary":"判定の要約1〜2文","severity":{"must_fix":0,"should_fix":0,"nit":0,"pre_existing":0}}',
   "```",
@@ -221,7 +237,7 @@ export const VERDICT_CONTRACT = [
   "level=clean なら target は書かない。drift なら target は必須（巻き戻し先）。",
   "severity は任意だが、書くなら findings の件数を数えて入れる（must_fix=直さないと出せない / should_fix / nit / pre_existing=元からある問題）。",
   "severity は重要度の目安で、level/target の判定は変えない。数えられないなら省略する（未申告として扱う。0 と書かない）。",
-  "findings の全文は本文に書き、json には入れない。json はフェンス1つだけ。",
+  "findings の全文は本文に書き、json には入れない。json はフェンス1つだけ。本文は要点に絞る（同じ指摘を繰り返さない）。",
   "指摘ファイル（前回の指摘）を渡されたときは、json に prior を足す: \"prior\":{\"valid\":妥当だった件数,\"invalid\":誤りだった件数,\"unresolved\":まだ直っていない件数}。",
   "unresolved に数えるのは、残っていると clean にできない指摘だけ（1 件でもあれば drift になる）。clean を妨げない指摘（nit・pre_existing）が残っていても数えない。",
 ].join("\n");
@@ -257,8 +273,8 @@ export type ParseResult =
 
 /** verifier の出力から判定を取り出す。読めなければ理由を返す（throwしない） */
 export function parseLensVerdict(output: string): ParseResult {
-  const obj = extractJsonBlock(output);
-  if (!obj) return { ok: false, reason: "末尾に json フェンスが無い（判定を読めない）" };
+  const obj = extractVerdictBlock(output);
+  if (!obj) return { ok: false, reason: "判定の json フェンス（level を含む）が無い（判定を読めない）" };
   const level = obj["level"];
   if (level !== "clean" && level !== "drift") {
     return { ok: false, reason: `level が不正: ${String(level)}` };

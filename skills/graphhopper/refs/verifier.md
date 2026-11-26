@@ -128,7 +128,7 @@ return { stop: "clean", summaries: v.summaries, completed };
   注意は不要（background にならない）
 - **前提の照合**: 退避 diff・診断・現在の diff の指紋が3つ揃わなければ `verify` は throw する。
   古い diff を検証したまま complete で初めて止まる、という無駄が出ない
-- **判定の読み取り**: 出力契約（末尾の json フェンス `level`/`target`/`summary`）は `verify` が
+- **判定の読み取り**: 出力契約（出力の最初に出す json フェンス `level`/`target`/`summary`。本文が出力上限で切れても判定は読める）は `verify` が
   prompt に足し、`verify` が読む。読めなければ `missing` に入り、記録に進まない
 - **集約**: `level`/`target` の決定は `verifier_set` の機械集約（`state.aggregateVerdicts`）。
   レシピは `recorded.level` を見るだけで、メインの裁量で drift を握り潰せない

@@ -1605,6 +1605,15 @@ describe("verify: prompt 組み立てと判定の読み取り（純粋層）", (
     expect(v.invokeFailure("finding: src/a.ts:1 で error: を握り潰す\n```json\n{}")).toBeNull();
   });
 
+  test("parseLensVerdict: 判定が先頭なら本文が途中で切れても読める・本文の level なしフェンスは無視", async () => {
+    const v = await import("./verify");
+    const cut = '```json\n{"level":"drift","target":"implementing","summary":"s"}\n```\n## findings\n```json\n{"x":1}\n```\n- a.ts:1 で途中で切れ```ts\nconst a =';
+    expect(v.parseLensVerdict(cut)).toMatchObject({ ok: true, verdict: { level: "drift", target: "implementing" } });
+    const legacy = '本文\n```json\n{"x":1}\n```\n```json\n{"level":"clean","summary":"ok"}\n```';
+    expect(v.parseLensVerdict(legacy)).toMatchObject({ ok: true, verdict: { level: "clean" } });
+    expect(v.VERDICT_CONTRACT).toContain("出力の最初に");
+  });
+
   test("extractJsonBlock: 最後のフェンスを採る・フェンス無しと壊れた JSON は null", async () => {
     const v = await import("./verify");
     const t = '```json\n{"a":1}\n```\n本文\n```json\n{"a":2}\n```';
